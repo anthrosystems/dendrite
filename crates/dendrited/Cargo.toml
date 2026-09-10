@@ -1,0 +1,9 @@
+[package]
+name = "dendrited"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dendrite-memory = { path = "../dendrite-memory" }
+dendrite-protocol = { path = "../dendrite-protocol" }
+rusqlite = { version = "0.37", features = ["bundled"] }

@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/dendrited",
+    "crates/dendrite-cli",
+    "crates/dendrite-memory",
+    "crates/dendrite-action",
+    "crates/dendrite-guard",
+    "crates/dendrite-updater",
+    "crates/dendrite-protocol",
+]
+resolver = "2"
