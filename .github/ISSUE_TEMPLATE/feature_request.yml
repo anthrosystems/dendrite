@@ -1,0 +1,62 @@
+name: Feature request
+description: Suggest an improvement or new capability for Dendrite.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem or limitation would this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behaviour or interface you would like.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - dendrited
+        - dendrite-memory
+        - dendrite-action
+        - dendrite-guard
+        - dendrite-updater
+        - dendrite-protocol
+        - dendrite-cli
+        - Linux telemetry
+        - Packaging / deployment
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional alternatives or workarounds you have considered.
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security implications
+      description: |
+        If relevant, explain how this affects authority, privilege, telemetry,
+        privacy, trust, containment, or recovery.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues before opening this request.
+          required: true
