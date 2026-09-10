@@ -235,7 +235,7 @@ fn map_retention(kind: EntityKind) -> RetentionClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dendrite_protocol::{ObservationId, ObjectDescriptor};
+    use dendrite_protocol::{ObjectDescriptor, ObservationId};
 
     fn object(id: &str, kind: EntityKind) -> ObjectDescriptor {
         ObjectDescriptor {
@@ -286,7 +286,10 @@ mod tests {
         let first_outcome = core.ingest_observation(&first).unwrap();
         let second_outcome = core.ingest_observation(&second).unwrap();
 
-        assert_eq!(first_outcome.relationship_id, second_outcome.relationship_id);
+        assert_eq!(
+            first_outcome.relationship_id,
+            second_outcome.relationship_id
+        );
 
         let relationship = core
             .memory()

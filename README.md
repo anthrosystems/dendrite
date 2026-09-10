@@ -1,5 +1,7 @@
 # Dendrite
 
+[![CI](https://github.com/anthrosystems/dendrite/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dendrite/actions/workflows/ci.yml)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![GitHub Release](https://img.shields.io/github/v/release/anthrosystems/dendrite.svg)](https://github.com/anthrosystems/dendrite/releases/latest)
+
 Linux-native endpoint security and threat detection platform with adaptive memory, behavioural analysis, and autonomous response.
 
 Dendrite is an open-source endpoint security project by Anthrosystems. It is designed around an immune-system-inspired architecture: observations are collected from the host, correlated into incidents, enriched through a temporal Memory Graph, evaluated by independent decision components, and only then allowed to progress toward privileged response.

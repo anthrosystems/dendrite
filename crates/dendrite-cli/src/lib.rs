@@ -33,9 +33,7 @@ pub fn render(command: Command) -> String {
         Command::Actions => "Action IPC command scaffolded".into(),
         Command::Health => "Guard health IPC command scaffolded".into(),
         Command::Version => format!("dendrite {}", env!("CARGO_PKG_VERSION")),
-        Command::Help => {
-            "Usage: dendrite <status|incidents|memory|actions|health|version>".into()
-        }
+        Command::Help => "Usage: dendrite <status|incidents|memory|actions|health|version>".into(),
     }
 }
 

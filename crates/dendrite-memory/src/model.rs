@@ -451,8 +451,8 @@ impl MemoryRelationship {
             DecayPolicy::Exponential { rate } => {
                 let remaining_fraction = 1.0 - f64::from(rate.value()) / 100.0;
                 let elapsed_fraction = f64::from(elapsed_percent) / 100.0;
-                let value = f64::from(self.strength.value())
-                    * remaining_fraction.powf(elapsed_fraction);
+                let value =
+                    f64::from(self.strength.value()) * remaining_fraction.powf(elapsed_fraction);
                 let value = value.round().clamp(0.0, 100.0) as u8;
 
                 MemoryStrength::new(value).expect("decayed strength must remain within 0..=100")
@@ -465,7 +465,6 @@ impl MemoryRelationship {
         self.last_seen_at = self.last_seen_at.max(observed_at);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -892,7 +891,6 @@ mod tests {
         assert!(!node.is_purge_eligible(u64::MAX, 0));
     }
 
-
     #[test]
     fn relationship_elapsed_percent_tracks_lifetime() {
         let mut relationship = MemoryRelationship {
@@ -951,5 +949,4 @@ mod tests {
         relationship.reinforcement = None;
         assert_eq!(relationship.effective_strength(200).value(), 50);
     }
-
 }

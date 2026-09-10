@@ -4,7 +4,7 @@ use crate::model::{
     ReinforcementProvenance, ReinforcementReason, RetentionClass,
 };
 use dendrite_protocol::{EvidenceId, IncidentId};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashSet, VecDeque};
 use std::str::FromStr;
 
@@ -28,7 +28,6 @@ pub struct TraversalVisit {
     pub node_id: MemoryNodeId,
     pub depth: usize,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraversalDirection {
@@ -122,10 +121,7 @@ fn decode_retention_class(value: String) -> Result<RetentionClass, StorageError>
     RetentionClass::from_str(&value).map_err(|_| StorageError::InvalidRetentionClass(value))
 }
 
-fn decode_decay_policy(
-    kind: String,
-    rate: Option<u8>,
-) -> Result<DecayPolicy, StorageError> {
+fn decode_decay_policy(kind: String, rate: Option<u8>) -> Result<DecayPolicy, StorageError> {
     DecayPolicy::from_parts(&kind, rate).ok_or(StorageError::InvalidDecayPolicy { kind, rate })
 }
 
@@ -591,16 +587,15 @@ impl MemoryStore {
         )?;
 
         let ids = statement
-            .query_map(params![&node_id.0, &node_id.0], |row| row.get::<_, String>(0))?
+            .query_map(params![&node_id.0, &node_id.0], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         self.load_relationships(ids)
     }
 
-    pub fn neighbours(
-        &self,
-        node_id: &MemoryNodeId,
-    ) -> Result<Vec<MemoryNodeId>, StorageError> {
+    pub fn neighbours(&self, node_id: &MemoryNodeId) -> Result<Vec<MemoryNodeId>, StorageError> {
         let relationships = self.relationships_for(node_id)?;
         let mut neighbours = relationships
             .into_iter()
@@ -660,7 +655,6 @@ impl MemoryStore {
         Ok(visits)
     }
 
-
     pub fn expired_nodes(&self, now: u64) -> Result<Vec<MemoryNode>, StorageError> {
         let mut statement = self.connection.prepare(
             "
@@ -686,10 +680,7 @@ impl MemoryStore {
         Ok(nodes)
     }
 
-    pub fn expired_relationships(
-        &self,
-        now: u64,
-    ) -> Result<Vec<MemoryRelationship>, StorageError> {
+    pub fn expired_relationships(&self, now: u64) -> Result<Vec<MemoryRelationship>, StorageError> {
         let mut statement = self.connection.prepare(
             "
             SELECT id
@@ -975,9 +966,9 @@ impl MemoryStore {
                 nodes.push(next.clone());
                 let mut relationships = candidate.relationships.clone();
                 relationships.push(relationship.id.clone());
-                let edge_strength = query
-                    .evaluation_time
-                    .map_or(relationship.strength, |now| relationship.effective_strength(now));
+                let edge_strength = query.evaluation_time.map_or(relationship.strength, |now| {
+                    relationship.effective_strength(now)
+                });
                 let weakest_strength = candidate.weakest_strength.min(edge_strength);
                 let weakest_confidence = candidate.weakest_confidence.min(relationship.confidence);
 
@@ -1035,7 +1026,12 @@ impl MemoryStore {
                 .path
                 .score()
                 .cmp(&left.path.score())
-                .then_with(|| left.path.relationships.len().cmp(&right.path.relationships.len()))
+                .then_with(|| {
+                    left.path
+                        .relationships
+                        .len()
+                        .cmp(&right.path.relationships.len())
+                })
                 .then_with(|| left.threat.0.cmp(&right.threat.0))
         });
 
@@ -1061,9 +1057,9 @@ impl MemoryStore {
                     || query.relationship_kinds.contains(&relationship.kind)
             })
             .filter(|relationship| {
-                let strength = query
-                    .evaluation_time
-                    .map_or(relationship.strength, |now| relationship.effective_strength(now));
+                let strength = query.evaluation_time.map_or(relationship.strength, |now| {
+                    relationship.effective_strength(now)
+                });
                 query
                     .minimum_strength
                     .is_none_or(|minimum| strength >= minimum)
@@ -1083,16 +1079,13 @@ impl MemoryStore {
         let mut relationships = Vec::with_capacity(ids.len());
 
         for id in ids {
-            if let Some(relationship) =
-                self.load_relationship(&MemoryRelationshipId(id))?
-            {
+            if let Some(relationship) = self.load_relationship(&MemoryRelationshipId(id))? {
                 relationships.push(relationship);
             }
         }
 
         Ok(relationships)
     }
-
 }
 
 #[cfg(test)]
@@ -1100,11 +1093,7 @@ mod tests {
     use super::*;
     use crate::model::DecayRate;
 
-    fn test_relationship(
-        id: &str,
-        source: &str,
-        target: &str,
-    ) -> MemoryRelationship {
+    fn test_relationship(id: &str, source: &str, target: &str) -> MemoryRelationship {
         MemoryRelationship {
             id: MemoryRelationshipId(id.into()),
             kind: MemoryRelationshipKind::AssociatedWith,
@@ -1124,10 +1113,7 @@ mod tests {
         }
     }
 
-    fn save_test_relationships(
-        store: &MemoryStore,
-        relationships: &[MemoryRelationship],
-    ) {
+    fn save_test_relationships(store: &MemoryStore, relationships: &[MemoryRelationship]) {
         for relationship in relationships {
             store.save_relationship(relationship).unwrap();
         }
@@ -1181,7 +1167,6 @@ mod tests {
 
     #[test]
     fn save_node_persists_memory_node() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1220,7 +1205,6 @@ mod tests {
 
     #[test]
     fn load_node_returns_persisted_memory_node() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1265,7 +1249,6 @@ mod tests {
 
     #[test]
     fn save_node_updates_existing_node_without_changing_created_at() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1319,7 +1302,6 @@ mod tests {
 
     #[test]
     fn save_relationship_persists_memory_relationship() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1364,7 +1346,6 @@ mod tests {
 
     #[test]
     fn load_relationship_returns_persisted_memory_relationship() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1421,7 +1402,6 @@ mod tests {
 
     #[test]
     fn load_relationship_round_trips_without_reinforcement() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1457,7 +1437,6 @@ mod tests {
 
     #[test]
     fn save_relationship_persists_reinforcement_evidence_ids() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1506,7 +1485,6 @@ mod tests {
 
     #[test]
     fn save_relationship_updates_existing_relationship_without_changing_created_at() {
-
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
@@ -1783,10 +1761,7 @@ mod tests {
         let result =
             store.load_relationship(&MemoryRelationshipId("rel-invalid-confidence".into()));
 
-        assert!(matches!(
-            result,
-            Err(StorageError::InvalidConfidence(101))
-        ));
+        assert!(matches!(result, Err(StorageError::InvalidConfidence(101))));
     }
 
     #[test]
@@ -1883,16 +1858,11 @@ mod tests {
             ],
         );
 
-        let neighbours = store
-            .neighbours(&MemoryNodeId("node-a".into()))
-            .unwrap();
+        let neighbours = store.neighbours(&MemoryNodeId("node-a".into())).unwrap();
 
         assert_eq!(
             neighbours,
-            vec![
-                MemoryNodeId("node-b".into()),
-                MemoryNodeId("node-c".into()),
-            ]
+            vec![MemoryNodeId("node-b".into()), MemoryNodeId("node-c".into()),]
         );
     }
 
@@ -1901,14 +1871,9 @@ mod tests {
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
-        save_test_relationships(
-            &store,
-            &[test_relationship("rel-1", "node-x", "node-y")],
-        );
+        save_test_relationships(&store, &[test_relationship("rel-1", "node-x", "node-y")]);
 
-        let neighbours = store
-            .neighbours(&MemoryNodeId("node-a".into()))
-            .unwrap();
+        let neighbours = store.neighbours(&MemoryNodeId("node-a".into())).unwrap();
 
         assert!(neighbours.is_empty());
     }
@@ -1929,14 +1894,10 @@ mod tests {
             ],
         );
 
-        let zero_depth = store
-            .traverse(&MemoryNodeId("node-a".into()), 0)
-            .unwrap();
+        let zero_depth = store.traverse(&MemoryNodeId("node-a".into()), 0).unwrap();
         assert!(zero_depth.is_empty());
 
-        let visits = store
-            .traverse(&MemoryNodeId("node-a".into()), 2)
-            .unwrap();
+        let visits = store.traverse(&MemoryNodeId("node-a".into()), 2).unwrap();
 
         assert_eq!(
             visits,
@@ -1975,9 +1936,7 @@ mod tests {
             ],
         );
 
-        let visits = store
-            .traverse(&MemoryNodeId("node-a".into()), 10)
-            .unwrap();
+        let visits = store.traverse(&MemoryNodeId("node-a".into()), 10).unwrap();
 
         assert_eq!(
             visits,
@@ -1993,7 +1952,6 @@ mod tests {
             ]
         );
     }
-
 
     fn test_node(id: &str, kind: MemoryNodeKind, state: MemoryState) -> MemoryNode {
         MemoryNode {
@@ -2015,7 +1973,8 @@ mod tests {
         let store = MemoryStore::open(":memory:").unwrap();
         store.initialise().unwrap();
 
-        let mut expired_node = test_node("node-expired", MemoryNodeKind::File, MemoryState::Observed);
+        let mut expired_node =
+            test_node("node-expired", MemoryNodeKind::File, MemoryState::Observed);
         expired_node.expires_at = Some(100);
         let mut future_node = test_node("node-future", MemoryNodeKind::File, MemoryState::Observed);
         future_node.expires_at = Some(300);
@@ -2057,9 +2016,16 @@ mod tests {
         let update = store.mark_expired(100).unwrap();
         assert_eq!(update.relationships_expired, 1);
         assert_eq!(update.nodes_expired, 1);
-        assert_eq!(store.load_node(&node.id).unwrap().unwrap().state, MemoryState::Expired);
         assert_eq!(
-            store.load_relationship(&relationship.id).unwrap().unwrap().state,
+            store.load_node(&node.id).unwrap().unwrap().state,
+            MemoryState::Expired
+        );
+        assert_eq!(
+            store
+                .load_relationship(&relationship.id)
+                .unwrap()
+                .unwrap()
+                .state,
             MemoryState::Expired
         );
         assert_eq!(
@@ -2077,7 +2043,11 @@ mod tests {
         node.expires_at = Some(100);
         store.save_node(&node).unwrap();
 
-        let mut persistent = test_node("node-persistent", MemoryNodeKind::Host, MemoryState::Expired);
+        let mut persistent = test_node(
+            "node-persistent",
+            MemoryNodeKind::Host,
+            MemoryState::Expired,
+        );
         persistent.expires_at = Some(100);
         persistent.retention = RetentionClass::Persistent;
         store.save_node(&persistent).unwrap();
@@ -2107,19 +2077,31 @@ mod tests {
             incident_id: Some(IncidentId("incident-1".into())),
             evidence_ids: vec![EvidenceId("evidence-1".into())],
         };
-        assert!(store
-            .reinforce_relationship(&relationship.id, provenance.clone())
-            .unwrap());
+        assert!(
+            store
+                .reinforce_relationship(&relationship.id, provenance.clone())
+                .unwrap()
+        );
         assert_eq!(
-            store.load_relationship(&relationship.id).unwrap().unwrap().reinforcement,
+            store
+                .load_relationship(&relationship.id)
+                .unwrap()
+                .unwrap()
+                .reinforcement,
             Some(provenance)
         );
 
-        assert!(store
-            .revoke_relationship_reinforcement(&relationship.id)
-            .unwrap());
+        assert!(
+            store
+                .revoke_relationship_reinforcement(&relationship.id)
+                .unwrap()
+        );
         assert_eq!(
-            store.load_relationship(&relationship.id).unwrap().unwrap().reinforcement,
+            store
+                .load_relationship(&relationship.id)
+                .unwrap()
+                .unwrap()
+                .reinforcement,
             None
         );
     }
@@ -2161,7 +2143,9 @@ mod tests {
         save_test_relationships(&store, &[active.clone(), expired]);
 
         assert_eq!(
-            store.active_relationships_for(&MemoryNodeId("node-a".into())).unwrap(),
+            store
+                .active_relationships_for(&MemoryNodeId("node-a".into()))
+                .unwrap(),
             vec![active]
         );
     }
@@ -2183,14 +2167,26 @@ mod tests {
             direction: TraversalDirection::Outgoing,
             ..PathQuery::default()
         };
-        assert!(store
-            .find_path(&MemoryNodeId("node-a".into()), &MemoryNodeId("node-c".into()), &outgoing)
-            .unwrap()
-            .is_some());
-        assert!(store
-            .find_path(&MemoryNodeId("node-c".into()), &MemoryNodeId("node-a".into()), &outgoing)
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .find_path(
+                    &MemoryNodeId("node-a".into()),
+                    &MemoryNodeId("node-c".into()),
+                    &outgoing
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .find_path(
+                    &MemoryNodeId("node-c".into()),
+                    &MemoryNodeId("node-a".into()),
+                    &outgoing
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2211,19 +2207,31 @@ mod tests {
             minimum_confidence: Some(MemoryConfidence::new(70).unwrap()),
             ..PathQuery::default()
         };
-        assert!(store
-            .find_path(&MemoryNodeId("node-a".into()), &MemoryNodeId("node-b".into()), &allowed)
-            .unwrap()
-            .is_some());
+        assert!(
+            store
+                .find_path(
+                    &MemoryNodeId("node-a".into()),
+                    &MemoryNodeId("node-b".into()),
+                    &allowed
+                )
+                .unwrap()
+                .is_some()
+        );
 
         let blocked = PathQuery {
             minimum_confidence: Some(MemoryConfidence::new(71).unwrap()),
             ..allowed
         };
-        assert!(store
-            .find_path(&MemoryNodeId("node-a".into()), &MemoryNodeId("node-b".into()), &blocked)
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .find_path(
+                    &MemoryNodeId("node-a".into()),
+                    &MemoryNodeId("node-b".into()),
+                    &blocked
+                )
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2259,8 +2267,16 @@ mod tests {
         store.initialise().unwrap();
 
         for node in [
-            test_node("threat-high", MemoryNodeKind::Threat, MemoryState::Established),
-            test_node("threat-low", MemoryNodeKind::Threat, MemoryState::Established),
+            test_node(
+                "threat-high",
+                MemoryNodeKind::Threat,
+                MemoryState::Established,
+            ),
+            test_node(
+                "threat-low",
+                MemoryNodeKind::Threat,
+                MemoryState::Established,
+            ),
         ] {
             store.save_node(&node).unwrap();
         }
@@ -2283,7 +2299,6 @@ mod tests {
         assert_eq!(paths[1].threat, MemoryNodeId("threat-low".into()));
         assert_eq!(paths[1].path.score(), 50);
     }
-
 
     #[test]
     fn evaluate_decay_is_non_destructive_and_respects_reinforcement() {
@@ -2331,7 +2346,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn find_path_can_filter_using_effective_decayed_strength() {
         let store = MemoryStore::open(":memory:").unwrap();
@@ -2353,14 +2367,15 @@ mod tests {
             ..PathQuery::default()
         };
 
-        assert!(store
-            .find_path(
-                &MemoryNodeId("node-a".into()),
-                &MemoryNodeId("node-b".into()),
-                &query,
-            )
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .find_path(
+                    &MemoryNodeId("node-a".into()),
+                    &MemoryNodeId("node-b".into()),
+                    &query,
+                )
+                .unwrap()
+                .is_none()
+        );
     }
-
 }
