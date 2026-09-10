@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 dendrite-memory = { path = "../dendrite-memory" }
 dendrite-protocol = { path = "../dendrite-protocol" }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
