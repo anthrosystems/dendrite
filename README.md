@@ -1,152 +1,108 @@
 # Dendrite
 
-[![CI](https://github.com/anthrosystems/dendrite/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dendrite/actions/workflows/ci.yml)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![GitHub Release](https://img.shields.io/github/v/release/anthrosystems/dendrite.svg)](https://github.com/anthrosystems/dendrite/releases/latest)
+[![CI](https://github.com/anthrosystems/dendrite/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dendrite/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-Linux-native endpoint security and threat detection platform with adaptive memory, behavioural analysis, and autonomous response.
+**Dendrite is a Linux-native endpoint security platform built around adaptive host memory, contextual threat reasoning, and constrained response authority.**
 
-Dendrite is an open-source endpoint security project by Anthrosystems. It is designed around an immune-system-inspired architecture: observations are collected from the host, correlated into incidents, enriched through a temporal Memory Graph, evaluated by independent decision components, and only then allowed to progress toward privileged response.
+It is inspired by the human immune system, but the biological language is a design aid rather than a literal implementation model. Dendrite observes a host, builds a model of its **Self**, correlates behaviour through a temporal **Memory Graph**, creates evidence and incidents, and only permits response after independent evaluation, policy, and Guard authority checks.
 
-> Copyright 2026 Anthrosystems
+> **Compromise can remove authority, but cannot create authority.**
 
-## Project status
+Dendrite is an open-source project by Anthrosystems.
 
-Dendrite is under active development.
+## Why Dendrite exists
 
-The current implementation includes:
+Traditional endpoint protection is good at asking whether a file, process, or behaviour is known to be malicious. Dendrite adds another question:
 
-- a Rust workspace containing the core daemon and supporting subsystems;
-- a SQLite-backed temporal Memory Graph;
-- node and relationship lifecycle handling;
-- expiry, purge eligibility, decay, and reinforcement;
-- observation consolidation;
-- graph traversal and bounded breadth-first search;
-- filtered and directional path finding;
-- threat-path discovery and ranking;
-- shared protocol/domain types;
-- daemon-side observation-to-memory integration;
-- incident and evidence-candidate scaffolding;
-- MAGI/quorum decision types;
-- action transaction interfaces;
-- guard/trust-state interfaces;
-- updater/package-manager interfaces;
-- CLI scaffolding.
+> **Does this behaviour belong on this particular host, in this context, at this time?**
 
-Privileged containment, anti-tamper enforcement, authenticated IPC, kernel telemetry, and production package mutation are intentionally not yet implemented.
+That requires more than a flat signature database. Dendrite is designed to accumulate security knowledge over time, distinguish host-specific normality from shared threat knowledge, revise what it believes as evidence changes, and keep detection separate from privileged action.
 
-## Architecture
+A mature Dendrite installation should be able to learn what is normal without becoming dependent on that learning. A newly installed Dendrite must still protect a host even if the machine was already compromised before installation.
 
-The intended high-level flow is:
+## Core flow
 
 ```text
-Host telemetry
-      |
-      v
-  dendrited
-      |
-      v
-Normalised observation
-      |
-      v
-Memory Graph
-      |
-      v
-Detection / correlation
-      |
-      v
-Evidence
-      |
-      v
-Incident
-      |
-      v
-Action proposal
-      |
-      v
-MAGI evaluation
-      |
-      v
-Quorum
-      |
-      v
-Policy
-      |
-      v
+Linux telemetry
+      ↓
+normalised observations
+      ↓
+Memory Graph + Self + threat knowledge
+      ↓
+detection / correlation
+      ↓
+evidence
+      ↓
+incident
+      ↓
+action proposal
+      ↓
+Host / User / Environment evaluation
+      ↓
+quorum
+      ↓
+policy
+      ↓
 Guard authority
-      |
-      v
-Transactional executor
+      ↓
+PREPARE → REVALIDATE → COMMIT → VERIFY
 ```
 
-Dendrite separates detection from authority. A threat finding may create evidence, an incident, or an action proposal, but evidence must never grant itself permission to execute an action.
+Detection can create evidence, incidents, and action proposals. It cannot grant itself authority to execute an action.
 
-The intended action lifecycle is:
+## Current implementation
+
+The repository currently includes:
+
+- Rust workspace with `dendrited`, CLI, Memory Graph, action, Guard, updater, and shared protocol crates;
+- SQLite-backed temporal Memory Graph;
+- memory lifecycle states, retention classes, decay, reinforcement, revocation, traversal, and threat-path reasoning;
+- persistent incidents and evidence with correlation and severity escalation;
+- local Unix-socket IPC and localhost HTTP API;
+- `/proc` process telemetry;
+- filesystem polling fallback;
+- real Linux `fanotify` file telemetry with source attribution where available;
+- bounded operational telemetry history separate from semantic memory;
+- MAGI-style Host/User/Environment evaluation, quorum, and policy decisions;
+- action proposals and transactional action state;
+- Guard trust state, integrity findings, and authority removal;
+- safe non-privileged `observe` and `warn` execution paths;
+- web operator UI with Overview, Activity, Incidents, Threats, Attack Chains, Memory Graph, Relationships, MAGI & Response, Self & Trust, and System Health views.
+
+The current incident severity levels are:
 
 ```text
-PROPOSAL -> PREPARE -> REVALIDATE -> COMMIT -> VERIFY
+LOW
+MEDIUM
+HIGH
+CRITICAL
 ```
 
-TOCTOU-sensitive state must be revalidated before commit.
+The current persisted incident status is `open`; a richer lifecycle such as investigating/contained/resolved/dismissed is planned rather than implemented today.
 
-## MAGI
+## What is planned
 
-Dendrite uses three independent evaluator roles:
+Major planned work includes:
 
-- **Balthasar — Host**
-- **Casper — User**
-- **Melchior — Environment**
+- real eBPF process and network telemetry;
+- mature Self modelling and bootstrap trust/maturity;
+- protection against learning a pre-existing compromise as Self;
+- CVE/package/exposure intelligence;
+- signed threat-knowledge packages (internally, a **ThreatCell** concept);
+- updater/remediation backends with verification and rollback;
+- privileged containment executors;
+- stronger anti-tamper and recovery isolation;
+- ML as a bounded evidence source;
+- containers/Kubernetes awareness;
+- optional MCP integration and later federation.
 
-Evaluator verdicts are:
-
-- `APPROVE`
-- `DENY`
-- `ABSTAIN`
-- `VETO`
-
-Quorum and policy are action-specific. No single detection component should be able to bypass the decision and authority chain.
-
-## Memory Graph
-
-`dendrite-memory` provides Dendrite's temporal, provenance-aware, confidence-aware, decaying Memory Graph.
-
-Memory states currently include:
-
-```text
-OBSERVED
-CORRELATED
-SUPPORTED
-ESTABLISHED
-CONTRADICTED
-SUPERSEDED
-EXPIRED
-REVOKED
-```
-
-The Memory Graph supports:
-
-- typed nodes and relationships;
-- short-term, long-term, and persistent retention;
-- independent node and relationship expiry;
-- relationship-first decay;
-- linear and exponential decay;
-- reinforcement with provenance;
-- observation aggregation;
-- graph neighbours and traversal;
-- directional path queries;
-- filtering by relationship kind, state, strength, and confidence;
-- time-aware effective-strength evaluation;
-- ranked paths to known threat nodes.
-
-Raw events should not become permanent graph edges one-for-one. Repeated observations are consolidated into relationships with fields such as observation count, first/last-seen time, confidence, strength, state, and provenance.
+See [`docs/architecture.md`](docs/architecture.md) for the design and [`docs/ROADMAP.md`](docs/ROADMAP.md) for implementation status.
 
 ## Workspace
 
 ```text
 dendrite/
-├── Cargo.toml
-├── Cargo.lock
-├── README.md
-├── LICENSE
-├── SECURITY.md
 ├── crates/
 │   ├── dendrited/
 │   ├── dendrite-cli/
@@ -155,11 +111,8 @@ dendrite/
 │   ├── dendrite-guard/
 │   ├── dendrite-updater/
 │   └── dendrite-protocol/
+├── ui/
 ├── python/
-│   ├── training/
-│   ├── datasets/
-│   ├── experiments/
-│   └── tools/
 ├── models/
 ├── migrations/
 ├── configs/
@@ -169,108 +122,53 @@ dendrite/
 └── scripts/
 ```
 
-Repository, crate, process, and security boundary are deliberately treated as different concepts.
-
-## Crates
-
-### `dendrited`
-
-Core Dendrite daemon and host telemetry service.
-
-Owns orchestration, observation ingestion, Memory Graph coordination, evidence/incident flow, and the transition toward action proposals.
-
-### `dendrite-cli`
-
-Command-line interface for Dendrite.
-
-The CLI will communicate with Dendrite services through authenticated IPC. The current implementation provides the command hierarchy and placeholder rendering.
-
-### `dendrite-memory`
-
-Dendrite Memory Graph and memory lifecycle.
-
-Provides graph models, SQLite persistence, lifecycle, decay, reinforcement, observation consolidation, traversal, and threat-path reasoning primitives.
-
-### `dendrite-action`
-
-Privileged action execution and containment.
-
-Defines authorisation and transactional execution boundaries. Production destructive executors are deliberately not implemented yet.
-
-### `dendrite-guard`
-
-Independent trust, integrity, and recovery subsystem.
-
-Acts as a separate authority boundary and is intended to protect Dendrite's daemon, configuration, quarantine, databases, models, policy, and telemetry mechanisms.
-
-### `dendrite-updater`
-
-Software update and remediation subsystem.
-
-Defines package-manager, verification, update, and rollback interfaces. Production package mutation is not implemented yet.
-
-### `dendrite-protocol`
-
-Shared domain types and IPC/API protocol definitions.
-
-Contains identifiers, observations, evidence, incidents, action proposals, MAGI/quorum types, trust types, and IPC envelopes.
+The UI lives in the main repository as a first-class root component. Repository, crate, process, and security boundary are deliberately treated as different concepts.
 
 ## Development
 
-Requirements:
-
-- Linux development environment;
-- Rust toolchain installed through `rustup`;
-- SQLite development support if not using the bundled SQLite feature.
-
-Useful checks:
+Backend checks:
 
 ```bash
 cargo fmt --all
-cargo check --workspace
-cargo test --workspace
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-For the Memory Graph specifically:
+UI:
 
 ```bash
-cargo test -p dendrite-memory
+cd ui
+npm install
+npm run build
+npm run dev
 ```
 
-## Python and machine learning
-
-The core runtime is Rust.
-
-Python is reserved for supporting work such as:
-
-- model training;
-- datasets;
-- experiments;
-- telemetry replay;
-- threat-intelligence ingestion;
-- offline Memory Graph analysis;
-- development tooling.
-
-Dovetail may be used for non-security-critical Python workflows, but it must not become part of Dendrite's privileged authority chain.
+The daemon HTTP API defaults to `127.0.0.1:8766`. The development Unix socket defaults to `/tmp/dendrited.sock`.
 
 ## Design principles
 
+- Self is host-specific; threat knowledge can be shared.
+- Unknown is not automatically malicious.
+- Observation alone is not enough to become trusted Self.
 - Detection and action remain separate.
-- Compromise can remove authority, but cannot create authority.
-- Privileged executors expose narrow capabilities rather than arbitrary shell execution.
-- Memory is fallible context, not authority.
-- Evidence carries provenance.
-- Important incident and action history remains auditable.
-- Expiry and visual disappearance are not equivalent to immediate physical deletion.
-- Security-sensitive boundaries should fail closed.
-- Expensive ML should be optional, bounded, and secondary to deterministic/statistical filtering where practical.
+- Evidence is not authority.
+- A compromised component can lose authority but cannot create new authority.
+- Destructive actions require stronger independent agreement than observation-only actions.
+- TOCTOU-sensitive targets are revalidated immediately before commit.
+- Raw telemetry is short-lived; semantic memory is selective and decays.
+- ML is advisory and bounded, never a direct privileged actuator.
+- The UI is a client and must not invent security state.
 
-## Related repositories
+## Documentation
 
-- `anthrosystems/dendrite-ui` — web-based interface for Dendrite endpoint security, threat analysis, incidents, system state, and Memory Graph visualisation.
-- `anthrosystems/dendrite-mcp` — optional MCP integration for Dendrite.
+- [`docs/architecture.md`](docs/architecture.md) — canonical technical architecture
+- [`docs/SYSTEM_MAP.md`](docs/SYSTEM_MAP.md) — end-to-end system diagrams and boundaries
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — implemented, current, and planned work
+- [`docs/HTTP_API.md`](docs/HTTP_API.md) — current local HTTP API
 
 ## Licence
 
-Apache License 2.0.
+Copyright 2026 Anthrosystems.
+
+Licensed under the [Apache License 2.0](LICENSE).
