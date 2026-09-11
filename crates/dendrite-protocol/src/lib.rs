@@ -15,5 +15,11 @@ pub use detection::{
     ObjectDescriptor, Observation, ObservationKind, Severity,
 };
 pub use ids::{ActionProposalId, EvidenceId, IncidentId, ObjectId, ObservationId};
-pub use ipc::{RequestEnvelope, ResponseEnvelope, ResponseStatus};
+pub use ipc::{
+    ActionDetailDto, ActionSummaryDto, CreateActionDto, DaemonStatusDto, EvaluationDto,
+    EvidenceDto, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentSummaryDto,
+    IntegrityFindingDto, IpcRequest, IpcResponse, MemoryNodeDto, MemoryPathDto, RequestEnvelope,
+    ResponseEnvelope, ResponseStatus, TelemetryEventDto, TelemetrySourceDto, TelemetryStatusDto,
+    TransactionEventDto,
+};
 pub use trust::{GuardDecision, IntegrityFinding, IntegritySeverity, TrustState};

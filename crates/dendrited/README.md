@@ -65,3 +65,7 @@ Telemetry collection should remain separate from privileged action execution.
 cargo test -p dendrited
 cargo clippy -p dendrited --all-targets -- -D warnings
 ```
+
+## Batch 1+2 vertical slice
+
+`dendrited` now persists incidents/evidence in SQLite, serves local JSON IPC over a Unix socket, polls `/proc` for newly observed processes, and can poll configured filesystem roots for changes. Configure watched roots with `DENDRITE_WATCH_PATHS` (colon-separated).

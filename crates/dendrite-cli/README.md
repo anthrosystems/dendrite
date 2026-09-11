@@ -18,6 +18,10 @@ The foundation currently scaffolds:
 dendrite status
 dendrite incidents
 dendrite memory
+dendrite memory nodes
+dendrite memory recent
+dendrite memory neighbours <NODE>
+dendrite memory path <SOURCE> <TARGET>
 dendrite actions
 dendrite health
 dendrite version
@@ -46,3 +50,7 @@ The CLI should not contain privileged security logic itself.
 cargo test -p dendrite-cli
 cargo clippy -p dendrite-cli --all-targets -- -D warnings
 ```
+
+## Live daemon commands
+
+The CLI now talks to `dendrited` over a Unix socket. The default development socket is `/tmp/dendrited.sock`; override it with `DENDRITE_SOCKET`.

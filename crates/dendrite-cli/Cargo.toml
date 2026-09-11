@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 dendrite-protocol = { path = "../dendrite-protocol" }
+serde_json = "1"

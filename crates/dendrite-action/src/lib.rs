@@ -1,10 +1,11 @@
-//! Privileged action coordination.
+//! Privileged and non-privileged action coordination.
 //!
-//! This crate contains the authorisation and transaction boundaries. It deliberately
-//! provides no production destructive executor yet.
+//! Batch 3 only executes the explicitly non-privileged `Observe` and `Warn` actions.
+//! Privileged actions continue to require the full guard-gated authorisation path.
 
 use dendrite_protocol::{
     ActionAuthorization, ActionExecutionStatus, ActionProposal, ActionTransactionState,
+    PolicyDecision, QuorumDecision,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +13,7 @@ pub struct TransactionReport {
     pub state: ActionTransactionState,
     pub status: ActionExecutionStatus,
     pub message: Option<String>,
+    pub transitions: Vec<ActionTransactionState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,53 +66,150 @@ where
         authorization: ActionAuthorization,
     ) -> TransactionReport {
         if !authorization.is_authorised() {
-            return TransactionReport {
-                state: ActionTransactionState::Proposal,
-                status: ActionExecutionStatus::NotAuthorised,
-                message: Some("action proposal did not pass every authorisation gate".into()),
-            };
+            return not_authorised("action proposal did not pass every authorisation gate");
         }
 
-        let prepared = match self.executor.prepare(proposal) {
-            Ok(prepared) => prepared,
-            Err(error) => return failed_report(error),
-        };
+        execute_transaction(&mut self.executor, proposal)
+    }
 
-        if let Err(error) = self.executor.revalidate(proposal, &prepared) {
-            return failed_report(error);
+    pub fn execute_safe(
+        &mut self,
+        proposal: &ActionProposal,
+        quorum: QuorumDecision,
+        policy: PolicyDecision,
+    ) -> TransactionReport {
+        if !proposal.action.is_safe_non_privileged() {
+            return not_authorised("privileged actions require dendrite-guard integration");
         }
 
-        if let Err(error) = self.executor.commit(proposal, &prepared) {
-            return failed_report(error);
+        if quorum != QuorumDecision::Approved || policy != PolicyDecision::Allow {
+            return not_authorised("safe action did not pass MAGI quorum and policy");
         }
 
-        if let Err(error) = self.executor.verify(proposal, &prepared) {
-            return failed_report(error);
-        }
-
-        TransactionReport {
-            state: ActionTransactionState::Verified,
-            status: ActionExecutionStatus::Completed,
-            message: None,
-        }
+        execute_transaction(&mut self.executor, proposal)
     }
 }
 
-fn failed_report(error: ExecutorError) -> TransactionReport {
+fn execute_transaction<E: ActionExecutor>(
+    executor: &mut E,
+    proposal: &ActionProposal,
+) -> TransactionReport {
+    let mut transitions = vec![ActionTransactionState::Proposal];
+
+    let prepared = match executor.prepare(proposal) {
+        Ok(prepared) => {
+            transitions.push(ActionTransactionState::Prepared);
+            prepared
+        }
+        Err(error) => return failed_report(error, transitions),
+    };
+
+    if let Err(error) = executor.revalidate(proposal, &prepared) {
+        return failed_report(error, transitions);
+    }
+    transitions.push(ActionTransactionState::Revalidated);
+
+    if let Err(error) = executor.commit(proposal, &prepared) {
+        return failed_report(error, transitions);
+    }
+    transitions.push(ActionTransactionState::Committed);
+
+    if let Err(error) = executor.verify(proposal, &prepared) {
+        return failed_report(error, transitions);
+    }
+    transitions.push(ActionTransactionState::Verified);
+
+    TransactionReport {
+        state: ActionTransactionState::Verified,
+        status: ActionExecutionStatus::Completed,
+        message: None,
+        transitions,
+    }
+}
+
+fn not_authorised(message: &str) -> TransactionReport {
+    TransactionReport {
+        state: ActionTransactionState::Proposal,
+        status: ActionExecutionStatus::NotAuthorised,
+        message: Some(message.into()),
+        transitions: vec![ActionTransactionState::Proposal],
+    }
+}
+
+fn failed_report(
+    error: ExecutorError,
+    mut transitions: Vec<ActionTransactionState>,
+) -> TransactionReport {
+    transitions.push(ActionTransactionState::Failed);
     TransactionReport {
         state: ActionTransactionState::Failed,
         status: ActionExecutionStatus::Failed,
         message: Some(format!("{error:?}")),
+        transitions,
+    }
+}
+
+#[derive(Default)]
+pub struct SafeExecutor {
+    last_warning: Option<String>,
+}
+
+impl SafeExecutor {
+    pub fn last_warning(&self) -> Option<&str> {
+        self.last_warning.as_deref()
+    }
+}
+
+impl ActionExecutor for SafeExecutor {
+    type Prepared = ();
+
+    fn prepare(&mut self, proposal: &ActionProposal) -> Result<Self::Prepared, ExecutorError> {
+        if proposal.action.is_safe_non_privileged() {
+            Ok(())
+        } else {
+            Err(ExecutorError::Prepare(
+                "safe executor refuses privileged action".into(),
+            ))
+        }
+    }
+
+    fn revalidate(
+        &mut self,
+        proposal: &ActionProposal,
+        _: &Self::Prepared,
+    ) -> Result<(), ExecutorError> {
+        if proposal.action.is_safe_non_privileged() {
+            Ok(())
+        } else {
+            Err(ExecutorError::Revalidate(
+                "action is no longer safe for this executor".into(),
+            ))
+        }
+    }
+
+    fn commit(
+        &mut self,
+        proposal: &ActionProposal,
+        _: &Self::Prepared,
+    ) -> Result<(), ExecutorError> {
+        if proposal.action == dendrite_protocol::ActionType::Warn {
+            self.last_warning = Some(format!(
+                "Dendrite warning for {} from {}",
+                proposal.target.0, proposal.incident_id.0
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify(&mut self, _: &ActionProposal, _: &Self::Prepared) -> Result<(), ExecutorError> {
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dendrite_protocol::{
-        ActionProposalId, ActionType, GuardDecision, IncidentId, ObjectId, PolicyDecision,
-        QuorumDecision,
-    };
+    use dendrite_protocol::{ActionProposalId, ActionType, GuardDecision, IncidentId, ObjectId};
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -141,11 +240,11 @@ mod tests {
         }
     }
 
-    fn proposal() -> ActionProposal {
+    fn proposal(action: ActionType) -> ActionProposal {
         ActionProposal {
             id: ActionProposalId("act_test".into()),
             incident_id: IncidentId("inc_test".into()),
-            action: ActionType::Observe,
+            action,
             target: ObjectId("obj_test".into()),
         }
     }
@@ -156,7 +255,7 @@ mod tests {
         let mut coordinator = ActionCoordinator::new(executor);
 
         let report = coordinator.execute(
-            &proposal(),
+            &proposal(ActionType::Observe),
             ActionAuthorization {
                 quorum: QuorumDecision::Denied,
                 policy: PolicyDecision::Allow,
@@ -174,7 +273,7 @@ mod tests {
         let mut coordinator = ActionCoordinator::new(executor);
 
         let report = coordinator.execute(
-            &proposal(),
+            &proposal(ActionType::Observe),
             ActionAuthorization {
                 quorum: QuorumDecision::Approved,
                 policy: PolicyDecision::Allow,
@@ -187,5 +286,30 @@ mod tests {
             coordinator.executor.calls,
             vec!["prepare", "revalidate", "commit", "verify"]
         );
+        assert_eq!(
+            report.transitions,
+            vec![
+                ActionTransactionState::Proposal,
+                ActionTransactionState::Prepared,
+                ActionTransactionState::Revalidated,
+                ActionTransactionState::Committed,
+                ActionTransactionState::Verified,
+            ]
+        );
+    }
+
+    #[test]
+    fn safe_path_refuses_privileged_actions_without_guard() {
+        let executor = RecordingExecutor::default();
+        let mut coordinator = ActionCoordinator::new(executor);
+
+        let report = coordinator.execute_safe(
+            &proposal(ActionType::TerminateProcess),
+            QuorumDecision::Approved,
+            PolicyDecision::Allow,
+        );
+
+        assert_eq!(report.status, ActionExecutionStatus::NotAuthorised);
+        assert!(coordinator.executor.calls.is_empty());
     }
 }

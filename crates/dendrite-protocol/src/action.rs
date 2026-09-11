@@ -1,6 +1,8 @@
 use crate::{ActionProposalId, IncidentId, ObjectId};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionType {
     Observe,
     Warn,
@@ -12,7 +14,44 @@ pub enum ActionType {
     IsolateHost,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ActionType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Warn => "warn",
+            Self::RestrictProcess => "restrict_process",
+            Self::SuspendProcess => "suspend_process",
+            Self::TerminateProcess => "terminate_process",
+            Self::QuarantineObject => "quarantine_object",
+            Self::BlockNetworkDestination => "block_network_destination",
+            Self::IsolateHost => "isolate_host",
+        }
+    }
+
+    pub fn is_safe_non_privileged(self) -> bool {
+        matches!(self, Self::Observe | Self::Warn)
+    }
+}
+
+impl std::str::FromStr for ActionType {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "observe" => Ok(Self::Observe),
+            "warn" => Ok(Self::Warn),
+            "restrict_process" => Ok(Self::RestrictProcess),
+            "suspend_process" => Ok(Self::SuspendProcess),
+            "terminate_process" => Ok(Self::TerminateProcess),
+            "quarantine_object" => Ok(Self::QuarantineObject),
+            "block_network_destination" => Ok(Self::BlockNetworkDestination),
+            "isolate_host" => Ok(Self::IsolateHost),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionProposal {
     pub id: ActionProposalId,
     pub incident_id: IncidentId,
@@ -20,14 +59,26 @@ pub struct ActionProposal {
     pub target: ObjectId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Evaluator {
     Host,
     User,
     Environment,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl Evaluator {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::User => "user",
+            Self::Environment => "environment",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvaluatorVerdict {
     Approve,
     Deny,
@@ -35,20 +86,42 @@ pub enum EvaluatorVerdict {
     Veto,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl EvaluatorVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Deny => "deny",
+            Self::Abstain => "abstain",
+            Self::Veto => "veto",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evaluation {
     pub evaluator: Evaluator,
     pub verdict: EvaluatorVerdict,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QuorumDecision {
     Approved,
     Denied,
     Blocked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl QuorumDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuorumPolicy {
     pub approvals_required: usize,
     pub deny_blocks: bool,
@@ -96,13 +169,24 @@ impl QuorumPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PolicyDecision {
     Allow,
     Deny,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl PolicyDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionTransactionState {
     Proposal,
     Prepared,
@@ -112,11 +196,35 @@ pub enum ActionTransactionState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl ActionTransactionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposal => "proposal",
+            Self::Prepared => "prepared",
+            Self::Revalidated => "revalidated",
+            Self::Committed => "committed",
+            Self::Verified => "verified",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionExecutionStatus {
     NotAuthorised,
     Completed,
     Failed,
+}
+
+impl ActionExecutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAuthorised => "not_authorised",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,5 +301,12 @@ mod tests {
         };
 
         assert!(!denied.is_authorised());
+    }
+
+    #[test]
+    fn only_observe_and_warn_are_safe_non_privileged_actions() {
+        assert!(ActionType::Observe.is_safe_non_privileged());
+        assert!(ActionType::Warn.is_safe_non_privileged());
+        assert!(!ActionType::TerminateProcess.is_safe_non_privileged());
     }
 }

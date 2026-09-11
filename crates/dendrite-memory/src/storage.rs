@@ -175,6 +175,76 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub fn node_count(&self) -> rusqlite::Result<u64> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))
+    }
+
+    pub fn nodes(&self, kind: Option<MemoryNodeKind>) -> Result<Vec<MemoryNode>, StorageError> {
+        let ids = if let Some(kind) = kind {
+            let mut statement = self.connection.prepare(
+                "
+                SELECT id
+                FROM memory_nodes
+                WHERE kind = ?
+                ORDER BY id
+                ",
+            )?;
+            statement
+                .query_map([kind.as_str()], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut statement = self.connection.prepare(
+                "
+                SELECT id
+                FROM memory_nodes
+                ORDER BY id
+                ",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut nodes = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(node) = self.load_node(&MemoryNodeId(id))? {
+                nodes.push(node);
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    pub fn recent_nodes(&self, limit: usize) -> Result<Vec<MemoryNode>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut statement = self.connection.prepare(
+            "
+            SELECT id
+            FROM memory_nodes
+            ORDER BY last_seen_at DESC, id ASC
+            LIMIT ?
+            ",
+        )?;
+        let ids = statement
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut nodes = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(node) = self.load_node(&MemoryNodeId(id))? {
+                nodes.push(node);
+            }
+        }
+
+        Ok(nodes)
+    }
+
     pub fn initialise(&self) -> rusqlite::Result<()> {
         self.connection.execute_batch(
             "
@@ -2376,6 +2446,66 @@ mod tests {
                 )
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn nodes_can_be_filtered_by_kind() {
+        let store = MemoryStore::open(":memory:").unwrap();
+        store.initialise().unwrap();
+
+        store
+            .save_node(&test_node(
+                "file-a",
+                MemoryNodeKind::File,
+                MemoryState::Observed,
+            ))
+            .unwrap();
+        store
+            .save_node(&test_node(
+                "process-a",
+                MemoryNodeKind::Process,
+                MemoryState::Observed,
+            ))
+            .unwrap();
+        store
+            .save_node(&test_node(
+                "process-b",
+                MemoryNodeKind::Process,
+                MemoryState::Observed,
+            ))
+            .unwrap();
+
+        let processes = store.nodes(Some(MemoryNodeKind::Process)).unwrap();
+        assert_eq!(
+            processes
+                .into_iter()
+                .map(|node| node.id.0)
+                .collect::<Vec<_>>(),
+            vec!["process-a", "process-b"]
+        );
+    }
+
+    #[test]
+    fn recent_nodes_are_ordered_by_last_seen_and_limited() {
+        let store = MemoryStore::open(":memory:").unwrap();
+        store.initialise().unwrap();
+
+        let mut old = test_node("old", MemoryNodeKind::File, MemoryState::Observed);
+        old.last_seen_at = 10;
+        let mut newest = test_node("newest", MemoryNodeKind::File, MemoryState::Observed);
+        newest.last_seen_at = 30;
+        let mut middle = test_node("middle", MemoryNodeKind::File, MemoryState::Observed);
+        middle.last_seen_at = 20;
+
+        for node in [old, newest, middle] {
+            store.save_node(&node).unwrap();
+        }
+
+        let recent = store.recent_nodes(2).unwrap();
+        assert_eq!(
+            recent.into_iter().map(|node| node.id.0).collect::<Vec<_>>(),
+            vec!["newest", "middle"]
         );
     }
 }
