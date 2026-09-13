@@ -7,5 +7,7 @@ members = [
     "crates/dendrite-guard",
     "crates/dendrite-updater",
     "crates/dendrite-protocol",
+    "crates/dendrite-ebpf-common",
 ]
+exclude = ["ebpf/dendrite-ebpf"]
 resolver = "2"

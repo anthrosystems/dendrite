@@ -5,6 +5,9 @@ use std::time::Duration;
 
 fn main() {
     let mut config = RuntimeConfig::development_defaults();
+    if let Ok(value) = env::var("DENDRITE_SELF_DB") {
+        config.self_path = PathBuf::from(value);
+    }
     if let Ok(value) = env::var("DENDRITE_MEMORY_DB") {
         config.memory_path = PathBuf::from(value);
     }
@@ -14,6 +17,9 @@ fn main() {
     if let Ok(value) = env::var("DENDRITE_GUARD_DB") {
         config.guard_path = PathBuf::from(value);
     }
+    if let Ok(value) = env::var("DENDRITE_CVE_SNAPSHOT") {
+        config.cve_snapshot_path = PathBuf::from(value);
+    }
     if let Ok(value) = env::var("DENDRITE_SOCKET") {
         config.socket_path = PathBuf::from(value);
     }
@@ -22,15 +28,66 @@ fn main() {
     {
         config.http_addr = address;
     }
+    if let Ok(value) = env::var("DENDRITE_WS_ADDR")
+        && let Ok(address) = value.parse()
+    {
+        config.websocket_addr = address;
+    }
+    if let Ok(value) = env::var("DENDRITE_SOCKET_GROUP") {
+        let value = value.trim();
+        if !value.is_empty() {
+            config.socket_group = Some(value.to_owned());
+        }
+    }
+
+    if let Ok(value) = env::var("DENDRITE_SOCKET_MODE") {
+        match u32::from_str_radix(value.trim().trim_start_matches("0o"), 8) {
+            Ok(mode) => config.socket_mode = mode,
+            Err(_) => {
+                eprintln!("invalid DENDRITE_SOCKET_MODE `{value}`; expected octal like 0660");
+                std::process::exit(2);
+            }
+        }
+    }
+
     if let Ok(value) = env::var("DENDRITE_FANOTIFY") {
+        // Opt-out, not opt-in: the default (this var unset) is enabled — see
+        // RuntimeConfig::development_defaults(). Setting this to anything
+        // other than a truthy value (e.g. "0", "false") explicitly disables it.
         config.fanotify_enabled = matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
         );
     }
+    if let Ok(value) = env::var("DENDRITE_EBPF") {
+        config.ebpf_enabled = matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+    }
+    if let Ok(value) = env::var("DENDRITE_EBPF_OBJECT") {
+        let value = value.trim();
+        if !value.is_empty() {
+            config.ebpf_object = PathBuf::from(value);
+        }
+    }
 
-    if let Ok(value) = env::var("DENDRITE_WATCH_PATHS") {
-        config.watch_paths = value
+    if let Ok(value) = env::var("DENDRITE_WATCH_MOUNTS") {
+        config.watch_mounts = value
+            .split(':')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect();
+    }
+    if let Ok(value) = env::var("DENDRITE_WATCH_INCLUDE_PATHS") {
+        config.watch_include_paths = value
+            .split(':')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect();
+    }
+    if let Ok(value) = env::var("DENDRITE_WATCH_EXCLUDE_PATHS") {
+        config.watch_exclude_paths = value
             .split(':')
             .filter(|path| !path.is_empty())
             .map(PathBuf::from)
@@ -43,9 +100,10 @@ fn main() {
     }
 
     eprintln!(
-        "dendrited starting on {} (HTTP {})",
+        "dendrited starting on {} (HTTP {}, WebSocket {})",
         config.socket_path.display(),
-        config.http_addr
+        config.http_addr,
+        config.websocket_addr
     );
     if let Err(error) = DaemonRuntime::open(config).and_then(DaemonRuntime::run) {
         eprintln!("dendrited failed: {error:?}");

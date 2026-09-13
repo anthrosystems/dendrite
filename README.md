@@ -89,7 +89,7 @@ Major planned work includes:
 - mature Self modelling and bootstrap trust/maturity;
 - protection against learning a pre-existing compromise as Self;
 - CVE/package/exposure intelligence;
-- signed threat-knowledge packages (internally, a **ThreatCell** concept);
+- signed threat-knowledge packages (internally, a **Antiserum** concept);
 - updater/remediation backends with verification and rollback;
 - privileged containment executors;
 - stronger anti-tamper and recovery isolation;
@@ -164,8 +164,16 @@ The daemon HTTP API defaults to `127.0.0.1:8766`. The development Unix socket de
 
 - [`docs/architecture.md`](docs/architecture.md) — canonical technical architecture
 - [`docs/SYSTEM_MAP.md`](docs/SYSTEM_MAP.md) — end-to-end system diagrams and boundaries
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — implemented, current, and planned work
-- [`docs/HTTP_API.md`](docs/HTTP_API.md) — current local HTTP API
+- [`docs/API.md`](docs/API.md) — local HTTP API and Analysis endpoints
+- [`docs/CLI.md`](docs/CLI.md) — current local CLI surface
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — daemon environment variables and startup configuration
+- [`docs/TELEMETRY.md`](docs/TELEMETRY.md) — eBPF/fanotify/fallback collector model
+- [`docs/IDENTITY_AND_PROVENANCE.md`](docs/IDENTITY_AND_PROVENANCE.md) — instance identity, host-scoped objects, correlation and provenance
+- [`docs/VULNERABILITIES_AND_UPDATES.md`](docs/VULNERABILITIES_AND_UPDATES.md) — CVEs, candidates, remediation and updater boundary
+- [`docs/UI.md`](docs/UI.md) — operator UI, Memory Graph and Analysis workflows
+- [`docs/TESTS.md`](docs/TESTS.md) — canonical Checkpoint A validation plan
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — current batches/checkpoints and future work
+- [`antiserum/FORMAT.md`](antiserum/FORMAT.md) — canonical Antiserum package format
 
 ## Licence
 

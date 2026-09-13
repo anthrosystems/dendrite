@@ -43,16 +43,94 @@ pub enum Command {
         severity: String,
         description: String,
     },
+    VulnerabilityStatus,
+    VulnerabilityInventory,
+    Vulnerabilities {
+        include_resolved: bool,
+    },
+    Vulnerability(String),
+    VulnerabilityRefresh,
+    VulnerabilityImport(String),
+    VulnerabilityManual(String),
+    VulnerabilityAuthorise(String),
+    VulnerabilityUpdate(String),
+    VulnerabilityIgnore(String),
+    VulnerabilityDelete(String),
     Health,
     Version,
-    Help,
+    Help(HelpTopic),
+}
+
+/// Which family of commands a `--help`/`-h` request applies to.
+///
+/// Only command families with more than one usage form (a subcommand, an
+/// optional positional argument, or an optional flag) get their own topic.
+/// Argument-less, single-form commands (`status`, `health`, `version`) do
+/// not: a stray `--help`/`-h` passed to them is ignored rather than
+/// explained, per design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTopic {
+    General,
+    Incidents,
+    Memory,
+    Actions,
+    Guard,
+    Vulnerabilities,
+    Vulnerability,
+    Telemetry,
+    Debug,
+}
+
+impl HelpTopic {
+    fn for_family(family: &str) -> Option<Self> {
+        match family {
+            "incidents" | "incident" => Some(Self::Incidents),
+            "memory" => Some(Self::Memory),
+            "actions" | "action" => Some(Self::Actions),
+            "guard" => Some(Self::Guard),
+            "vulnerabilities" => Some(Self::Vulnerabilities),
+            "vulnerability" => Some(Self::Vulnerability),
+            "telemetry" => Some(Self::Telemetry),
+            "debug" => Some(Self::Debug),
+            _ => None,
+        }
+    }
 }
 
 impl Command {
     pub fn parse(arguments: &[String]) -> Self {
+        if arguments.is_empty() {
+            return Self::Help(HelpTopic::General);
+        }
+        if arguments.len() == 1 && matches!(arguments[0].as_str(), "--help" | "-h") {
+            return Self::Help(HelpTopic::General);
+        }
+
+        let family = arguments[0].as_str();
+        let has_help_flag = arguments
+            .iter()
+            .any(|value| value == "--help" || value == "-h");
+
+        if has_help_flag {
+            if let Some(topic) = HelpTopic::for_family(family) {
+                return Self::Help(topic);
+            }
+            if matches!(family, "status" | "health" | "version" | "--version" | "-V") {
+                // These commands take no arguments beyond the command word
+                // itself and have no dedicated help surface; a stray
+                // --help/-h is ignored and the command runs as if it were
+                // never passed, rather than being rejected or explained.
+                let filtered: Vec<String> = arguments
+                    .iter()
+                    .filter(|value| *value != "--help" && *value != "-h")
+                    .cloned()
+                    .collect();
+                return Self::parse(&filtered);
+            }
+            return Self::Help(HelpTopic::General);
+        }
+
         match arguments {
-            [] => Self::Help,
-            [command] if command == "help" || command == "--help" || command == "-h" => Self::Help,
             [command] if command == "status" => Self::Status,
             [command] if command == "incidents" => Self::Incidents,
             [command, id] if command == "incident" || command == "incidents" => {
@@ -76,7 +154,7 @@ impl Command {
             [command, subcommand, limit] if command == "memory" && subcommand == "recent" => {
                 match limit.parse::<usize>() {
                     Ok(limit) => Self::MemoryRecent { limit },
-                    Err(_) => Self::Help,
+                    Err(_) => Self::Help(HelpTopic::Memory),
                 }
             }
             [command, subcommand, node] if command == "memory" && subcommand == "neighbours" => {
@@ -88,7 +166,11 @@ impl Command {
                 Self::MemoryPath(source.clone(), target.clone())
             }
             [command] if command == "actions" => Self::Actions,
-            [command, id] if command == "action" || command == "actions" => {
+            [command, id]
+                if (command == "action" || command == "actions")
+                    && id != "propose"
+                    && id != "evaluate" =>
+            {
                 Self::Action(id.clone())
             }
             [command, subcommand, incident_id, action, target]
@@ -111,8 +193,52 @@ impl Command {
             [command, subcommand, limit] if command == "telemetry" && subcommand == "recent" => {
                 match limit.parse::<usize>() {
                     Ok(limit) => Self::TelemetryRecent { limit },
-                    Err(_) => Self::Help,
+                    Err(_) => Self::Help(HelpTopic::Telemetry),
                 }
+            }
+            [command] if command == "vulnerabilities" => Self::Vulnerabilities {
+                include_resolved: false,
+            },
+            [command, flag] if command == "vulnerabilities" && flag == "--all" => {
+                Self::Vulnerabilities {
+                    include_resolved: true,
+                }
+            }
+            [command, subcommand] if command == "vulnerability" && subcommand == "status" => {
+                Self::VulnerabilityStatus
+            }
+            [command, subcommand] if command == "vulnerability" && subcommand == "inventory" => {
+                Self::VulnerabilityInventory
+            }
+            [command, subcommand] if command == "vulnerability" && subcommand == "refresh" => {
+                Self::VulnerabilityRefresh
+            }
+            [command, subcommand, path] if command == "vulnerability" && subcommand == "import" => {
+                Self::VulnerabilityImport(path.clone())
+            }
+            [command, subcommand, id] if command == "vulnerability" && subcommand == "manual" => {
+                Self::VulnerabilityManual(id.clone())
+            }
+            [command, subcommand, id]
+                if command == "vulnerability" && subcommand == "authorise" =>
+            {
+                Self::VulnerabilityAuthorise(id.clone())
+            }
+            [command, subcommand, id] if command == "vulnerability" && subcommand == "update" => {
+                Self::VulnerabilityUpdate(id.clone())
+            }
+            [command, subcommand, id] if command == "vulnerability" && subcommand == "ignore" => {
+                Self::VulnerabilityIgnore(id.clone())
+            }
+            [command, subcommand, id] if command == "vulnerability" && subcommand == "delete" => {
+                Self::VulnerabilityDelete(id.clone())
+            }
+            [command, id]
+                if command == "vulnerability"
+                    && !["manual", "authorise", "update", "ignore", "delete"]
+                        .contains(&id.as_str()) =>
+            {
+                Self::Vulnerability(id.clone())
             }
             [command, subcommand] if command == "debug" && subcommand == "seed-incident" => {
                 Self::DebugSeedIncident { label: None }
@@ -141,7 +267,10 @@ impl Command {
             [command] if command == "version" || command == "--version" || command == "-V" => {
                 Self::Version
             }
-            _ => Self::Help,
+            _ => match HelpTopic::for_family(family) {
+                Some(topic) => Self::Help(topic),
+                None => Self::Help(HelpTopic::General),
+            },
         }
     }
 
@@ -190,8 +319,33 @@ impl Command {
                 severity: severity.clone(),
                 description: description.clone(),
             }),
+            Self::VulnerabilityStatus => Some(IpcRequest::VulnerabilityStatus),
+            Self::VulnerabilityInventory => Some(IpcRequest::VulnerabilityInventory),
+            Self::Vulnerabilities { include_resolved } => Some(IpcRequest::Vulnerabilities {
+                include_resolved: *include_resolved,
+            }),
+            Self::Vulnerability(id) => Some(IpcRequest::Vulnerability { id: id.clone() }),
+            Self::VulnerabilityRefresh => Some(IpcRequest::VulnerabilityRefresh),
+            Self::VulnerabilityImport(path) => {
+                Some(IpcRequest::VulnerabilityImport { path: path.clone() })
+            }
+            Self::VulnerabilityManual(id) => {
+                Some(IpcRequest::VulnerabilityManual { id: id.clone() })
+            }
+            Self::VulnerabilityAuthorise(id) => {
+                Some(IpcRequest::VulnerabilityAuthorise { id: id.clone() })
+            }
+            Self::VulnerabilityUpdate(id) => {
+                Some(IpcRequest::VulnerabilityUpdate { id: id.clone() })
+            }
+            Self::VulnerabilityIgnore(id) => {
+                Some(IpcRequest::VulnerabilityIgnore { id: id.clone() })
+            }
+            Self::VulnerabilityDelete(id) => {
+                Some(IpcRequest::VulnerabilityDelete { id: id.clone() })
+            }
             Self::Health => Some(IpcRequest::Health),
-            Self::Version | Self::Help => None,
+            Self::Version | Self::Help(_) => None,
         }
     }
 }
@@ -217,7 +371,7 @@ impl From<serde_json::Error> for ClientError {
 pub fn execute(command: &Command, socket_path: &Path) -> Result<String, ClientError> {
     match command {
         Command::Version => Ok(format!("dendrite {}", env!("CARGO_PKG_VERSION"))),
-        Command::Help => Ok(help()),
+        Command::Help(topic) => Ok(help(*topic)),
         _ => {
             let response = send(
                 socket_path,
@@ -241,8 +395,12 @@ fn send(socket_path: &Path, request: IpcRequest) -> Result<IpcResponse, ClientEr
 fn render_response(response: &IpcResponse) -> String {
     match response {
         IpcResponse::Status(status) => format!(
-            "dendrited {}\nobservations: {}\nopen incidents: {}\nmemory nodes: {}\nsocket: {}",
+            "dendrited {}\ninstance id: {}\nsigning key: {} ({})\nkey fingerprint: {}\nobservations: {}\nopen incidents: {}\nmemory nodes: {}\nsocket: {}",
             status.version,
+            status.instance_id,
+            status.signing_key.key_id,
+            status.signing_key.algorithm,
+            status.signing_key.fingerprint,
             status.observations_ingested,
             status.incidents_open,
             status.memory_nodes_known,
@@ -352,10 +510,28 @@ fn render_response(response: &IpcResponse) -> String {
                     source.source, source.status, source.detail
                 )
             })
-            .chain(std::iter::once(format!(
-                "recent events: {}",
-                status.recent_events
-            )))
+            .chain([
+                format!("recent events: {}", status.recent_events),
+                format!(
+                    "queue: {}/{} (peak {})",
+                    status.pipeline.queue_depth,
+                    status.pipeline.queue_capacity,
+                    status.pipeline.peak_queue_depth
+                ),
+                format!(
+                    "processed: {}  dropped: {}  security observations: {}",
+                    status.pipeline.events_processed,
+                    status.pipeline.events_dropped,
+                    status.pipeline.security_observations_ingested
+                ),
+                format!(
+                    "queue wait: last={}ms max={}ms  processing: last={}ms max={}ms",
+                    status.pipeline.last_queue_wait_ms,
+                    status.pipeline.max_queue_wait_ms,
+                    status.pipeline.last_processing_ms,
+                    status.pipeline.max_processing_ms
+                ),
+            ])
             .collect::<Vec<_>>()
             .join("\n"),
         IpcResponse::TelemetryRecent { events } => {
@@ -386,10 +562,123 @@ fn render_response(response: &IpcResponse) -> String {
                     .join("\n")
             }
         }
+        IpcResponse::VulnerabilityStatus(status) => format!(
+            "CVE knowledge: {} records across {} packages\ninstalled packages: {}\nopen exposures: {}\nsource: {}\nknowledge generated: {}\nlast import: {}\ninventory refreshed: {}\nassessment: {}",
+            status.records,
+            status.packages,
+            status.inventory_packages,
+            status.open_exposures,
+            status.source.as_deref().unwrap_or("-"),
+            status
+                .generated_at
+                .map_or_else(|| "-".into(), |v| v.to_string()),
+            status
+                .last_imported_at
+                .map_or_else(|| "-".into(), |v| v.to_string()),
+            status
+                .inventory_last_refreshed_at
+                .map_or_else(|| "-".into(), |v| v.to_string()),
+            status
+                .assessment_last_run_at
+                .map_or_else(|| "-".into(), |v| v.to_string()),
+        ),
+        IpcResponse::VulnerabilityInventory { packages } => {
+            if packages.is_empty() {
+                "No installed packages discovered.".into()
+            } else {
+                packages
+                    .iter()
+                    .map(|p| format!("{:<36} {:<10} {}", p.name, p.architecture, p.version))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        IpcResponse::Vulnerabilities { exposures } => {
+            if exposures.is_empty() {
+                "No matching vulnerability exposures.".into()
+            } else {
+                exposures
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            "{}  {:<8} {:<18} {} -> fixed {} [{}]",
+                            v.cve_id,
+                            v.severity,
+                            v.package,
+                            v.installed_version,
+                            v.fixed_version.as_deref().unwrap_or("unknown"),
+                            v.status
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        IpcResponse::Vulnerability { exposure } => format!(
+            "{} [{}]\npackage: {}:{} {}\nfixed version: {}\nstatus: {}\nfirst seen: {}\nlast seen: {}\nmanual revalidation: {}\nauthorised at: {}\nresolution source: {}",
+            exposure.cve_id,
+            exposure.severity,
+            exposure.package,
+            exposure.architecture,
+            exposure.installed_version,
+            exposure.fixed_version.as_deref().unwrap_or("unknown"),
+            exposure.status,
+            exposure.first_seen_at,
+            exposure.last_seen_at,
+            exposure.awaiting_manual,
+            exposure
+                .authorised_at
+                .map_or_else(|| "-".into(), |v| v.to_string()),
+            exposure.resolution_source.as_deref().unwrap_or("-")
+        ),
+        IpcResponse::VulnerabilityImport { imported, status } => format!(
+            "imported {} CVE knowledge record(s); database now contains {} record(s), {} open exposure(s)",
+            imported, status.records, status.open_exposures
+        ),
+        IpcResponse::VulnerabilityRemediation(remediation) => format!(
+            "{} [{}] package {} {}\nremediation action: {} [{}]\nquorum: {}\npolicy: {}\nguard: {}\nexposure status: {}\nresolution source: {}",
+            remediation.exposure.cve_id,
+            remediation.exposure.severity,
+            remediation.exposure.package,
+            remediation.exposure.installed_version,
+            remediation.action.proposal.id,
+            remediation.action.proposal.status,
+            remediation
+                .action
+                .proposal
+                .quorum
+                .as_deref()
+                .unwrap_or("pending"),
+            remediation
+                .action
+                .proposal
+                .policy
+                .as_deref()
+                .unwrap_or("pending"),
+            remediation
+                .action
+                .proposal
+                .guard
+                .as_deref()
+                .unwrap_or("pending"),
+            remediation.exposure.status,
+            remediation
+                .exposure
+                .resolution_source
+                .as_deref()
+                .unwrap_or("-")
+        ),
         IpcResponse::Health(health) => format!(
             "daemon: {}\nmemory: {}\nguard: {}",
             health.daemon, health.memory, health.guard
         ),
+        IpcResponse::VulnerabilityDeleted { deleted } => {
+            if *deleted {
+                "vulnerability exposure deleted".to_string()
+            } else {
+                "no such vulnerability exposure".to_string()
+            }
+        }
         IpcResponse::Error { message } => format!("Error: {message}"),
     }
 }
@@ -434,7 +723,7 @@ fn render_action(action: &ActionDetailDto) -> String {
         action.proposal.target,
         action.proposal.quorum.as_deref().unwrap_or("pending"),
         action.proposal.policy.as_deref().unwrap_or("pending"),
-        action.guard_requirement,
+        action.proposal.guard.as_deref().unwrap_or("pending"),
         evaluations,
         transactions
     )
@@ -456,12 +745,60 @@ fn render_nodes(nodes: &[MemoryNodeDto]) -> String {
         .join("\n")
 }
 
-fn help() -> String {
+fn help(topic: HelpTopic) -> String {
+    match topic {
+        HelpTopic::General => help_general(),
+        HelpTopic::Incidents => help_incidents(),
+        HelpTopic::Memory => help_memory(),
+        HelpTopic::Actions => help_actions(),
+        HelpTopic::Guard => help_guard(),
+        HelpTopic::Vulnerabilities => help_vulnerabilities(),
+        HelpTopic::Vulnerability => help_vulnerability(),
+        HelpTopic::Telemetry => help_telemetry(),
+        HelpTopic::Debug => help_debug(),
+    }
+}
+
+fn help_general() -> String {
     format!(
-        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  incidents                                   List incidents\n  incidents <ID>                              Show incident details\n  memory nodes                                List known Memory Graph nodes\n  memory nodes --kind <KIND>                  Filter nodes by kind\n  memory recent [LIMIT]                       Show recently seen nodes (default: {})\n  memory neighbours <NODE>                    List neighbouring node IDs\n  memory path <SOURCE> <TARGET>               Find a graph path\n  actions                                     List action proposals\n  actions <ID>                                Show proposal, MAGI and transaction details\n  actions propose <INCIDENT> <ACTION> <TARGET> Create an action proposal\n  actions evaluate <ID>                       Evaluate and run a safe proposal\n  health                                      Show subsystem health\n  version                                     Show CLI version\n  help                                        Show this help\n\nBatch 3 executable actions:\n  observe, warn\n\nPrivileged actions are represented but policy-denied until Guard integration.\n\nNode kinds:\n  process, file, user, host, network_endpoint, service, container, incident, threat\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
-        env!("CARGO_PKG_VERSION"),
+        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  incidents                                   List incidents / show details (see: incidents --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  guard                                       Guard trust state and findings (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  health                                      Show subsystem health\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn help_incidents() -> String {
+    "Usage:\n  dendrite incidents\n  dendrite incidents <ID>\n\n  incidents            List incidents\n  incidents <ID>       Show incident details (severity, status, evidence, related objects)".into()
+}
+
+fn help_memory() -> String {
+    format!(
+        "Usage:\n  dendrite memory nodes [--kind <KIND>]\n  dendrite memory recent [LIMIT]\n  dendrite memory neighbours <NODE>\n  dendrite memory path <SOURCE> <TARGET>\n\n  memory nodes                   List known Memory Graph nodes\n  memory nodes --kind <KIND>     Filter nodes by kind\n  memory recent [LIMIT]          Show recently seen nodes (default: {})\n  memory neighbours <NODE>       List neighbouring node IDs\n  memory path <SOURCE> <TARGET>  Find a graph path\n\nNode kinds:\n  process, file, user, host, network_endpoint, service, container, incident, threat",
         DEFAULT_RECENT_LIMIT
     )
+}
+
+fn help_actions() -> String {
+    "Usage:\n  dendrite actions\n  dendrite actions <ID>\n  dendrite actions propose <INCIDENT> <ACTION> <TARGET>\n  dendrite actions evaluate <ID>\n\n  actions                                       List action proposals\n  actions <ID>                                  Show proposal, MAGI and transaction details\n  actions propose <INCIDENT> <ACTION> <TARGET>  Create an action proposal\n  actions evaluate <ID>                         Evaluate and run a safe proposal\n\nExecutable actions:\n  observe, warn\n  update_package (only through authorised vulnerability remediation)\n\nPrivileged actions are represented but remain policy/Guard-denied until privileged executors are enabled.".into()
+}
+
+fn help_guard() -> String {
+    "Usage:\n  dendrite guard\n  dendrite guard findings\n\n  guard            Show Guard trust state and authority\n  guard findings   List Guard integrity findings\n\nTrust states:\n  trusted, degraded, suspected, quarantined, compromised, recovering".into()
+}
+
+fn help_vulnerabilities() -> String {
+    "Usage:\n  dendrite vulnerabilities [--all]\n\n  vulnerabilities        List open vulnerability exposures\n  vulnerabilities --all  Include resolved exposures\n\nSee `vulnerability --help` for per-exposure and remediation commands.".into()
+}
+
+fn help_vulnerability() -> String {
+    "Usage:\n  dendrite vulnerability <ID>\n  dendrite vulnerability status\n  dendrite vulnerability inventory\n  dendrite vulnerability refresh\n  dendrite vulnerability import <FILE>\n  dendrite vulnerability manual <ID>\n  dendrite vulnerability authorise <ID>\n  dendrite vulnerability update <ID>\n  dendrite vulnerability ignore <ID>\n  dendrite vulnerability delete <ID>\n\n  vulnerability <ID>            Show one exposure\n  vulnerability status          Show CVE/inventory status\n  vulnerability inventory       List installed dpkg packages\n  vulnerability refresh         Refresh inventory and revalidate exposures\n  vulnerability import <FILE>   Import a CVE knowledge bundle\n  vulnerability manual <ID>     Mark as being remediated manually\n  vulnerability authorise <ID>  Record explicit user update authority\n  vulnerability update <ID>     Authorise and execute native package remediation\n  vulnerability ignore <ID>     Dismiss an open/awaiting-revalidation exposure\n  vulnerability delete <ID>     Permanently remove an exposure record\n\n`vulnerability manual` creates the remediation proposal path; it does not directly mutate the package manager.\n`vulnerability authorise` records explicit user authority; stale authority must not be reusable for a changed target/state.\n`vulnerability update` remains transactional and policy/Guard-gated.\n`vulnerability ignore` is reversible: a later CVE bundle import that matches it via attack-chain/behaviour reclassification, or the package itself changing version, automatically re-raises it.\n`vulnerability delete` is not reversible and has no re-raise mechanism; normally the wrong tool outside debugging — prefer `ignore` for \"I've seen this, stop showing it to me.\"".into()
+}
+
+fn help_telemetry() -> String {
+    "Usage:\n  dendrite telemetry\n  dendrite telemetry recent [LIMIT]\n\n  telemetry                 Show collector status (fanotify/eBPF/fallbacks) and queue health\n  telemetry recent [LIMIT]  Show recent telemetry events (default: 50)".into()
+}
+
+fn help_debug() -> String {
+    "Development-only surfaces. Not a production operator API; disabled in release builds.\n\nUsage:\n  dendrite debug seed-incident [LABEL]\n  dendrite debug guard-state <STATE>\n  dendrite debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>\n\n  debug seed-incident [LABEL]                            Seed a synthetic incident/graph for local testing\n  debug guard-state <STATE>                              Force Guard trust state\n  debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>   Record a synthetic integrity finding\n\nTrust states (for guard-state):\n  trusted, degraded, suspected, quarantined, compromised, recovering\n\nSeverities (for guard-finding):\n  informational, warning, high, critical".into()
 }
 
 #[cfg(test)]
@@ -547,6 +884,137 @@ mod tests {
             Command::DebugSeedIncident {
                 label: Some("ui-test".into())
             }
+        );
+    }
+
+    #[test]
+    fn multi_level_command_help_flag_shows_family_topic() {
+        assert_eq!(
+            Command::parse(&args(&["incidents", "--help"])),
+            Command::Help(HelpTopic::Incidents)
+        );
+        assert_eq!(
+            Command::parse(&args(&["memory", "-h"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes", "--kind", "process", "--help"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        assert_eq!(
+            Command::parse(&args(&["debug", "guard-state", "trusted", "--help"])),
+            Command::Help(HelpTopic::Debug)
+        );
+    }
+
+    #[test]
+    fn simple_argless_command_ignores_stray_help_flag() {
+        assert_eq!(
+            Command::parse(&args(&["status", "--help"])),
+            Command::Status
+        );
+        assert_eq!(Command::parse(&args(&["health", "-h"])), Command::Health);
+        assert_eq!(
+            Command::parse(&args(&["version", "--help"])),
+            Command::Version
+        );
+    }
+
+    #[test]
+    fn unrecognised_word_under_a_family_shows_that_familys_help() {
+        // "help" is not special-cased at the subcommand level — it is
+        // simply one more unrecognised word under a known family, and
+        // (per the fallback fix) routes to that family's own help the
+        // same as any other malformed subcommand would.
+        assert_eq!(
+            Command::parse(&args(&["memory", "help"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        assert_eq!(
+            Command::parse(&args(&["memory", "blah"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        // Bare top-level "help" is not a recognised command word at all —
+        // it is unrecognised input, exactly like any other typo, that
+        // happens to fall back to general help via the same catch-all
+        // every unknown command hits.
+        assert_eq!(
+            Command::parse(&args(&["help"])),
+            Command::Help(HelpTopic::General)
+        );
+        assert_eq!(
+            Command::parse(&args(&["frobnicate"])),
+            Command::Help(HelpTopic::General)
+        );
+    }
+
+    #[test]
+    fn malformed_limit_falls_back_to_family_help() {
+        assert_eq!(
+            Command::parse(&args(&["memory", "recent", "not-a-number"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        assert_eq!(
+            Command::parse(&args(&["telemetry", "recent", "not-a-number"])),
+            Command::Help(HelpTopic::Telemetry)
+        );
+    }
+
+    #[test]
+    fn unrecognised_form_of_a_known_family_falls_back_to_that_familys_help() {
+        // Previously these all fell through to the generic top-level help,
+        // even though the first word names a known family.
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes", "--kind"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        assert_eq!(
+            Command::parse(&args(&["vulnerability"])),
+            Command::Help(HelpTopic::Vulnerability)
+        );
+        assert_eq!(
+            Command::parse(&args(&["guard", "extra-garbage"])),
+            Command::Help(HelpTopic::Guard)
+        );
+    }
+
+    #[test]
+    fn incomplete_actions_propose_or_evaluate_does_not_misparse_as_an_id_lookup() {
+        // "propose"/"evaluate" typed without their required arguments used
+        // to silently match the generic `actions <ID>` pattern instead of
+        // signalling a missing-arguments error.
+        assert_eq!(
+            Command::parse(&args(&["actions", "propose"])),
+            Command::Help(HelpTopic::Actions)
+        );
+        assert_eq!(
+            Command::parse(&args(&["actions", "evaluate"])),
+            Command::Help(HelpTopic::Actions)
+        );
+        // A real proposal ID is unaffected.
+        assert_eq!(
+            Command::parse(&args(&["actions", "act_00000001"])),
+            Command::Action("act_00000001".into())
+        );
+    }
+
+    #[test]
+    fn incomplete_vulnerability_subcommands_do_not_misparse_as_an_id_lookup() {
+        // Same class of bug as the actions propose/evaluate one above, for the
+        // same reason: "manual"/"authorise"/"update"/"ignore"/"delete" typed
+        // without their required ID argument used to silently match the
+        // generic `vulnerability <ID>` pattern instead of showing help.
+        for subcommand in ["manual", "authorise", "update", "ignore", "delete"] {
+            assert_eq!(
+                Command::parse(&args(&["vulnerability", subcommand])),
+                Command::Help(HelpTopic::Vulnerability),
+                "vulnerability {subcommand} (missing ID) should show help, not look up an exposure literally named {subcommand:?}"
+            );
+        }
+        // A real exposure ID is unaffected.
+        assert_eq!(
+            Command::parse(&args(&["vulnerability", "vuln:cve-2099-00001:curl:amd64"])),
+            Command::Vulnerability("vuln:cve-2099-00001:curl:amd64".into())
         );
     }
 }

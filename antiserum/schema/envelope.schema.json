@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dendrite Antiserum Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "schema_version",
+    "antiserum_id",
+    "sequence",
+    "issuer",
+    "created_at",
+    "attestation",
+    "payloads",
+    "content_root"
+  ],
+  "properties": {
+    "format": {
+      "const": "dendrite-antiserum"
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_type",
+        "instance_id",
+        "key_id",
+        "public_key",
+        "key_fingerprint"
+      ],
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "anthrosystems",
+            "dendrite-instance",
+            "organisation"
+          ]
+        },
+        "instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "fqdn": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "key_fingerprint": {
+          "$ref": "#/$defs/sha256_digest"
+        },
+        "public_key": {
+          "type": "string",
+          "pattern": "^ed25519:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ],
+      "properties": {
+        "path": {
+          "const": "attestation.json"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256_digest"
+        }
+      }
+    },
+    "payloads": {
+      "type": "array",
+      "minItems": 9,
+      "uniqueItems": true,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/vulnerability_payload"
+          },
+          {
+            "$ref": "#/$defs/indicator_hash_payload"
+          },
+          {
+            "$ref": "#/$defs/indicator_domain_payload"
+          },
+          {
+            "$ref": "#/$defs/indicator_ip_payload"
+          },
+          {
+            "$ref": "#/$defs/indicator_url_payload"
+          },
+          {
+            "$ref": "#/$defs/behaviour_payload"
+          },
+          {
+            "$ref": "#/$defs/graph_fragment_payload"
+          },
+          {
+            "$ref": "#/$defs/attack_chain_payload"
+          },
+          {
+            "$ref": "#/$defs/provenance_payload"
+          }
+        ]
+      },
+      "maxItems": 9,
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "vulnerability"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "indicator-hash"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "indicator-domain"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "indicator-ip"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "indicator-url"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "behaviour"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "graph-fragment"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "attack-chain"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "class"
+            ],
+            "properties": {
+              "class": {
+                "const": "provenance"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "content_root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256-merkle-v1"
+        },
+        "value": {
+          "$ref": "#/$defs/sha256_digest"
+        }
+      }
+    },
+    "antiserum_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "$defs": {
+    "sha256_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "vulnerability_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "vulnerability"
+        },
+        "path": {
+          "const": "payloads/vulnerabilities/vulnerabilities.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "indicator_hash_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "indicator-hash"
+        },
+        "path": {
+          "const": "payloads/indicators/hashes.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "indicator_domain_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "indicator-domain"
+        },
+        "path": {
+          "const": "payloads/indicators/domains.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "indicator_ip_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "indicator-ip"
+        },
+        "path": {
+          "const": "payloads/indicators/ips.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "indicator_url_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "indicator-url"
+        },
+        "path": {
+          "const": "payloads/indicators/urls.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "behaviour_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "behaviour"
+        },
+        "path": {
+          "const": "payloads/behaviours/behaviours.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "graph_fragment_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "graph-fragment"
+        },
+        "path": {
+          "const": "payloads/graph/graph-fragment.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "attack_chain_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "attack-chain"
+        },
+        "path": {
+          "const": "payloads/graph/attack-chains.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    },
+    "provenance_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "path",
+        "status"
+      ],
+      "properties": {
+        "class": {
+          "const": "provenance"
+        },
+        "path": {
+          "const": "provenance/sources.json"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "populated",
+            "empty"
+          ]
+        }
+      }
+    }
+  }
+}

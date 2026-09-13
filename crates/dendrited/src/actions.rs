@@ -1,10 +1,11 @@
-use dendrite_action::{ActionCoordinator, SafeExecutor};
+use dendrite_action::{ActionCoordinator, ActionExecutor, ExecutorError, SafeExecutor};
 use dendrite_protocol::{
     ActionAuthorization, ActionDetailDto, ActionExecutionStatus, ActionProposal, ActionProposalId,
     ActionSummaryDto, ActionTransactionState, ActionType, Evaluation, EvaluationDto, Evaluator,
     EvaluatorVerdict, GuardDecision, IncidentId, ObjectId, PolicyDecision, QuorumPolicy,
-    TransactionEventDto, TrustState,
+    TransactionEventDto, TrustState, VulnerabilityExposureDto,
 };
+use dendrite_updater::{AptPackageManager, UpdatePlan, Updater};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::str::FromStr;
 
@@ -201,6 +202,47 @@ impl ActionService {
         trust_state: TrustState,
         now: u64,
     ) -> Result<ActionDetailDto, ActionStoreError> {
+        self.evaluate_and_execute_with(
+            id,
+            guard_decision,
+            trust_state,
+            false,
+            SafeExecutor::default(),
+            now,
+        )
+    }
+
+    pub fn evaluate_and_execute_package_update(
+        &mut self,
+        id: &str,
+        guard_decision: GuardDecision,
+        trust_state: TrustState,
+        exposure: VulnerabilityExposureDto,
+        now: u64,
+    ) -> Result<ActionDetailDto, ActionStoreError> {
+        let user_authorised = exposure.authorised_at.is_some() && exposure.status == "authorised";
+        self.evaluate_and_execute_with(
+            id,
+            guard_decision,
+            trust_state,
+            user_authorised,
+            PackageUpdateExecutor::new(exposure),
+            now,
+        )
+    }
+
+    fn evaluate_and_execute_with<E>(
+        &mut self,
+        id: &str,
+        guard_decision: GuardDecision,
+        trust_state: TrustState,
+        user_authorised: bool,
+        executor: E,
+        now: u64,
+    ) -> Result<ActionDetailDto, ActionStoreError>
+    where
+        E: ActionExecutor,
+    {
         let detail = self
             .detail(id)?
             .ok_or_else(|| ActionStoreError::InvalidProposal(format!("proposal {id} not found")))?;
@@ -215,7 +257,7 @@ impl ActionService {
             target: ObjectId(detail.proposal.target.clone()),
         };
 
-        let evaluations = evaluate_magi(action);
+        let evaluations = evaluate_magi(action, user_authorised);
         for (evaluation, reason) in &evaluations {
             self.connection.execute(
                 "INSERT INTO action_evaluations
@@ -240,9 +282,9 @@ impl ActionService {
             .map(|(evaluation, _)| evaluation.clone())
             .collect::<Vec<_>>();
         let quorum = QuorumPolicy::default().evaluate(&plain_evaluations);
-        let policy = evaluate_policy(action);
+        let policy = evaluate_policy(action, user_authorised);
 
-        let mut coordinator = ActionCoordinator::new(SafeExecutor::default());
+        let mut coordinator = ActionCoordinator::new(executor);
         let report = coordinator.execute(
             &proposal,
             ActionAuthorization {
@@ -341,57 +383,140 @@ fn action_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionSu
     })
 }
 
-fn evaluate_magi(action: ActionType) -> Vec<(Evaluation, String)> {
+fn evaluate_magi(action: ActionType, user_authorised: bool) -> Vec<(Evaluation, String)> {
     let safe = action.is_safe_non_privileged();
+    let package_update = action == ActionType::UpdatePackage;
 
     vec![
         (
             Evaluation {
                 evaluator: Evaluator::Host,
-                verdict: if safe {
+                verdict: if safe || package_update {
                     EvaluatorVerdict::Approve
                 } else {
                     EvaluatorVerdict::Abstain
                 },
             },
             if safe {
-                "Balthasar: action is non-privileged and does not mutate protected host state"
+                "BALTHASAR-2: Action is non-privileged and does not mutate protected host state"
+            } else if package_update {
+                "BALTHASAR-2: Native package update is scoped to a verified vulnerability exposure"
             } else {
-                "Balthasar: privileged host mutation is deferred until Guard integration"
+                "BALTHASAR-2: Privileged host mutation has no specialised executor policy"
             }
             .into(),
         ),
         (
             Evaluation {
                 evaluator: Evaluator::User,
-                verdict: EvaluatorVerdict::Abstain,
+                verdict: if package_update && user_authorised {
+                    EvaluatorVerdict::Approve
+                } else if package_update {
+                    EvaluatorVerdict::Deny
+                } else {
+                    EvaluatorVerdict::Abstain
+                },
             },
-            "Casper: no interactive user preference source is connected yet".into(),
+            if package_update && user_authorised {
+                "CASPER-3: Operator explicitly authorised this package update through Dendrite"
+            } else if package_update {
+                "CASPER-3: Package mutation requires explicit operator authority"
+            } else {
+                "CASPER-3: No interactive user authority applies to this action"
+            }
+            .into(),
         ),
         (
             Evaluation {
                 evaluator: Evaluator::Environment,
-                verdict: if safe {
+                verdict: if safe || package_update {
                     EvaluatorVerdict::Approve
                 } else {
                     EvaluatorVerdict::Abstain
                 },
             },
             if safe {
-                "Melchior: action is safe for the current development environment"
+                "MELCHIOR-1: Action is safe for the current environment"
+            } else if package_update {
+                "MELCHIOR-1: Remediation uses the native APT/dpkg package state and revalidation path"
             } else {
-                "Melchior: privileged environmental action is not enabled in Batch 3"
+                "MELCHIOR-1: No environment-specific privileged executor is enabled"
             }
             .into(),
         ),
     ]
 }
 
-fn evaluate_policy(action: ActionType) -> PolicyDecision {
-    if action.is_safe_non_privileged() {
+fn evaluate_policy(action: ActionType, user_authorised: bool) -> PolicyDecision {
+    if action.is_safe_non_privileged() || (action == ActionType::UpdatePackage && user_authorised) {
         PolicyDecision::Allow
     } else {
         PolicyDecision::Deny
+    }
+}
+
+pub struct PackageUpdateExecutor {
+    exposure: VulnerabilityExposureDto,
+    package_manager: AptPackageManager,
+}
+
+impl PackageUpdateExecutor {
+    pub fn new(exposure: VulnerabilityExposureDto) -> Self {
+        Self {
+            exposure,
+            package_manager: AptPackageManager,
+        }
+    }
+}
+
+impl ActionExecutor for PackageUpdateExecutor {
+    type Prepared = UpdatePlan;
+
+    fn prepare(&mut self, proposal: &ActionProposal) -> Result<Self::Prepared, ExecutorError> {
+        if proposal.action != ActionType::UpdatePackage {
+            return Err(ExecutorError::Prepare(
+                "package executor received the wrong action type".into(),
+            ));
+        }
+        self.package_manager
+            .prepare(
+                &self.exposure.package,
+                &self.exposure.architecture,
+                &self.exposure.installed_version,
+                self.exposure.fixed_version.as_deref(),
+            )
+            .map_err(|error| ExecutorError::Prepare(format!("{error:?}")))
+    }
+
+    fn revalidate(
+        &mut self,
+        _: &ActionProposal,
+        plan: &Self::Prepared,
+    ) -> Result<(), ExecutorError> {
+        self.package_manager
+            .revalidate(plan)
+            .map_err(|error| ExecutorError::Revalidate(format!("{error:?}")))
+    }
+
+    fn commit(&mut self, _: &ActionProposal, plan: &Self::Prepared) -> Result<(), ExecutorError> {
+        let mut updater = Updater::new(self.package_manager);
+        updater
+            .apply_verified(plan)
+            .map_err(|error| ExecutorError::Commit(format!("{error:?}")))
+    }
+
+    fn verify(&mut self, _: &ActionProposal, plan: &Self::Prepared) -> Result<(), ExecutorError> {
+        if let Err(error) = self.package_manager.verify_fixed(plan) {
+            let mut updater = Updater::new(self.package_manager);
+            let rollback = updater.rollback(&plan.candidate);
+            return Err(ExecutorError::Verify(match rollback {
+                Ok(()) => format!("verification failed and package rollback completed: {error:?}"),
+                Err(rollback_error) => format!(
+                    "verification failed: {error:?}; rollback also failed: {rollback_error:?}"
+                ),
+            }));
+        }
+        Ok(())
     }
 }
 
@@ -485,6 +610,32 @@ mod tests {
                 .transactions
                 .iter()
                 .any(|event| event.state == "committed")
+        );
+    }
+    #[test]
+    fn package_update_requires_explicit_user_authority() {
+        let denied = evaluate_magi(ActionType::UpdatePackage, false);
+        assert!(
+            denied
+                .iter()
+                .any(|(evaluation, _)| evaluation.evaluator == Evaluator::User
+                    && evaluation.verdict == EvaluatorVerdict::Deny)
+        );
+        assert_eq!(
+            evaluate_policy(ActionType::UpdatePackage, false),
+            PolicyDecision::Deny
+        );
+
+        let approved = evaluate_magi(ActionType::UpdatePackage, true);
+        assert!(
+            approved
+                .iter()
+                .any(|(evaluation, _)| evaluation.evaluator == Evaluator::User
+                    && evaluation.verdict == EvaluatorVerdict::Approve)
+        );
+        assert_eq!(
+            evaluate_policy(ActionType::UpdatePackage, true),
+            PolicyDecision::Allow
         );
     }
 }

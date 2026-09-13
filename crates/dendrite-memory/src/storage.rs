@@ -1,12 +1,14 @@
 use crate::model::{
-    DecayPolicy, MemoryConfidence, MemoryNode, MemoryNodeId, MemoryNodeKind, MemoryPriority,
-    MemoryRelationship, MemoryRelationshipId, MemoryRelationshipKind, MemoryState, MemoryStrength,
-    ReinforcementProvenance, ReinforcementReason, RetentionClass,
+    DecayPolicy, MAX_PROVENANCE_LINEAGE, MemoryConfidence, MemoryNode, MemoryNodeId,
+    MemoryNodeKind, MemoryPriority, MemoryProvenance, MemoryRelationship, MemoryRelationshipId,
+    MemoryRelationshipKind, MemoryState, MemoryStrength, ReinforcementProvenance,
+    ReinforcementReason, RetentionClass,
 };
 use dendrite_protocol::{EvidenceId, IncidentId};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashSet, VecDeque};
 use std::str::FromStr;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -21,6 +23,7 @@ pub enum StorageError {
     InvalidConfidence(u8),
     InvalidReinforcementReason(String),
     InvalidReinforcementEvidenceJson(serde_json::Error),
+    InvalidProvenanceLineageJson(serde_json::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +136,31 @@ fn decode_confidence(value: u8) -> Result<MemoryConfidence, StorageError> {
     MemoryConfidence::new(value).ok_or(StorageError::InvalidConfidence(value))
 }
 
+fn decode_provenance(
+    origin_instance_id: Option<String>,
+    imported_from_instance_id: Option<String>,
+    derived_by_instance_id: Option<String>,
+    lineage_json: String,
+) -> Result<MemoryProvenance, StorageError> {
+    let lineage = serde_json::from_str::<Vec<String>>(&lineage_json)
+        .map_err(StorageError::InvalidProvenanceLineageJson)?;
+    Ok(MemoryProvenance::new(
+        origin_instance_id,
+        imported_from_instance_id,
+        derived_by_instance_id,
+        lineage,
+    ))
+}
+
+fn encode_lineage(provenance: &MemoryProvenance) -> rusqlite::Result<String> {
+    let start = provenance
+        .lineage
+        .len()
+        .saturating_sub(MAX_PROVENANCE_LINEAGE);
+    serde_json::to_string(&provenance.lineage[start..])
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 fn decode_reinforcement(
     reason: Option<String>,
     incident_id: Option<String>,
@@ -163,10 +191,20 @@ pub struct MemoryStore {
     connection: Connection,
 }
 
+fn configure_connection(connection: &Connection, path: &str) -> rusqlite::Result<()> {
+    connection.busy_timeout(Duration::from_secs(5))?;
+    if path != ":memory:" {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+    }
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
 impl MemoryStore {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let connection = Connection::open(path)?;
-
+        configure_connection(&connection, path)?;
         Ok(Self { connection })
     }
 
@@ -178,6 +216,13 @@ impl MemoryStore {
     pub fn node_count(&self) -> rusqlite::Result<u64> {
         self.connection
             .query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))
+    }
+
+    pub fn relationship_count(&self) -> rusqlite::Result<u64> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM memory_relationships", [], |row| {
+                row.get(0)
+            })
     }
 
     pub fn nodes(&self, kind: Option<MemoryNodeKind>) -> Result<Vec<MemoryNode>, StorageError> {
@@ -223,26 +268,296 @@ impl MemoryStore {
 
         let mut statement = self.connection.prepare(
             "
-            SELECT id
+            SELECT
+                id, kind, label, created_at, last_seen_at, expires_at,
+                state, priority, retention, decay_policy, decay_rate,
+                origin_instance_id, imported_from_instance_id, derived_by_instance_id, lineage
             FROM memory_nodes
             ORDER BY last_seen_at DESC, id ASC
             LIMIT ?
             ",
         )?;
-        let ids = statement
+        let rows = statement
             .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-                row.get::<_, String>(0)
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, Option<u64>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<u8>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, String>(14)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let mut nodes = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(node) = self.load_node(&MemoryNodeId(id))? {
-                nodes.push(node);
-            }
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    kind,
+                    label,
+                    created_at,
+                    last_seen_at,
+                    expires_at,
+                    state,
+                    priority,
+                    retention,
+                    decay_policy,
+                    decay_rate,
+                    origin_instance_id,
+                    imported_from_instance_id,
+                    derived_by_instance_id,
+                    lineage,
+                )| {
+                    Ok(MemoryNode {
+                        id: MemoryNodeId(id),
+                        kind: decode_node_kind(kind)?,
+                        label,
+                        created_at,
+                        last_seen_at,
+                        expires_at,
+                        state: decode_memory_state(state)?,
+                        priority: decode_priority(priority)?,
+                        retention: decode_retention_class(retention)?,
+                        decay_policy: decode_decay_policy(decay_policy, decay_rate)?,
+                        provenance: decode_provenance(
+                            origin_instance_id,
+                            imported_from_instance_id,
+                            derived_by_instance_id,
+                            lineage,
+                        )?,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    pub fn relationships(&self) -> Result<Vec<MemoryRelationship>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT
+                id, kind, source, target, created_at, last_seen_at,
+                observation_count, expires_at, state, priority, retention,
+                decay_policy, decay_rate, strength, confidence,
+                reinforcement_reason, reinforcement_incident_id,
+                reinforcement_evidence_ids, origin_instance_id,
+                imported_from_instance_id, derived_by_instance_id, lineage
+            FROM memory_relationships
+            ORDER BY id
+            ",
+        )?;
+
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, u64>(5)?,
+                    row.get::<_, u64>(6)?,
+                    row.get::<_, Option<u64>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<u8>>(12)?,
+                    row.get::<_, u8>(13)?,
+                    row.get::<_, u8>(14)?,
+                    row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, Option<String>>(17)?,
+                    row.get::<_, Option<String>>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                    row.get::<_, String>(21)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    kind,
+                    source,
+                    target,
+                    created_at,
+                    last_seen_at,
+                    observation_count,
+                    expires_at,
+                    state,
+                    priority,
+                    retention,
+                    decay_policy,
+                    decay_rate,
+                    strength,
+                    confidence,
+                    reinforcement_reason,
+                    reinforcement_incident_id,
+                    reinforcement_evidence_ids,
+                    origin_instance_id,
+                    imported_from_instance_id,
+                    derived_by_instance_id,
+                    lineage,
+                )| {
+                    Ok(MemoryRelationship {
+                        id: MemoryRelationshipId(id),
+                        kind: decode_relationship_kind(kind)?,
+                        source: MemoryNodeId(source),
+                        target: MemoryNodeId(target),
+                        created_at,
+                        last_seen_at,
+                        observation_count,
+                        expires_at,
+                        state: decode_memory_state(state)?,
+                        priority: decode_priority(priority)?,
+                        retention: decode_retention_class(retention)?,
+                        decay_policy: decode_decay_policy(decay_policy, decay_rate)?,
+                        strength: decode_strength(strength)?,
+                        confidence: decode_confidence(confidence)?,
+                        reinforcement: decode_reinforcement(
+                            reinforcement_reason,
+                            reinforcement_incident_id,
+                            reinforcement_evidence_ids,
+                        )?,
+                        provenance: decode_provenance(
+                            origin_instance_id,
+                            imported_from_instance_id,
+                            derived_by_instance_id,
+                            lineage,
+                        )?,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    pub fn relationships_between_recent_nodes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MemoryRelationship>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
         }
 
-        Ok(nodes)
+        let mut statement = self.connection.prepare(
+            "
+            WITH recent AS (
+                SELECT id
+                FROM memory_nodes
+                ORDER BY last_seen_at DESC, id ASC
+                LIMIT ?1
+            )
+            SELECT
+                r.id, r.kind, r.source, r.target, r.created_at, r.last_seen_at,
+                r.observation_count, r.expires_at, r.state, r.priority, r.retention,
+                r.decay_policy, r.decay_rate, r.strength, r.confidence,
+                r.reinforcement_reason, r.reinforcement_incident_id,
+                r.reinforcement_evidence_ids, r.origin_instance_id,
+                r.imported_from_instance_id, r.derived_by_instance_id, r.lineage
+            FROM memory_relationships r
+            INNER JOIN recent source_node ON source_node.id = r.source
+            INNER JOIN recent target_node ON target_node.id = r.target
+            ORDER BY r.id
+            ",
+        )?;
+
+        let rows = statement
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, u64>(5)?,
+                    row.get::<_, u64>(6)?,
+                    row.get::<_, Option<u64>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<u8>>(12)?,
+                    row.get::<_, u8>(13)?,
+                    row.get::<_, u8>(14)?,
+                    row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, Option<String>>(17)?,
+                    row.get::<_, Option<String>>(18)?,
+                    row.get::<_, Option<String>>(19)?,
+                    row.get::<_, Option<String>>(20)?,
+                    row.get::<_, String>(21)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    kind,
+                    source,
+                    target,
+                    created_at,
+                    last_seen_at,
+                    observation_count,
+                    expires_at,
+                    state,
+                    priority,
+                    retention,
+                    decay_policy,
+                    decay_rate,
+                    strength,
+                    confidence,
+                    reinforcement_reason,
+                    reinforcement_incident_id,
+                    reinforcement_evidence_ids,
+                    origin_instance_id,
+                    imported_from_instance_id,
+                    derived_by_instance_id,
+                    lineage,
+                )| {
+                    Ok(MemoryRelationship {
+                        id: MemoryRelationshipId(id),
+                        kind: decode_relationship_kind(kind)?,
+                        source: MemoryNodeId(source),
+                        target: MemoryNodeId(target),
+                        created_at,
+                        last_seen_at,
+                        observation_count,
+                        expires_at,
+                        state: decode_memory_state(state)?,
+                        priority: decode_priority(priority)?,
+                        retention: decode_retention_class(retention)?,
+                        decay_policy: decode_decay_policy(decay_policy, decay_rate)?,
+                        strength: decode_strength(strength)?,
+                        confidence: decode_confidence(confidence)?,
+                        reinforcement: decode_reinforcement(
+                            reinforcement_reason,
+                            reinforcement_incident_id,
+                            reinforcement_evidence_ids,
+                        )?,
+                        provenance: decode_provenance(
+                            origin_instance_id,
+                            imported_from_instance_id,
+                            derived_by_instance_id,
+                            lineage,
+                        )?,
+                    })
+                },
+            )
+            .collect()
     }
 
     pub fn initialise(&self) -> rusqlite::Result<()> {
@@ -259,7 +574,11 @@ impl MemoryStore {
                 priority        TEXT NOT NULL,
                 retention       TEXT NOT NULL,
                 decay_policy    TEXT NOT NULL,
-                decay_rate      INTEGER
+                decay_rate      INTEGER,
+                origin_instance_id          TEXT,
+                imported_from_instance_id   TEXT,
+                derived_by_instance_id      TEXT,
+                lineage                     TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE IF NOT EXISTS memory_relationships (
@@ -280,7 +599,11 @@ impl MemoryStore {
                 confidence                  INTEGER NOT NULL,
                 reinforcement_reason        TEXT,
                 reinforcement_incident_id   TEXT,
-                reinforcement_evidence_ids  TEXT
+                reinforcement_evidence_ids  TEXT,
+                origin_instance_id          TEXT,
+                imported_from_instance_id   TEXT,
+                derived_by_instance_id      TEXT,
+                lineage                     TEXT NOT NULL DEFAULT '[]'
             );
             ",
         )?;
@@ -290,23 +613,16 @@ impl MemoryStore {
 
     pub fn save_node(&self, node: &MemoryNode) -> rusqlite::Result<()> {
         let decay_rate = node.decay_policy.rate().map(|rate| rate.value());
+        let lineage = encode_lineage(&node.provenance)?;
 
         self.connection.execute(
             "
             INSERT INTO memory_nodes (
-                id,
-                kind,
-                label,
-                created_at,
-                last_seen_at,
-                expires_at,
-                state,
-                priority,
-                retention,
-                decay_policy,
-                decay_rate
+                id, kind, label, created_at, last_seen_at, expires_at, state,
+                priority, retention, decay_policy, decay_rate,
+                origin_instance_id, imported_from_instance_id, derived_by_instance_id, lineage
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 kind = excluded.kind,
                 label = excluded.label,
@@ -316,7 +632,11 @@ impl MemoryStore {
                 priority = excluded.priority,
                 retention = excluded.retention,
                 decay_policy = excluded.decay_policy,
-                decay_rate = excluded.decay_rate
+                decay_rate = excluded.decay_rate,
+                origin_instance_id = excluded.origin_instance_id,
+                imported_from_instance_id = excluded.imported_from_instance_id,
+                derived_by_instance_id = excluded.derived_by_instance_id,
+                lineage = excluded.lineage
             ",
             params![
                 &node.id.0,
@@ -330,6 +650,10 @@ impl MemoryStore {
                 node.retention.as_str(),
                 node.decay_policy.as_str(),
                 decay_rate,
+                node.provenance.origin_instance_id.as_deref(),
+                node.provenance.imported_from_instance_id.as_deref(),
+                node.provenance.derived_by_instance_id.as_deref(),
+                lineage,
             ],
         )?;
 
@@ -342,17 +666,9 @@ impl MemoryStore {
             .query_row(
                 "
                 SELECT
-                    id,
-                    kind,
-                    label,
-                    created_at,
-                    last_seen_at,
-                    expires_at,
-                    state,
-                    priority,
-                    retention,
-                    decay_policy,
-                    decay_rate
+                    id, kind, label, created_at, last_seen_at, expires_at,
+                    state, priority, retention, decay_policy, decay_rate,
+                    origin_instance_id, imported_from_instance_id, derived_by_instance_id, lineage
                 FROM memory_nodes
                 WHERE id = ?
                 ",
@@ -370,6 +686,10 @@ impl MemoryStore {
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
                         row.get::<_, Option<u8>>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, String>(14)?,
                     ))
                 },
             )
@@ -387,6 +707,10 @@ impl MemoryStore {
             retention,
             decay_policy,
             decay_rate,
+            origin_instance_id,
+            imported_from_instance_id,
+            derived_by_instance_id,
+            lineage,
         )) = stored
         else {
             return Ok(None);
@@ -403,23 +727,26 @@ impl MemoryStore {
             priority: decode_priority(priority)?,
             retention: decode_retention_class(retention)?,
             decay_policy: decode_decay_policy(decay_policy, decay_rate)?,
+            provenance: decode_provenance(
+                origin_instance_id,
+                imported_from_instance_id,
+                derived_by_instance_id,
+                lineage,
+            )?,
         }))
     }
 
     pub fn save_relationship(&self, relationship: &MemoryRelationship) -> rusqlite::Result<()> {
         let decay_rate = relationship.decay_policy.rate().map(|rate| rate.value());
-
         let reinforcement_reason = relationship
             .reinforcement
             .as_ref()
             .map(|reinforcement| reinforcement.reason.as_str());
-
         let reinforcement_incident_id = relationship
             .reinforcement
             .as_ref()
             .and_then(|reinforcement| reinforcement.incident_id.as_ref())
             .map(|id| id.0.as_str());
-
         let reinforcement_evidence_ids = relationship
             .reinforcement
             .as_ref()
@@ -433,30 +760,18 @@ impl MemoryStore {
             .map(|ids| serde_json::to_string(&ids))
             .transpose()
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let lineage = encode_lineage(&relationship.provenance)?;
 
         self.connection.execute(
             "
             INSERT INTO memory_relationships (
-                id,
-                kind,
-                source,
-                target,
-                created_at,
-                last_seen_at,
-                observation_count,
-                expires_at,
-                state,
-                priority,
-                retention,
-                decay_policy,
-                decay_rate,
-                strength,
-                confidence,
-                reinforcement_reason,
-                reinforcement_incident_id,
-                reinforcement_evidence_ids
+                id, kind, source, target, created_at, last_seen_at, observation_count,
+                expires_at, state, priority, retention, decay_policy, decay_rate,
+                strength, confidence, reinforcement_reason, reinforcement_incident_id,
+                reinforcement_evidence_ids, origin_instance_id, imported_from_instance_id,
+                derived_by_instance_id, lineage
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 kind = excluded.kind,
                 source = excluded.source,
@@ -473,7 +788,11 @@ impl MemoryStore {
                 confidence = excluded.confidence,
                 reinforcement_reason = excluded.reinforcement_reason,
                 reinforcement_incident_id = excluded.reinforcement_incident_id,
-                reinforcement_evidence_ids = excluded.reinforcement_evidence_ids
+                reinforcement_evidence_ids = excluded.reinforcement_evidence_ids,
+                origin_instance_id = excluded.origin_instance_id,
+                imported_from_instance_id = excluded.imported_from_instance_id,
+                derived_by_instance_id = excluded.derived_by_instance_id,
+                lineage = excluded.lineage
             ",
             params![
                 &relationship.id.0,
@@ -494,6 +813,10 @@ impl MemoryStore {
                 reinforcement_reason,
                 reinforcement_incident_id,
                 reinforcement_evidence_ids,
+                relationship.provenance.origin_instance_id.as_deref(),
+                relationship.provenance.imported_from_instance_id.as_deref(),
+                relationship.provenance.derived_by_instance_id.as_deref(),
+                lineage,
             ],
         )?;
 
@@ -509,24 +832,11 @@ impl MemoryStore {
             .query_row(
                 "
                 SELECT
-                    id,
-                    kind,
-                    source,
-                    target,
-                    created_at,
-                    last_seen_at,
-                    observation_count,
-                    expires_at,
-                    state,
-                    priority,
-                    retention,
-                    decay_policy,
-                    decay_rate,
-                    strength,
-                    confidence,
-                    reinforcement_reason,
-                    reinforcement_incident_id,
-                    reinforcement_evidence_ids
+                    id, kind, source, target, created_at, last_seen_at, observation_count,
+                    expires_at, state, priority, retention, decay_policy, decay_rate,
+                    strength, confidence, reinforcement_reason, reinforcement_incident_id,
+                    reinforcement_evidence_ids, origin_instance_id, imported_from_instance_id,
+                    derived_by_instance_id, lineage
                 FROM memory_relationships
                 WHERE id = ?
                 ",
@@ -551,6 +861,10 @@ impl MemoryStore {
                         row.get::<_, Option<String>>(15)?,
                         row.get::<_, Option<String>>(16)?,
                         row.get::<_, Option<String>>(17)?,
+                        row.get::<_, Option<String>>(18)?,
+                        row.get::<_, Option<String>>(19)?,
+                        row.get::<_, Option<String>>(20)?,
+                        row.get::<_, String>(21)?,
                     ))
                 },
             )
@@ -575,6 +889,10 @@ impl MemoryStore {
             reinforcement_reason,
             reinforcement_incident_id,
             reinforcement_evidence_ids,
+            origin_instance_id,
+            imported_from_instance_id,
+            derived_by_instance_id,
+            lineage,
         )) = stored
         else {
             return Ok(None);
@@ -599,6 +917,12 @@ impl MemoryStore {
                 reinforcement_reason,
                 reinforcement_incident_id,
                 reinforcement_evidence_ids,
+            )?,
+            provenance: decode_provenance(
+                origin_instance_id,
+                imported_from_instance_id,
+                derived_by_instance_id,
+                lineage,
             )?,
         }))
     }
@@ -1180,6 +1504,7 @@ mod tests {
             strength: MemoryStrength::new(50).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         }
     }
 
@@ -1251,6 +1576,7 @@ mod tests {
             priority: MemoryPriority::Normal,
             retention: RetentionClass::ShortTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_node(&node).unwrap();
@@ -1271,6 +1597,30 @@ mod tests {
         assert_eq!(id, "node-1");
         assert_eq!(kind, "process");
         assert_eq!(label, "nginx");
+
+        let (origin, imported_from, derived_by, lineage): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = store
+            .connection
+            .query_row(
+                "
+                SELECT origin_instance_id, imported_from_instance_id,
+                       derived_by_instance_id, lineage
+                FROM memory_nodes
+                WHERE id = ?
+                ",
+                [&node.id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(origin.as_deref(), Some("test-instance"));
+        assert_eq!(imported_from, None);
+        assert_eq!(derived_by, None);
+        assert_eq!(lineage, "[\"test-instance\"]");
     }
 
     #[test]
@@ -1291,6 +1641,7 @@ mod tests {
             decay_policy: DecayPolicy::Linear {
                 rate: DecayRate::new(25).unwrap(),
             },
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_node(&node).unwrap();
@@ -1333,6 +1684,7 @@ mod tests {
             priority: MemoryPriority::Normal,
             retention: RetentionClass::ShortTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_node(&original).unwrap();
@@ -1348,6 +1700,7 @@ mod tests {
             priority: MemoryPriority::Elevated,
             retention: RetentionClass::LongTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_node(&updated).unwrap();
@@ -1391,6 +1744,7 @@ mod tests {
             strength: MemoryStrength::new(70).unwrap(),
             confidence: MemoryConfidence::new(80).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_relationship(&relationship).unwrap();
@@ -1444,6 +1798,7 @@ mod tests {
                     EvidenceId("evidence-2".into()),
                 ],
             }),
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_relationship(&relationship).unwrap();
@@ -1493,6 +1848,7 @@ mod tests {
             strength: MemoryStrength::new(65).unwrap(),
             confidence: MemoryConfidence::new(75).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_relationship(&relationship).unwrap();
@@ -1533,6 +1889,7 @@ mod tests {
                     EvidenceId("evidence-2".into()),
                 ],
             }),
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_relationship(&relationship).unwrap();
@@ -1574,6 +1931,7 @@ mod tests {
             strength: MemoryStrength::new(60).unwrap(),
             confidence: MemoryConfidence::new(70).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_relationship(&original).unwrap();
@@ -1594,6 +1952,7 @@ mod tests {
             strength: MemoryStrength::new(85).unwrap(),
             confidence: MemoryConfidence::new(90).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         store.save_relationship(&updated).unwrap();
@@ -2035,6 +2394,7 @@ mod tests {
             priority: MemoryPriority::Normal,
             retention: RetentionClass::ShortTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         }
     }
 

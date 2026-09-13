@@ -404,7 +404,7 @@ Potential context includes service reachability, enabled vulnerable functionalit
 
 `dendrite-updater` should use the operating system package manager, validate the whole transaction, verify results, and roll back where supported. Generated privileged repair scripts are explicitly outside the autonomous model.
 
-## 11. Shared threat knowledge / ThreatCell
+## 11. Shared threat knowledge / Antiserum
 
 Dendrite should share malicious knowledge without sharing host-specific normality.
 
@@ -431,12 +431,12 @@ HOST SELF
 └── host-specific relationships
 ```
 
-A portable signed knowledge object can be represented internally as a **ThreatCell** and exposed publicly with conventional wording such as *Threat Knowledge Package*.
+A portable signed knowledge object can be represented internally as a **Antiserum** and exposed publicly with conventional wording such as *Threat Knowledge Package*.
 
 Conceptual contents:
 
 ```text
-ThreatCell
+Antiserum
 ├── id / version / issuer
 ├── signatures and provenance
 ├── validity / expiry
@@ -543,7 +543,7 @@ dendrite/
 └── scripts/
 ```
 
-There is no separate vaccination/ThreatCell crate requirement. Threat sharing is a data and trust problem, not automatically a new security boundary.
+There is no separate vaccination/Antiserum crate requirement. Threat sharing is a data and trust problem, not automatically a new security boundary.
 
 > **Repository ≠ crate ≠ process ≠ security boundary.**
 
@@ -553,24 +553,49 @@ Optional `dendrite-mcp` remains a separate process/repository if implemented. It
 
 The biology is internal vocabulary only:
 
-| Biology | Dendrite concept |
-|---|---|
-| Organism | Linux host |
-| Self | Host-specific normality |
-| Non-self | Unknown/contextually abnormal behaviour |
-| Innate immunity | Rules, verified threat/CVE knowledge, integrity checks |
-| Adaptive immunity | Learned Self and behavioural context |
-| Antigen | Normalised security-relevant characteristic |
-| Antibody | Detection signature/model/validated threat pattern |
-| Dendritic cell | Observation/event processing |
-| Memory B/T | Persistent threat knowledge |
-| NK cell | Anomaly detection |
-| Regulatory T | False-positive/tolerance control |
-| Cytotoxic T | Termination response |
-| Macrophage | Quarantine/remediation |
-| Vaccination | Signed pre-deployed/shared threat knowledge |
-| Immunosuppression | Attacks against Dendrite itself |
-| Autoimmunity | False-positive harmful response |
+| Biology                            | Dendrite concept                                       | Function                                                                                                          |
+| ---------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Organism                           | Linux host                                             | The protected environment whose integrity and behaviour Dendrite models.                                          |
+| Self                               | Host-specific normality                                | Defines recognised legitimate behaviour, identities, software and relationships for this particular host.         |
+| Non-self                           | Unknown/contextually abnormal behaviour                | Behaviour not sufficiently recognised as Self; prompts scrutiny but is not automatically malicious.               |
+| Innate immunity                    | Rules, verified threat/CVE knowledge, integrity checks | Provides immediate protection without needing the host to learn the threat first.                                 |
+| Adaptive immunity                  | Learned Self and behavioural context                   | Learns host-specific behaviour and improves contextual discrimination over time.                                  |
+| Antigen                            | Normalised security-relevant characteristic            | A feature Dendrite can recognise and reason about: hash, path, behaviour, endpoint, sequence, identity, etc.      |
+| Epitope                            | Distinctive feature within an antigen                  | A particularly useful sub-characteristic used to recognise a larger malicious object or behaviour.                |
+| Antibody                           | Detection signature/model/validated threat pattern     | Recognises a known malicious characteristic or behavioural pattern.                                               |
+| Dendritic cell                     | Observation/event processing                           | Collects and contextualises telemetry, then presents security-relevant information to higher reasoning layers.    |
+| Antigen presentation               | Evidence/context construction                          | Converts raw observations into structured evidence that other components can evaluate.                            |
+| Pattern-recognition receptor (PRR) | Innate detector / matcher                              | Recognises known suspicious structural patterns without requiring learned host context.                           |
+| PAMP                               | Known malicious/inherently suspicious pattern          | A broadly recognisable threat characteristic associated with known hostile behaviour.                             |
+| DAMP                               | Host distress / integrity signal                       | Indicates damage or abnormal host state even when the originating threat is not yet known.                        |
+| Memory B/T cell                    | Persistent threat knowledge                            | Retains validated threat recognition so previously encountered threats can be recognised rapidly.                 |
+| Immune memory                      | Long-term threat memory                                | Preserves significant security knowledge after the original event has passed.                                     |
+| NK cell                            | Anomaly detection                                      | Detects seriously abnormal behaviour without requiring an exact known-threat match.                               |
+| Regulatory T cell                  | False-positive/tolerance control                       | Prevents excessive responses against legitimate or accepted behaviour.                                            |
+| Immune tolerance                   | Trusted Self / established exceptions                  | Allows recognised legitimate behaviour without repeatedly treating it as hostile.                                 |
+| Cytotoxic T cell                   | Process termination / destructive containment          | Removes a confirmed dangerous execution entity.                                                                   |
+| Macrophage                         | Quarantine/remediation                                 | Contains, removes or cleans harmful objects after detection.                                                      |
+| Phagocytosis                       | Quarantine/removal operation                           | Isolates or disposes of a malicious object so it can no longer affect the host.                                   |
+| Complement system                  | Fast deterministic supporting controls                 | Amplifies or assists detection/containment using predefined mechanisms rather than adaptive reasoning.            |
+| Cytokine                           | Internal security signal                               | Communicates state or urgency between Dendrite subsystems.                                                        |
+| Chemokine                          | Targeted escalation/routing signal                     | Directs appropriate detection or response components toward a particular incident/object/context.                 |
+| Inflammation                       | Elevated defensive state                               | Temporarily increases scrutiny or defensive activity around an affected subsystem/area.                           |
+| Fever                              | Host-wide heightened security posture                  | Raises defensive thresholds or monitoring intensity in response to substantial threat evidence.                   |
+| Clonal expansion                   | Reinforcement of validated threat recognition          | Increases the prominence/availability of threat knowledge after repeated corroboration.                           |
+| Affinity maturation                | Refinement of threat recognition                       | Improves the specificity of a detector/pattern as better evidence becomes available.                              |
+| Vaccination                        | Pre-deployment/import of signed threat knowledge       | Gives a host defensive knowledge before it encounters the underlying threat itself.                               |
+| Antiserum                          | Signed portable threat-knowledge package               | Transfers validated malicious knowledge between Dendrite installations without transferring host Self.            |
+| Immune repertoire                  | Local collection of threat recognition knowledge       | The set of antibodies/patterns/threat knowledge currently available to Dendrite.                                  |
+| Immune surveillance                | Continuous telemetry and correlation                   | Continuously observes the host for malicious, abnormal or integrity-relevant behaviour.                           |
+| Lymph node                         | Correlation / investigation layer                      | Brings observations and threat knowledge together so evidence can be correlated into incidents and attack chains. |
+| Immunosuppression                  | Attacks against Dendrite itself                        | Attempts to weaken telemetry, Guard, policy, memory or response capabilities.                                     |
+| Immune evasion                     | Threat behaviour intended to avoid detection           | Techniques designed to bypass, disguise or suppress Dendrite's recognition mechanisms.                            |
+| Autoimmunity                       | False-positive harmful response                        | Dendrite mistakenly treats legitimate Self as hostile and takes damaging action.                                  |
+| Immunodeficiency                   | Loss/degradation of defensive capability               | A condition where required telemetry, knowledge, trust or enforcement mechanisms are unavailable.                 |
+| Apoptosis                          | Controlled process termination                         | Intentional termination of a compromised/dangerous process rather than uncontrolled failure.                      |
+| Infection                          | Active compromise                                      | A threat has successfully established itself or is actively affecting the host.                                   |
+| Pathogen                           | Malicious actor/object/software                        | An entity capable of compromising or damaging the protected host.                                                 |
+
 
 The MAGI/quorum system is Dendrite-specific rather than a literal biological mapping.
 
@@ -587,3 +612,29 @@ Dendrite should justify its extra machinery by doing something materially better
 - blocking execution when quorum/policy approve but Guard authority is removed.
 
 If those distinctions are not observable, the architecture is complexity without sufficient benefit.
+
+## 17. Correlation, behaviour knowledge and attack-chain classification
+
+Canonical Memory/evidence object IDs are host-scoped observation identities. Cross-host correlation is a separate knowledge layer built from normalized fingerprints/correlation keys and reusable behaviour definitions. This prevents independent observations from being collapsed while still allowing Host A and Host B to recognize semantically equivalent artifacts/activity.
+
+Reusable behaviours are declarative detection/classification knowledge, not executable counter logic. They may describe graph relationships/conditions and can be associated with CVEs, attack chains and Antiserum packages. Live chains derive stable behaviour fingerprints and can later be enriched/classified without changing canonical chain/incident identity.
+
+The historical action timeline must remain intact when classification changes: a proposal or action taken while a chain was unknown remains linked to the same chain after later recognition.
+
+## 18. Dendrite Vulnerability Candidates
+
+Dendrite stores first-class research vulnerability candidates separately from authoritative CVE source data. Candidates may be created manually and later derived from reviewed Antiserums, attack chains or contained research campaigns. A candidate can be useful/shareable without an assigned CVE ID. Assignment of a real CVE enriches/associates the candidate rather than rewriting its research provenance.
+
+## 19. Analysis and Antiserum package management
+
+Analysis owns Antiserum package creation/import/review. Server-side review sessions are plural and persistent; the browser only chooses which review to display. The Review graph uses the same renderer implementation as Memory Graph but has its own package-derived graph data source.
+
+Antiserum creation selects semantic knowledge classes while provenance is mandatory. The physical v1 `.danti` package always contains all nine standard payload files, including schema-valid authenticated empty payloads.
+
+Imported Antiserum remains evidence. Immediate-exporter authentication, replay protection and package verification do not transfer action authority.
+
+## 20. Adaptive Malware Analysis isolation foundation
+
+The future Adaptive Malware Analysis system must never experiment against active Dendrite databases. A campaign snapshots active Self, Memory, Incidents and Guard stores into a restricted temporary campaign workspace and all experimental state changes occur against those copies. The current implementation is only this snapshot/lifecycle skeleton.
+
+Future sample execution must occur in an explicitly contained environment. Proposed counters still use the ordinary MAGI → policy → Guard → transaction pipeline in the contained campaign world. Promotion/export of resulting knowledge is explicit and provenance-preserving; campaigns do not silently mutate production knowledge.

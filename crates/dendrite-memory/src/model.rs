@@ -340,6 +340,50 @@ pub struct ReinforcementProvenance {
     pub evidence_ids: Vec<EvidenceId>,
 }
 
+pub const MAX_PROVENANCE_LINEAGE: usize = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryProvenance {
+    pub origin_instance_id: Option<String>,
+    pub imported_from_instance_id: Option<String>,
+    pub derived_by_instance_id: Option<String>,
+    pub lineage: Vec<String>,
+}
+
+impl MemoryProvenance {
+    pub fn new(
+        origin_instance_id: Option<String>,
+        imported_from_instance_id: Option<String>,
+        derived_by_instance_id: Option<String>,
+        mut lineage: Vec<String>,
+    ) -> Self {
+        if lineage.len() > MAX_PROVENANCE_LINEAGE {
+            let drop_count = lineage.len() - MAX_PROVENANCE_LINEAGE;
+            lineage.drain(0..drop_count);
+        }
+
+        Self {
+            origin_instance_id,
+            imported_from_instance_id,
+            derived_by_instance_id,
+            lineage,
+        }
+    }
+
+    pub fn local(instance_id: impl Into<String>) -> Self {
+        let instance_id = instance_id.into();
+        Self::new(Some(instance_id.clone()), None, None, vec![instance_id])
+    }
+
+    pub fn append_lineage_host(&mut self, instance_id: impl Into<String>) {
+        self.lineage.push(instance_id.into());
+        if self.lineage.len() > MAX_PROVENANCE_LINEAGE {
+            let drop_count = self.lineage.len() - MAX_PROVENANCE_LINEAGE;
+            self.lineage.drain(0..drop_count);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryNode {
     pub id: MemoryNodeId,
@@ -352,6 +396,7 @@ pub struct MemoryNode {
     pub priority: MemoryPriority,
     pub retention: RetentionClass,
     pub decay_policy: DecayPolicy,
+    pub provenance: MemoryProvenance,
 }
 
 impl MemoryNode {
@@ -390,6 +435,7 @@ pub struct MemoryRelationship {
     pub strength: MemoryStrength,
     pub confidence: MemoryConfidence,
     pub reinforcement: Option<ReinforcementProvenance>,
+    pub provenance: MemoryProvenance,
 }
 
 impl MemoryRelationship {
@@ -599,6 +645,7 @@ mod tests {
             priority: MemoryPriority::Normal,
             retention: RetentionClass::ShortTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert!(!node.is_expired(299));
@@ -619,6 +666,7 @@ mod tests {
             priority: MemoryPriority::High,
             retention: RetentionClass::Persistent,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert!(!node.is_expired(u64::MAX));
@@ -637,6 +685,7 @@ mod tests {
             priority: MemoryPriority::Normal,
             retention: RetentionClass::ShortTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         node.record_observation(250);
@@ -664,6 +713,7 @@ mod tests {
             strength: MemoryStrength::new(50).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert!(!relationship.is_expired(299));
@@ -689,6 +739,7 @@ mod tests {
             strength: MemoryStrength::new(90).unwrap(),
             confidence: MemoryConfidence::new(95).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert!(!relationship.is_expired(u64::MAX));
@@ -712,6 +763,7 @@ mod tests {
             strength: MemoryStrength::new(50).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         relationship.record_observation(250);
@@ -745,6 +797,7 @@ mod tests {
             strength: MemoryStrength::new(100).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert_eq!(relationship.decayed_strength(0).value(), 100);
@@ -772,6 +825,7 @@ mod tests {
             strength: MemoryStrength::new(100).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert_eq!(relationship.decayed_strength(200).value(), 50);
@@ -801,6 +855,7 @@ mod tests {
                 incident_id: None,
                 evidence_ids: Vec::new(),
             }),
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert_eq!(relationship.decayed_strength(100).value(), 100);
@@ -847,6 +902,7 @@ mod tests {
             strength: MemoryStrength::new(100).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert_eq!(relationship.decayed_strength(0).value(), 100);
@@ -867,6 +923,7 @@ mod tests {
             priority: MemoryPriority::Low,
             retention: RetentionClass::ShortTerm,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert!(!node.is_purge_eligible(149, 50));
@@ -886,6 +943,7 @@ mod tests {
             priority: MemoryPriority::High,
             retention: RetentionClass::Persistent,
             decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert!(!node.is_purge_eligible(u64::MAX, 0));
@@ -909,6 +967,7 @@ mod tests {
             strength: MemoryStrength::new(100).unwrap(),
             confidence: MemoryConfidence::new(50).unwrap(),
             reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert_eq!(relationship.elapsed_percent(50), 0);
@@ -943,10 +1002,28 @@ mod tests {
                 incident_id: None,
                 evidence_ids: Vec::new(),
             }),
+            provenance: MemoryProvenance::local("test-instance"),
         };
 
         assert_eq!(relationship.effective_strength(200).value(), 100);
         relationship.reinforcement = None;
         assert_eq!(relationship.effective_strength(200).value(), 50);
+    }
+
+    #[test]
+    fn provenance_lineage_keeps_only_the_most_recent_ten_hosts() {
+        let lineage = (0..12).map(|index| format!("host-{index}")).collect();
+        let provenance = MemoryProvenance::new(Some("host-0".into()), None, None, lineage);
+
+        assert_eq!(provenance.lineage.len(), 10);
+        assert_eq!(
+            provenance.lineage.first().map(String::as_str),
+            Some("host-2")
+        );
+        assert_eq!(
+            provenance.lineage.last().map(String::as_str),
+            Some("host-11")
+        );
+        assert_eq!(provenance.origin_instance_id.as_deref(), Some("host-0"));
     }
 }

@@ -11,15 +11,17 @@ pub use action::{
     Evaluation, Evaluator, EvaluatorVerdict, PolicyDecision, QuorumDecision, QuorumPolicy,
 };
 pub use detection::{
-    Confidence, EntityKind, Evidence, EvidenceCandidate, EvidenceSource, Incident,
-    ObjectDescriptor, Observation, ObservationKind, Severity,
+    Confidence, EntityKind, Evidence, EvidenceCandidate, EvidenceObjectRef, EvidenceSource,
+    Incident, ObjectDescriptor, Observation, ObservationKind, Severity,
 };
 pub use ids::{ActionProposalId, EvidenceId, IncidentId, ObjectId, ObservationId};
 pub use ipc::{
-    ActionDetailDto, ActionSummaryDto, CreateActionDto, DaemonStatusDto, EvaluationDto,
-    EvidenceDto, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentSummaryDto,
-    IntegrityFindingDto, IpcRequest, IpcResponse, MemoryNodeDto, MemoryPathDto, RequestEnvelope,
-    ResponseEnvelope, ResponseStatus, TelemetryEventDto, TelemetrySourceDto, TelemetryStatusDto,
-    TransactionEventDto,
+    ActionDetailDto, ActionSummaryDto, CreateActionDto, CveKnowledgeStatusDto, DaemonStatusDto,
+    EvaluationDto, EvidenceDto, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentSummaryDto,
+    InstanceSigningKeyDto, IntegrityFindingDto, IpcRequest, IpcResponse, MemoryGraphDto,
+    MemoryNodeDto, MemoryPathDto, MemoryRelationshipDto, PackageInventoryDto, RequestEnvelope,
+    ResponseEnvelope, ResponseStatus, TelemetryEventDto, TelemetryPipelineDto,
+    TelemetryPipelineLaneDto, TelemetrySourceDto, TelemetryStatusDto, TransactionEventDto,
+    VulnerabilityExposureDto, VulnerabilityRemediationDto,
 };
 pub use trust::{GuardDecision, IntegrityFinding, IntegritySeverity, TrustState};

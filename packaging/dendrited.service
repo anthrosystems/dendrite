@@ -1,0 +1,78 @@
+[Unit]
+Description=Dendrite endpoint security daemon
+Documentation=https://github.com/anthrosystems/dendrite
+After=network.target local-fs.target
+# dendrited owns security state; it should come up early and stay up.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dendrited
+Restart=on-failure
+RestartSec=2
+
+# --- Identity ---
+# Batch 7 goal: dedicated non-root service account, no shell, no login.
+User=dendrite
+Group=dendrite
+
+# --- Capabilities ---
+# Grants only what the packaged collectors need, replacing the development
+# `setcap ... target/debug/dendrited` workflow (see docs/TELEMETRY.md,
+# docs/ROADMAP.md Batch 7). AmbientCapabilities hands these to the process
+# without needing file capabilities on the binary itself.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# --- Filesystem layout ---
+# Converges on the layout described in docs/ROADMAP.md Batch 7.
+StateDirectory=dendrite
+StateDirectoryMode=0750
+ConfigurationDirectory=dendrite
+RuntimeDirectory=dendrite
+RuntimeDirectoryMode=0750
+
+Environment=DENDRITE_SELF_DB=/var/lib/dendrite/self.sqlite3
+Environment=DENDRITE_MEMORY_DB=/var/lib/dendrite/memory.sqlite3
+Environment=DENDRITE_INCIDENT_DB=/var/lib/dendrite/incidents.sqlite3
+Environment=DENDRITE_GUARD_DB=/var/lib/dendrite/guard.sqlite3
+Environment=DENDRITE_CVE_SNAPSHOT=/etc/dendrite/cve-snapshot.json
+Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
+Environment=DENDRITE_SOCKET_GROUP=dendrite
+Environment=DENDRITE_SOCKET_MODE=0660
+Environment=DENDRITE_HTTP_ADDR=127.0.0.1:8766
+Environment=DENDRITE_WS_ADDR=127.0.0.1:8767
+Environment=DENDRITE_EBPF=1
+Environment=DENDRITE_EBPF_OBJECT=/usr/lib/dendrite/dendrite-ebpf
+Environment=DENDRITE_FANOTIFY=1
+# DENDRITE_WATCH_PATHS is deployment-specific; set via EnvironmentFile below
+# rather than hardcoded here.
+EnvironmentFile=-/etc/dendrite/dendrited.env
+
+# --- Sandboxing / hardening ---
+# Conservative defaults; loosen only where a real collector requirement
+# demands it, and record why in this file's comments when that happens.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dendrite /run/dendrite
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+# eBPF/fanotify need real kernel access, so these stay off deliberately:
+# ProtectKernelModules=no (unset)
+# ProtectKernelTunables=no (unset)
+# SystemCallFilter is intentionally not set yet — enabling it requires a
+# reviewed syscall allowlist derived from real collector behaviour
+# (Checkpoint B live-system validation), not a guess baked in now.
+
+[Install]
+WantedBy=multi-user.target

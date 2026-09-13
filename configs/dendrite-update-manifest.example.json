@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "product": "dendrite",
+  "version": "0.1.1",
+  "package_format": "deb",
+  "artifact_filename": "dendrite_0.1.1_amd64.deb",
+  "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "issued_at": 0,
+  "revoked_versions": []
+}

@@ -1,4 +1,5 @@
 use crate::{EvidenceId, IncidentId, ObjectId, ObservationId};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Confidence(u8);
@@ -95,6 +96,17 @@ pub struct Observation {
     pub confidence: Confidence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceObjectRef {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub origin_instance_id: Option<String>,
+    pub imported_from_instance_id: Option<String>,
+    pub derived_by_instance_id: Option<String>,
+    pub lineage: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceCandidate {
     pub source: EvidenceSource,
@@ -103,6 +115,7 @@ pub struct EvidenceCandidate {
     pub severity: Severity,
     pub confidence: Confidence,
     pub related_objects: Vec<ObjectId>,
+    pub evidence_objects: Vec<EvidenceObjectRef>,
 }
 
 #[cfg(test)]

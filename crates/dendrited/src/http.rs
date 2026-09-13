@@ -1,5 +1,10 @@
-use crate::{DaemonCore, DaemonError};
-use dendrite_protocol::{CreateActionDto, DaemonStatusDto, HealthDto, MemoryPathDto};
+use crate::{
+    CreateAntiserumRequest, DaemonCore, DaemonError, VulnerabilityCandidateRequest,
+    VulnerabilityService, live::LiveBroadcaster,
+};
+use dendrite_protocol::{
+    CreateActionDto, DaemonStatusDto, HealthDto, MemoryPathDto, VulnerabilityRemediationDto,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -8,11 +13,13 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ALLOWED_ORIGINS: [&str; 2] = ["http://127.0.0.1:5173", "http://localhost:5173"];
-const MAX_BODY_BYTES: usize = 16 * 1024;
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn handle_http_stream(
     core: &mut DaemonCore,
+    vulnerability: &mut VulnerabilityService,
     socket_path: &Path,
+    live: &LiveBroadcaster,
     mut stream: TcpStream,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -67,11 +74,21 @@ pub fn handle_http_stream(
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or_default();
 
-    match route(core, socket_path, method, target, &body) {
+    let routed = route(core, vulnerability, socket_path, method, target, &body);
+    match routed {
         Ok(HttpBody::Status(value)) => write_json(&mut stream, 200, &value, origin.as_deref()),
         Ok(HttpBody::Health(value)) => write_json(&mut stream, 200, &value, origin.as_deref()),
-        Ok(HttpBody::Json(value)) => write_raw_json(&mut stream, 200, &value, origin.as_deref()),
-        Ok(HttpBody::Created(value)) => write_raw_json(&mut stream, 201, &value, origin.as_deref()),
+        Ok(HttpBody::Json(value)) => {
+            publish_http_mutation(live, method, target, &value);
+            write_raw_json(&mut stream, 200, &value, origin.as_deref())
+        }
+        Ok(HttpBody::Created(value)) => {
+            publish_http_mutation(live, method, target, &value);
+            write_raw_json(&mut stream, 201, &value, origin.as_deref())
+        }
+        Ok(HttpBody::Binary { bytes, filename }) => {
+            write_binary(&mut stream, 200, &bytes, &filename, origin.as_deref())
+        }
         Err(HttpRouteError::NotFound(message)) => write_json(
             &mut stream,
             404,
@@ -110,6 +127,7 @@ enum HttpBody {
     Health(HealthDto),
     Json(String),
     Created(String),
+    Binary { bytes: Vec<u8>, filename: String },
 }
 
 #[derive(Debug)]
@@ -135,6 +153,7 @@ impl From<serde_json::Error> for HttpRouteError {
 
 fn route(
     core: &mut DaemonCore,
+    vulnerability: &mut VulnerabilityService,
     socket_path: &Path,
     method: &str,
     target: &str,
@@ -146,20 +165,14 @@ fn route(
     match (method, path) {
         ("GET", "/api/v1/status") => Ok(HttpBody::Status(DaemonStatusDto {
             version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: core.instance_id().into(),
+            signing_key: core.signing_key_status(),
             observations_ingested: core.observations_ingested(),
             incidents_open: core.incident_count()?,
             memory_nodes_known: core.memory().node_count().map_err(DaemonError::from)?,
             socket_path: socket_path.to_string_lossy().into_owned(),
         })),
-        ("GET", "/api/v1/health") => Ok(HttpBody::Health(HealthDto {
-            daemon: "ok".into(),
-            memory: if core.memory().ping().is_ok() {
-                "ok".into()
-            } else {
-                "error".into()
-            },
-            guard: core.guard_status()?.trust_state,
-        })),
+        ("GET", "/api/v1/health") => Ok(HttpBody::Health(core.health_check()?)),
         ("GET", "/api/v1/incidents") => Ok(HttpBody::Json(serde_json::to_string(
             &core.list_incidents()?,
         )?)),
@@ -175,6 +188,16 @@ fn route(
             })?;
             Ok(HttpBody::Json(serde_json::to_string(
                 &core.memory_recent(limit.min(500))?,
+            )?))
+        }
+        ("GET", "/api/v1/memory/graph") => {
+            let limit = query.get("limit").map_or(Ok(0usize), |value| {
+                value.parse::<usize>().map_err(|_| {
+                    HttpRouteError::BadRequest("limit must be a non-negative integer".into())
+                })
+            })?;
+            Ok(HttpBody::Json(serde_json::to_string(
+                &core.memory_graph(limit)?,
             )?))
         }
         ("GET", "/api/v1/memory/neighbours") => {
@@ -221,6 +244,180 @@ fn route(
                 &core.telemetry_recent(limit.min(512)),
             )?))
         }
+        ("GET", "/api/v1/analysis/packages") => Ok(HttpBody::Json(serde_json::to_string(
+            &core.analysis_packages(unix_now())?,
+        )?)),
+        ("GET", "/api/v1/analysis/chains") => Ok(HttpBody::Json(serde_json::to_string(
+            &core.analysis_attack_chains()?,
+        )?)),
+        ("GET", "/api/v1/analysis/cves") => Ok(HttpBody::Json(serde_json::to_string(
+            &vulnerability
+                .knowledge_records()
+                .map_err(DaemonError::from)?,
+        )?)),
+        ("GET", "/api/v1/analysis/behaviours") => {
+            Ok(HttpBody::Json(serde_json::to_string(&core.behaviours()?)?))
+        }
+        ("GET", "/api/v1/analysis/vulnerability-candidates") => Ok(HttpBody::Json(
+            serde_json::to_string(&vulnerability.candidates().map_err(DaemonError::from)?)?,
+        )),
+        ("POST", "/api/v1/analysis/vulnerability-candidates") => {
+            let request: VulnerabilityCandidateRequest =
+                serde_json::from_slice(body).map_err(|error| {
+                    HttpRouteError::BadRequest(format!(
+                        "invalid vulnerability candidate request: {error}"
+                    ))
+                })?;
+            let candidate = vulnerability
+                .create_candidate(&request, unix_now())
+                .map_err(DaemonError::from)?;
+            Ok(HttpBody::Created(serde_json::to_string(&candidate)?))
+        }
+        ("POST", "/api/v1/analysis/import") => {
+            if body.is_empty() {
+                return Err(HttpRouteError::BadRequest(
+                    "Antiserum package body is empty".into(),
+                ));
+            }
+            let summary = core.import_antiserum_package(body, unix_now())?;
+            Ok(HttpBody::Created(serde_json::to_string(&summary)?))
+        }
+        ("POST", "/api/v1/analysis/export") => {
+            let request: CreateAntiserumRequest =
+                serde_json::from_slice(body).map_err(|error| {
+                    HttpRouteError::BadRequest(format!("invalid Antiserum export request: {error}"))
+                })?;
+            let summary = core.create_antiserum_export(vulnerability, &request, unix_now())?;
+            Ok(HttpBody::Created(serde_json::to_string(&summary)?))
+        }
+        ("GET", "/api/v1/analysis/reviews") => Ok(HttpBody::Json(serde_json::to_string(
+            &core.analysis_reviews()?,
+        )?)),
+        ("POST", "/api/v1/analysis/reviews") => {
+            #[derive(serde::Deserialize)]
+            struct ReviewRequest {
+                antiserum_id: String,
+                label: Option<String>,
+            }
+            let request: ReviewRequest = serde_json::from_slice(body).map_err(|error| {
+                HttpRouteError::BadRequest(format!("invalid review request: {error}"))
+            })?;
+            let review = core.create_analysis_review(
+                &request.antiserum_id,
+                request.label.as_deref(),
+                unix_now(),
+            )?;
+            Ok(HttpBody::Created(serde_json::to_string(&review)?))
+        }
+        ("POST", _)
+            if path.starts_with("/api/v1/analysis/packages/") && path.ends_with("/accept") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/analysis/packages/")
+                .trim_end_matches("/accept")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            let result = core.accept_antiserum_knowledge(vulnerability, &id, unix_now())?;
+            Ok(HttpBody::Json(serde_json::to_string(&result)?))
+        }
+        ("GET", _)
+            if path.starts_with("/api/v1/analysis/packages/") && path.ends_with("/download") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/analysis/packages/")
+                .trim_end_matches("/download")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            let bytes = core.analysis_package_bytes(&id)?;
+            Ok(HttpBody::Binary {
+                bytes,
+                filename: format!("{id}.danti"),
+            })
+        }
+        ("GET", _)
+            if path.starts_with("/api/v1/analysis/packages/") && path.ends_with("/graph") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/analysis/packages/")
+                .trim_end_matches("/graph")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            Ok(HttpBody::Json(serde_json::to_string(
+                &core.analysis_package_graph(&id, unix_now())?,
+            )?))
+        }
+        ("GET", _) if path.starts_with("/api/v1/analysis/vulnerability-candidates/") => {
+            let encoded = path.trim_start_matches("/api/v1/analysis/vulnerability-candidates/");
+            let id = percent_decode(encoded)?;
+            match vulnerability.candidate(&id).map_err(DaemonError::from)? {
+                Some(candidate) => Ok(HttpBody::Json(serde_json::to_string(&candidate)?)),
+                None => Err(HttpRouteError::NotFound(format!(
+                    "vulnerability candidate {id} was not found"
+                ))),
+            }
+        }
+        ("GET", _) if path.starts_with("/api/v1/analysis/packages/") => {
+            let encoded = path.trim_start_matches("/api/v1/analysis/packages/");
+            let id = percent_decode(encoded)?;
+            Ok(HttpBody::Json(serde_json::to_string(
+                &core.analysis_package_detail(&id, unix_now())?,
+            )?))
+        }
+        ("POST", _) if path.starts_with("/api/v1/analysis/reviews/") && path.ends_with("/open") => {
+            let encoded = path
+                .trim_start_matches("/api/v1/analysis/reviews/")
+                .trim_end_matches("/open")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            match core.touch_analysis_review(&id, unix_now())? {
+                Some(review) => Ok(HttpBody::Json(serde_json::to_string(&review)?)),
+                None => Err(HttpRouteError::NotFound(format!(
+                    "review {id} was not found"
+                ))),
+            }
+        }
+        ("DELETE", _) if path.starts_with("/api/v1/analysis/reviews/") => {
+            let encoded = path.trim_start_matches("/api/v1/analysis/reviews/");
+            let id = percent_decode(encoded)?;
+            if core.unload_analysis_review(&id)? {
+                Ok(HttpBody::Json(
+                    serde_json::json!({"unloaded": true, "review_id": id}).to_string(),
+                ))
+            } else {
+                Err(HttpRouteError::NotFound(format!(
+                    "review {id} was not found"
+                )))
+            }
+        }
+        ("GET", "/api/v1/vulnerabilities/status") => Ok(HttpBody::Json(serde_json::to_string(
+            &vulnerability
+                .knowledge_status()
+                .map_err(DaemonError::from)?,
+        )?)),
+        ("GET", "/api/v1/vulnerabilities/inventory") => Ok(HttpBody::Json(serde_json::to_string(
+            &vulnerability.inventory().map_err(DaemonError::from)?,
+        )?)),
+        ("GET", "/api/v1/vulnerabilities") => {
+            let include_resolved = query
+                .get("include_resolved")
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+            Ok(HttpBody::Json(serde_json::to_string(
+                &vulnerability
+                    .exposures(include_resolved)
+                    .map_err(DaemonError::from)?,
+            )?))
+        }
+        ("POST", "/api/v1/vulnerabilities/refresh") => {
+            let now = unix_now();
+            vulnerability
+                .refresh_inventory(now)
+                .map_err(DaemonError::from)?;
+            let exposures = vulnerability.assess(now).map_err(DaemonError::from)?;
+            for exposure in &exposures {
+                core.record_vulnerability_exposure(exposure, now)?;
+            }
+            Ok(HttpBody::Json(serde_json::to_string(&exposures)?))
+        }
         ("GET", "/api/v1/actions") => Ok(HttpBody::Json(serde_json::to_string(
             &core.list_actions()?,
         )?)),
@@ -235,6 +432,139 @@ fn route(
                 unix_now(),
             )?;
             Ok(HttpBody::Created(serde_json::to_string(&detail)?))
+        }
+        ("POST", _)
+            if path.starts_with("/api/v1/vulnerabilities/") && path.ends_with("/manual") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/vulnerabilities/")
+                .trim_end_matches("/manual")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            match vulnerability
+                .mark_manual(&id, unix_now())
+                .map_err(DaemonError::from)?
+            {
+                Some(exposure) => Ok(HttpBody::Json(serde_json::to_string(&exposure)?)),
+                None => Err(HttpRouteError::NotFound(format!(
+                    "vulnerability exposure {id} was not found or already resolved"
+                ))),
+            }
+        }
+        ("POST", _)
+            if path.starts_with("/api/v1/vulnerabilities/") && path.ends_with("/authorise") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/vulnerabilities/")
+                .trim_end_matches("/authorise")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            match vulnerability
+                .authorise(&id, unix_now())
+                .map_err(DaemonError::from)?
+            {
+                Some(exposure) => Ok(HttpBody::Json(serde_json::to_string(&exposure)?)),
+                None => Err(HttpRouteError::NotFound(format!(
+                    "vulnerability exposure {id} was not found or already resolved"
+                ))),
+            }
+        }
+        ("POST", _)
+            if path.starts_with("/api/v1/vulnerabilities/") && path.ends_with("/update") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/vulnerabilities/")
+                .trim_end_matches("/update")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            let now = unix_now();
+            let Some(exposure) = vulnerability
+                .authorise(&id, now)
+                .map_err(DaemonError::from)?
+            else {
+                return Err(HttpRouteError::NotFound(format!(
+                    "vulnerability exposure {id} was not found or already resolved"
+                )));
+            };
+            if exposure.fixed_version.is_none() {
+                return Err(HttpRouteError::BadRequest(format!(
+                    "vulnerability exposure {id} has no known fixed version; Dendrite will not mutate the package"
+                )));
+            }
+
+            let action = core.execute_authorised_vulnerability_update(&exposure, now)?;
+            if action.proposal.status == "completed" {
+                let refreshed_at = unix_now();
+                vulnerability
+                    .refresh_inventory(refreshed_at)
+                    .map_err(DaemonError::from)?;
+                let active = vulnerability
+                    .assess(refreshed_at)
+                    .map_err(DaemonError::from)?;
+                for current in &active {
+                    core.record_vulnerability_exposure(current, refreshed_at)?;
+                }
+            } else {
+                vulnerability
+                    .clear_authorisation(&id, unix_now())
+                    .map_err(DaemonError::from)?;
+            }
+            let current = vulnerability
+                .exposure(&id)
+                .map_err(DaemonError::from)?
+                .unwrap_or(exposure);
+            let result = VulnerabilityRemediationDto {
+                exposure: current,
+                action,
+            };
+            Ok(HttpBody::Json(serde_json::to_string(&result)?))
+        }
+        ("POST", _)
+            if path.starts_with("/api/v1/vulnerabilities/") && path.ends_with("/ignore") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/vulnerabilities/")
+                .trim_end_matches("/ignore")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            match vulnerability.ignore_exposure(&id, unix_now()) {
+                Ok(exposure) => Ok(HttpBody::Json(serde_json::to_string(&exposure)?)),
+                Err(error) => Err(HttpRouteError::BadRequest(error.to_string())),
+            }
+        }
+        // POST, not the DELETE verb: this server has no CORS preflight/OPTIONS
+        // handling, and DELETE is never a "simple" CORS method (unlike GET/POST),
+        // so a real browser would block it before it ever reached this route.
+        ("POST", _)
+            if path.starts_with("/api/v1/vulnerabilities/") && path.ends_with("/delete") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/vulnerabilities/")
+                .trim_end_matches("/delete")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            let deleted = vulnerability
+                .delete_exposure(&id)
+                .map_err(DaemonError::from)?;
+            if deleted {
+                Ok(HttpBody::Json(serde_json::to_string(
+                    &serde_json::json!({"deleted": true}),
+                )?))
+            } else {
+                Err(HttpRouteError::NotFound(format!(
+                    "vulnerability exposure {id} was not found"
+                )))
+            }
+        }
+        ("GET", _) if path.starts_with("/api/v1/vulnerabilities/") => {
+            let encoded = path.trim_start_matches("/api/v1/vulnerabilities/");
+            let id = percent_decode(encoded)?;
+            match vulnerability.exposure(&id).map_err(DaemonError::from)? {
+                Some(exposure) => Ok(HttpBody::Json(serde_json::to_string(&exposure)?)),
+                None => Err(HttpRouteError::NotFound(format!(
+                    "vulnerability exposure {id} was not found"
+                ))),
+            }
         }
         ("GET", _) if path.starts_with("/api/v1/incidents/") => {
             let encoded = path.trim_start_matches("/api/v1/incidents/");
@@ -256,6 +586,15 @@ fn route(
                 ))),
             }
         }
+        ("POST", _) if path.starts_with("/api/v1/actions/") && path.ends_with("/reevaluate") => {
+            let encoded = path
+                .trim_start_matches("/api/v1/actions/")
+                .trim_end_matches("/reevaluate")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            let detail = core.reevaluate_action(&id, unix_now())?;
+            Ok(HttpBody::Created(serde_json::to_string(&detail)?))
+        }
         ("POST", _) if path.starts_with("/api/v1/actions/") && path.ends_with("/evaluate") => {
             let encoded = path
                 .trim_start_matches("/api/v1/actions/")
@@ -265,10 +604,34 @@ fn route(
             let detail = core.evaluate_action(&id, unix_now())?;
             Ok(HttpBody::Json(serde_json::to_string(&detail)?))
         }
-        ("GET" | "POST", _) => Err(HttpRouteError::NotFound("API route was not found".into())),
+        ("GET" | "POST" | "DELETE", _) => {
+            Err(HttpRouteError::NotFound("API route was not found".into()))
+        }
         _ => Err(HttpRouteError::MethodNotAllowed(
-            "only GET and the documented safe POST action routes are supported".into(),
+            "only GET, POST, DELETE and the documented safe action routes are supported".into(),
         )),
+    }
+}
+
+fn publish_http_mutation(live: &LiveBroadcaster, method: &str, target: &str, body: &str) {
+    if method != "POST" && method != "DELETE" {
+        return;
+    }
+    let path = target.split_once('?').map_or(target, |(path, _)| path);
+    let kind = if path.starts_with("/api/v1/actions")
+        || path.starts_with("/api/v1/vulnerabilities")
+        || path.starts_with("/api/v1/analysis")
+    {
+        Some("control")
+    } else {
+        None
+    };
+    if let Some(kind) = kind {
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) {
+            live.publish(kind, &payload);
+        } else {
+            live.publish(kind, &serde_json::json!({ "path": path }));
+        }
     }
 }
 
@@ -389,6 +752,28 @@ fn write_raw_json(
         cors,
         body
     )?;
+    stream.flush()
+}
+
+fn write_binary(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &[u8],
+    filename: &str,
+    origin: Option<&str>,
+) -> io::Result<()> {
+    let cors = origin
+        .filter(|value| ALLOWED_ORIGINS.contains(value))
+        .map_or(String::new(), |value| {
+            format!("Access-Control-Allow-Origin: {value}\r\nVary: Origin\r\n")
+        });
+    write!(
+        stream,
+        "HTTP/1.1 {status} OK\r\nContent-Type: application/vnd.dendrite.antiserum\r\nContent-Disposition: attachment; filename=\"{filename}\"\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n{}\r\n",
+        body.len(),
+        cors
+    )?;
+    stream.write_all(body)?;
     stream.flush()
 }
 

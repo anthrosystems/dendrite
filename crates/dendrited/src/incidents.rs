@@ -1,13 +1,15 @@
 use dendrite_protocol::{
-    EvidenceCandidate, EvidenceDto, EvidenceId, EvidenceSource, IncidentDetailDto, IncidentId,
-    IncidentSummaryDto, Severity,
+    EvidenceCandidate, EvidenceDto, EvidenceId, EvidenceObjectRef, EvidenceSource,
+    IncidentDetailDto, IncidentId, IncidentSummaryDto, Severity,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum IncidentStoreError {
     Database(rusqlite::Error),
     InvalidSeverity(String),
+    InvalidEvidenceLineage(String),
 }
 
 impl From<rusqlite::Error> for IncidentStoreError {
@@ -16,23 +18,36 @@ impl From<rusqlite::Error> for IncidentStoreError {
     }
 }
 
+fn configure_connection(connection: &Connection, path: &str) -> rusqlite::Result<()> {
+    connection.busy_timeout(Duration::from_secs(5))?;
+    if path != ":memory:" {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+    }
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
 pub struct IncidentService {
     connection: Connection,
-    next_incident: u64,
-    next_evidence: u64,
 }
 
 impl IncidentService {
     pub fn open(path: &str) -> Result<Self, IncidentStoreError> {
         let connection = Connection::open(path)?;
-        let mut service = Self {
-            connection,
-            next_incident: 1,
-            next_evidence: 1,
-        };
+        configure_connection(&connection, path)?;
+        let service = Self { connection };
         service.initialise()?;
-        service.load_counters()?;
         Ok(service)
+    }
+
+    /// Cheap liveness probe for the incidents database — also the physical
+    /// file backing the vulnerability/CVE/behaviour-knowledge tables (see
+    /// `CONFIGURATION.md`'s note on `DENDRITE_INCIDENT_DB`), so this one
+    /// check stands in for all of them.
+    pub fn ping(&self) -> Result<(), IncidentStoreError> {
+        self.connection.execute_batch("SELECT 1;")?;
+        Ok(())
     }
 
     fn initialise(&self) -> Result<(), IncidentStoreError> {
@@ -63,6 +78,22 @@ impl IncidentService {
             CREATE INDEX IF NOT EXISTS idx_evidence_incident
                 ON evidence(incident_id);
 
+            CREATE TABLE IF NOT EXISTS evidence_objects (
+                evidence_id               TEXT NOT NULL,
+                position                  INTEGER NOT NULL,
+                object_id                 TEXT NOT NULL,
+                label                     TEXT NOT NULL,
+                kind                      TEXT NOT NULL,
+                origin_instance_id        TEXT,
+                imported_from_instance_id TEXT,
+                derived_by_instance_id    TEXT,
+                lineage                   TEXT NOT NULL,
+                PRIMARY KEY(evidence_id, position),
+                FOREIGN KEY(evidence_id) REFERENCES evidence(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_evidence_objects_evidence
+                ON evidence_objects(evidence_id, position);
+
             CREATE TABLE IF NOT EXISTS incident_objects (
                 incident_id TEXT NOT NULL,
                 object_id   TEXT NOT NULL,
@@ -74,28 +105,17 @@ impl IncidentService {
         Ok(())
     }
 
-    fn load_counters(&mut self) -> Result<(), IncidentStoreError> {
-        self.next_incident = self.connection.query_row(
-            "SELECT COALESCE(MAX(rowid), 0) + 1 FROM incidents",
-            [],
-            |row| row.get(0),
-        )?;
-        self.next_evidence = self.connection.query_row(
-            "SELECT COALESCE(MAX(rowid), 0) + 1 FROM evidence",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(())
-    }
-
     pub fn record_candidate(
         &mut self,
         candidate: EvidenceCandidate,
         correlation_key: &str,
         observed_at: u64,
     ) -> Result<(IncidentId, EvidenceId), IncidentStoreError> {
-        let existing = self
+        let tx = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let existing = tx
             .query_row(
                 "SELECT id, severity FROM incidents
                  WHERE correlation_key = ?1 AND status = 'open'
@@ -107,22 +127,26 @@ impl IncidentService {
 
         let incident_id = if let Some((id, stored_severity)) = existing {
             let severity = decode_severity(&stored_severity)?.max(candidate.severity);
-            self.connection.execute(
+            tx.execute(
                 "UPDATE incidents
                  SET severity = ?1, summary = ?2, last_seen_at = ?3
                  WHERE id = ?4",
                 params![
                     severity_as_str(severity),
-                    candidate.summary,
+                    &candidate.summary,
                     observed_at,
                     &id
                 ],
             )?;
             IncidentId(id)
         } else {
-            let id = IncidentId(format!("inc_{:08}", self.next_incident));
-            self.next_incident = self.next_incident.saturating_add(1);
-            self.connection.execute(
+            let next: u64 = tx.query_row(
+                "SELECT COALESCE(MAX(CAST(SUBSTR(id, 5) AS INTEGER)), 0) + 1 FROM incidents",
+                [],
+                |row| row.get(0),
+            )?;
+            let id = IncidentId(format!("inc_{next:08}"));
+            tx.execute(
                 "INSERT INTO incidents
                  (id, correlation_key, severity, summary, status, first_seen_at, last_seen_at)
                  VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5)",
@@ -130,16 +154,20 @@ impl IncidentService {
                     &id.0,
                     correlation_key,
                     severity_as_str(candidate.severity),
-                    candidate.summary,
+                    &candidate.summary,
                     observed_at,
                 ],
             )?;
             id
         };
 
-        let evidence_id = EvidenceId(format!("evi_{:08}", self.next_evidence));
-        self.next_evidence = self.next_evidence.saturating_add(1);
-        self.connection.execute(
+        let next_evidence: u64 = tx.query_row(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(id, 5) AS INTEGER)), 0) + 1 FROM evidence",
+            [],
+            |row| row.get(0),
+        )?;
+        let evidence_id = EvidenceId(format!("evi_{next_evidence:08}"));
+        tx.execute(
             "INSERT INTO evidence
              (id, incident_id, source, description, confidence, observed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -147,19 +175,42 @@ impl IncidentService {
                 &evidence_id.0,
                 &incident_id.0,
                 evidence_source_as_str(candidate.source),
-                candidate.description,
+                &candidate.description,
                 candidate.confidence.value(),
                 observed_at,
             ],
         )?;
 
+        for (position, object) in candidate.evidence_objects.iter().enumerate() {
+            let lineage = serde_json::to_string(&object.lineage)
+                .map_err(|error| IncidentStoreError::InvalidEvidenceLineage(error.to_string()))?;
+            tx.execute(
+                "INSERT INTO evidence_objects
+                 (evidence_id, position, object_id, label, kind, origin_instance_id,
+                  imported_from_instance_id, derived_by_instance_id, lineage)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    &evidence_id.0,
+                    position as u64,
+                    &object.id,
+                    &object.label,
+                    &object.kind,
+                    object.origin_instance_id.as_deref(),
+                    object.imported_from_instance_id.as_deref(),
+                    object.derived_by_instance_id.as_deref(),
+                    lineage,
+                ],
+            )?;
+        }
+
         for object in candidate.related_objects {
-            self.connection.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO incident_objects (incident_id, object_id) VALUES (?1, ?2)",
                 params![&incident_id.0, object.0],
             )?;
         }
 
+        tx.commit()?;
         Ok((incident_id, evidence_id))
     }
 
@@ -184,6 +235,19 @@ impl IncidentService {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn update_summary(
+        &self,
+        incident_id: &str,
+        summary: &str,
+        now: u64,
+    ) -> Result<bool, IncidentStoreError> {
+        let changed = self.connection.execute(
+            "UPDATE incidents SET summary = ?2, last_seen_at = MAX(last_seen_at, ?3) WHERE id = ?1",
+            params![incident_id, summary, now],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn detail(&self, id: &str) -> Result<Option<IncidentDetailDto>, IncidentStoreError> {
@@ -215,17 +279,72 @@ impl IncidentService {
             "SELECT id, source, description, confidence, observed_at
              FROM evidence WHERE incident_id = ?1 ORDER BY observed_at ASC, id ASC",
         )?;
-        let evidence = evidence_statement
+        let evidence_rows = evidence_statement
             .query_map([id], |row| {
-                Ok(EvidenceDto {
-                    id: row.get(0)?,
-                    source: row.get(1)?,
-                    description: row.get(2)?,
-                    confidence: row.get(3)?,
-                    observed_at: row.get(4)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u8>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut evidence = Vec::with_capacity(evidence_rows.len());
+        for (evidence_id, source, description, confidence, observed_at) in evidence_rows {
+            let mut object_statement = self.connection.prepare(
+                "SELECT object_id, label, kind, origin_instance_id, imported_from_instance_id,
+                        derived_by_instance_id, lineage
+                 FROM evidence_objects WHERE evidence_id = ?1 ORDER BY position ASC",
+            )?;
+            let stored_objects = object_statement
+                .query_map([&evidence_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut objects = Vec::with_capacity(stored_objects.len());
+            for (
+                object_id,
+                label,
+                kind,
+                origin_instance_id,
+                imported_from_instance_id,
+                derived_by_instance_id,
+                lineage_json,
+            ) in stored_objects
+            {
+                let lineage =
+                    serde_json::from_str::<Vec<String>>(&lineage_json).map_err(|error| {
+                        IncidentStoreError::InvalidEvidenceLineage(error.to_string())
+                    })?;
+                objects.push(EvidenceObjectRef {
+                    id: object_id,
+                    label,
+                    kind,
+                    origin_instance_id,
+                    imported_from_instance_id,
+                    derived_by_instance_id,
+                    lineage,
+                });
+            }
+            evidence.push(EvidenceDto {
+                id: evidence_id,
+                source,
+                description,
+                confidence,
+                observed_at,
+                objects,
+            });
+        }
 
         let mut object_statement = self.connection.prepare(
             "SELECT object_id FROM incident_objects WHERE incident_id = ?1 ORDER BY object_id ASC",
@@ -294,7 +413,38 @@ mod tests {
             severity,
             confidence: Confidence::new(90).unwrap(),
             related_objects: vec![ObjectId("process:test".into())],
+            evidence_objects: Vec::new(),
         }
+    }
+
+    #[test]
+    fn evidence_objects_are_persisted_with_the_evidence_record() {
+        let mut service = IncidentService::open(":memory:").unwrap();
+        let mut candidate = candidate(Severity::High);
+        candidate.evidence_objects = vec![EvidenceObjectRef {
+            id: "instance-a::process:test".into(),
+            label: "test process".into(),
+            kind: "process".into(),
+            origin_instance_id: Some("instance-a".into()),
+            imported_from_instance_id: None,
+            derived_by_instance_id: None,
+            lineage: vec!["instance-a".into()],
+        }];
+
+        let (incident_id, _) = service
+            .record_candidate(candidate, "process:test|threat:test", 10)
+            .unwrap();
+        let detail = service.detail(&incident_id.0).unwrap().unwrap();
+
+        assert_eq!(detail.evidence.len(), 1);
+        assert_eq!(detail.evidence[0].objects.len(), 1);
+        assert_eq!(detail.evidence[0].objects[0].id, "instance-a::process:test");
+        assert_eq!(detail.evidence[0].objects[0].label, "test process");
+        assert_eq!(
+            detail.evidence[0].objects[0].origin_instance_id.as_deref(),
+            Some("instance-a")
+        );
+        assert_eq!(detail.evidence[0].objects[0].lineage, vec!["instance-a"]);
     }
 
     #[test]

@@ -1,0 +1,17 @@
+[package]
+name = "dendrite-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "dendrite-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+dendrite-ebpf-common = { path = "../../crates/dendrite-ebpf-common" }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

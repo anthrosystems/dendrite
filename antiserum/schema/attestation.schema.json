@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dendrite Antiserum Attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "instance_id",
+    "key_id",
+    "state",
+    "export_safety",
+    "observed_at",
+    "guard_version",
+    "policy_revision",
+    "integrity",
+    "active_findings"
+  ],
+  "properties": {
+    "instance_id": { "type": "string", "format": "uuid" },
+    "key_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["trusted", "degraded", "untrusted", "unknown"]
+    },
+    "export_safety": {
+      "type": "string",
+      "enum": ["normal", "restricted", "blocked"]
+    },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "guard_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "policy_revision": { "type": "integer", "minimum": 0 },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protected_objects",
+        "dendrite_binary",
+        "configuration",
+        "host_identity_key"
+      ],
+      "properties": {
+        "protected_objects": { "$ref": "#/$defs/integrity_state" },
+        "dendrite_binary": { "$ref": "#/$defs/integrity_state" },
+        "configuration": { "$ref": "#/$defs/integrity_state" },
+        "host_identity_key": { "$ref": "#/$defs/integrity_state" }
+      }
+    },
+    "active_findings": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "integrity_state": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "failed", "unknown"]
+    }
+  }
+}

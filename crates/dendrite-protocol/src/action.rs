@@ -12,6 +12,7 @@ pub enum ActionType {
     QuarantineObject,
     BlockNetworkDestination,
     IsolateHost,
+    UpdatePackage,
 }
 
 impl ActionType {
@@ -25,6 +26,7 @@ impl ActionType {
             Self::QuarantineObject => "quarantine_object",
             Self::BlockNetworkDestination => "block_network_destination",
             Self::IsolateHost => "isolate_host",
+            Self::UpdatePackage => "update_package",
         }
     }
 
@@ -46,6 +48,7 @@ impl std::str::FromStr for ActionType {
             "quarantine_object" => Ok(Self::QuarantineObject),
             "block_network_destination" => Ok(Self::BlockNetworkDestination),
             "isolate_host" => Ok(Self::IsolateHost),
+            "update_package" => Ok(Self::UpdatePackage),
             _ => Err(()),
         }
     }

@@ -5,6 +5,7 @@ use dendrite_protocol::{
 };
 use rusqlite::{Connection, params};
 use std::str::FromStr;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub enum GuardStoreError {
@@ -19,6 +20,16 @@ impl From<rusqlite::Error> for GuardStoreError {
     }
 }
 
+fn configure_connection(connection: &Connection, path: &str) -> rusqlite::Result<()> {
+    connection.busy_timeout(Duration::from_secs(5))?;
+    if path != ":memory:" {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "synchronous", "NORMAL")?;
+    }
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
 pub struct GuardService {
     connection: Connection,
     guard: Guard,
@@ -27,6 +38,7 @@ pub struct GuardService {
 impl GuardService {
     pub fn open(path: &str) -> Result<Self, GuardStoreError> {
         let connection = Connection::open(path)?;
+        configure_connection(&connection, path)?;
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS guard_state (

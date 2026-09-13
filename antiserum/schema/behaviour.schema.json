@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Antiserum Behaviour Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "behaviours"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "behaviours": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/behaviour"
+      }
+    }
+  },
+  "$defs": {
+    "behaviour": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "description",
+        "confidence",
+        "severity",
+        "techniques",
+        "conditions",
+        "relationship",
+        "source_refs"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^behaviour:[A-Za-z0-9._:-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "informational",
+            "low",
+            "medium",
+            "high",
+            "critical",
+            "unknown"
+          ]
+        },
+        "techniques": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^T[0-9]{4}(?:\\.[0-9]{3})?$"
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/process_access_condition"
+              },
+              {
+                "$ref": "#/$defs/network_connect_condition"
+              },
+              {
+                "$ref": "#/$defs/graph_relation_condition"
+              }
+            ]
+          }
+        },
+        "relationship": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ordered",
+            "max_interval_seconds"
+          ],
+          "properties": {
+            "ordered": {
+              "type": "boolean"
+            },
+            "max_interval_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "origin_instance_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "imported_from_instance_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "derived_by_instance_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "lineage": {
+          "type": "array",
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      }
+    },
+    "process_access_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "target_class"
+      ],
+      "properties": {
+        "kind": {
+          "const": "process-access"
+        },
+        "target_class": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "network_connect_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "direction"
+      ],
+      "properties": {
+        "kind": {
+          "const": "network-connect"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "outbound",
+            "inbound",
+            "either"
+          ]
+        }
+      }
+    },
+    "graph_relation_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "relationship"
+      ],
+      "properties": {
+        "kind": {
+          "const": "graph-relation"
+        },
+        "source_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "relationship": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "target_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

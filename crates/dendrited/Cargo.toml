@@ -4,11 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aya = "0.13.1"
 dendrite-action = { path = "../dendrite-action" }
+dendrite-ebpf-common = { path = "../dendrite-ebpf-common" }
 dendrite-guard = { path = "../dendrite-guard" }
 dendrite-memory = { path = "../dendrite-memory" }
 dendrite-protocol = { path = "../dendrite-protocol" }
+dendrite-updater = { path = "../dendrite-updater" }
 libc = "0.2"
+sha2 = "0.10"
+hex = "0.4"
+getrandom = "0.3"
+ed25519-dalek = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+signal-hook = "0.4.4"
+tungstenite = "0.30.0"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+uuid = { version = "1", features = ["v4"] }

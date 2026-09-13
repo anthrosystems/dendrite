@@ -106,7 +106,7 @@ CVEs/exploit knowledge                                      local relationships
 
 Global/environment knowledge may be distributed. Host Self normally remains local.
 
-## ThreatCell lifecycle
+## Antiserum lifecycle
 
 ```text
 new local finding
@@ -124,7 +124,7 @@ GLOBAL
 other Dendrite hosts receive signed threat knowledge
 ```
 
-ThreatCell is an internal name for a signed threat-knowledge package. Distribution never grants direct action authority.
+Antiserum is an internal name for a signed threat-knowledge package. Distribution never grants direct action authority.
 
 ## Memory lifecycle
 
@@ -169,3 +169,48 @@ Authority = quorum + policy + Guard + successful revalidation
 Core invariant:
 
 > **Compromise can remove authority, but cannot create authority.**
+
+## Cross-host correlation
+
+```text
+Host A observation (A::object)
+          │
+          ├── fingerprint / correlation key ──┐
+          └── behaviour binding ───────────────┤
+                                               ├── shared semantic knowledge
+Host B observation (B::object)                 │
+          ├── fingerprint / correlation key ──┤
+          └── behaviour binding ───────────────┘
+```
+
+Object identity and provenance stay host-scoped. Correlation is represented rather than identity being rewritten.
+
+## Analysis workspace
+
+```text
+.danti package ── verify/store ──► on-device Antiserum store
+                                      │
+                       ┌──────────────┴──────────────┐
+                       ▼                             ▼
+                server-side Review             Accept Knowledge
+                (no authority)                 (explicit operator action)
+                       │                             │
+                       ▼                             ▼
+             shared Graph renderer       supported semantic stores
+             (Analysis page only)         Memory / behaviour / CVE / candidates
+```
+
+The normal Memory Graph page continues to use the live Memory Graph data source.
+
+## Adaptive Malware Analysis foundation
+
+```text
+ACTIVE DBs                         CAMPAIGN WORKSPACE
+self.sqlite3      ── snapshot ──► self.sqlite3
+memory.sqlite3    ── snapshot ──► memory.sqlite3
+incidents.sqlite3 ── snapshot ──► incidents.sqlite3
+guard.sqlite3     ── snapshot ──► guard.sqlite3
+                                  artifacts/
+```
+
+There is no reverse automatic database merge. Future promotion/export is explicit and goes through normal knowledge/trust boundaries.

@@ -1,3 +1,11 @@
+use aya::{
+    Ebpf,
+    maps::{MapData, RingBuf},
+    programs::{KProbe, TracePoint},
+};
+use dendrite_ebpf_common::{
+    ADDRESS_FAMILY_INET, ADDRESS_FAMILY_INET6, EVENT_NETWORK_CONNECT, EVENT_PROCESS_EXEC, EbpfEvent,
+};
 use dendrite_protocol::{
     Confidence, EntityKind, ObjectDescriptor, ObjectId, Observation, ObservationId,
     ObservationKind, Severity, TelemetrySourceDto,
@@ -5,14 +13,17 @@ use dendrite_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::RawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_OBSERVATION_TTL_SECONDS: u64 = 3_600;
+const DEFAULT_OBSERVATION_TTL_SECONDS: u64 = 300;
 const MAX_FILES_PER_SCAN: usize = 10_000;
-const MAX_FANOTIFY_DIRECTORIES: usize = 4_096;
 const FANOTIFY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_EVENTS_PER_COLLECTION: usize = 4_096;
+const MAX_FANOTIFY_INCLUDE_DIRECTORIES: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TelemetrySource {
@@ -33,31 +44,76 @@ impl TelemetrySource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelemetryScope {
+    Host,
+    DendriteControlPlane,
+}
+
+impl TelemetryScope {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::DendriteControlPlane => "dendrite_control_plane",
+        }
+    }
+
+    pub(crate) fn feeds_security_reasoning(self) -> bool {
+        matches!(self, Self::Host)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CollectedObservation {
     pub source: TelemetrySource,
     pub event: String,
     pub process_id: Option<u32>,
     pub observation: Observation,
+    pub related_observations: Vec<Observation>,
 }
 
 pub struct TelemetryManager {
     processes: ProcessCollector,
     filesystem: FilesystemCollector,
     fanotify: Option<FanotifyCollector>,
+    ebpf: Option<EbpfCollector>,
     fanotify_status: TelemetrySourceDto,
+    ebpf_status: TelemetrySourceDto,
+    control_plane_addr: SocketAddr,
 }
 
 impl TelemetryManager {
-    pub fn new(watch_paths: Vec<PathBuf>, fanotify_enabled: bool) -> Self {
-        let (fanotify, fanotify_status) = if fanotify_enabled && !watch_paths.is_empty() {
-            match FanotifyCollector::new(&watch_paths) {
+    pub fn new(
+        watch_mounts: Vec<PathBuf>,
+        watch_include_paths: Vec<PathBuf>,
+        exclude_paths: Vec<PathBuf>,
+        fanotify_enabled: bool,
+        ebpf_enabled: bool,
+        ebpf_object: PathBuf,
+        control_plane_addr: SocketAddr,
+    ) -> Self {
+        // Discovered once and shared: fanotify uses it for its initial marks,
+        // and the filesystem-polling fallback uses the same set (plus
+        // watch_include_paths) so that "fanotify is off/unavailable" doesn't
+        // silently regress from "watch everything real" back down to "watch
+        // nothing" — `watch_mounts` (from DENDRITE_WATCH_MOUNTS) only ever
+        // narrows this, never expands it.
+        let effective_mounts = discover_watchable_mounts(&watch_mounts);
+        let mut effective_paths = effective_mounts.clone();
+        effective_paths.extend(watch_include_paths.iter().cloned());
+
+        let (fanotify, fanotify_status) = if fanotify_enabled {
+            match FanotifyCollector::new(&watch_mounts, &watch_include_paths, &exclude_paths) {
                 Ok(collector) => (
                     Some(collector),
                     TelemetrySourceDto {
                         source: TelemetrySource::Fanotify.as_str().into(),
                         status: "active".into(),
-                        detail: "Linux fanotify event collection active".into(),
+                        detail: format!(
+                            "Linux fanotify event collection active ({} mount(s), {} extra include path(s) watched)",
+                            effective_mounts.len(),
+                            watch_include_paths.len()
+                        ),
                     },
                 ),
                 Err(error) => (
@@ -77,25 +133,95 @@ impl TelemetryManager {
                 TelemetrySourceDto {
                     source: TelemetrySource::Fanotify.as_str().into(),
                     status: "disabled".into(),
-                    detail: if fanotify_enabled {
-                        "No filesystem watch paths configured".into()
-                    } else {
-                        "Set DENDRITE_FANOTIFY=1 to enable".into()
+                    detail: "Set DENDRITE_FANOTIFY=0 was used to opt out; unset it (or set to 1) to enable".into(),
+                },
+            )
+        };
+
+        let (ebpf, ebpf_status) = if ebpf_enabled {
+            match EbpfCollector::new(&ebpf_object) {
+                Ok(collector) => (
+                    Some(collector),
+                    TelemetrySourceDto {
+                        source: TelemetrySource::Ebpf.as_str().into(),
+                        status: "active".into(),
+                        detail: format!(
+                            "eBPF process exec + outbound connect collection active ({})",
+                            ebpf_object.display()
+                        ),
                     },
+                ),
+                Err(error) => (
+                    None,
+                    TelemetrySourceDto {
+                        source: TelemetrySource::Ebpf.as_str().into(),
+                        status: "fallback".into(),
+                        detail: format!(
+                            "eBPF unavailable ({error}); /proc process fallback remains active"
+                        ),
+                    },
+                ),
+            }
+        } else {
+            (
+                None,
+                TelemetrySourceDto {
+                    source: TelemetrySource::Ebpf.as_str().into(),
+                    status: "disabled".into(),
+                    detail: "Set DENDRITE_EBPF=1 after building the eBPF object".into(),
                 },
             )
         };
 
         Self {
             processes: ProcessCollector::new(),
-            filesystem: FilesystemCollector::new(watch_paths),
+            filesystem: FilesystemCollector::new(effective_paths),
             fanotify,
+            ebpf,
             fanotify_status,
+            ebpf_status,
+            control_plane_addr,
         }
     }
 
+    /// Re-checks for newly-appeared mounts (a USB drive, a container's
+    /// overlay mount, etc.) and extends fanotify's coverage to include them.
+    /// Intended to be called on the same cadence as
+    /// `DENDRITE_TELEMETRY_INTERVAL_SECONDS`. No-op if fanotify isn't active.
+    pub fn rescan_mounts(&mut self) {
+        if let Some(fanotify) = self.fanotify.as_mut() {
+            fanotify.rescan_mounts();
+        }
+    }
+
+    pub(crate) fn scope_for(&self, event: &CollectedObservation) -> TelemetryScope {
+        if is_dendrite_process(&event.observation.source.label) {
+            return TelemetryScope::DendriteControlPlane;
+        }
+
+        if event.observation.kind == ObservationKind::NetworkConnection
+            && self.control_plane_addr.ip().is_loopback()
+            && event
+                .observation
+                .target
+                .as_ref()
+                .and_then(|target| target.label.parse::<SocketAddr>().ok())
+                .is_some_and(|target| {
+                    target.ip().is_loopback() && target.port() == self.control_plane_addr.port()
+                })
+        {
+            return TelemetryScope::DendriteControlPlane;
+        }
+
+        TelemetryScope::Host
+    }
+
     pub fn collect(&mut self) -> Vec<CollectedObservation> {
-        let mut observations = self.processes.collect();
+        let mut observations = if let Some(ebpf) = &mut self.ebpf {
+            ebpf.collect()
+        } else {
+            self.processes.collect()
+        };
 
         if let Some(fanotify) = &mut self.fanotify {
             observations.extend(fanotify.collect());
@@ -108,10 +234,21 @@ impl TelemetryManager {
 
     pub fn status(&self) -> Vec<TelemetrySourceDto> {
         vec![
-            TelemetrySourceDto {
-                source: TelemetrySource::ProcPolling.as_str().into(),
-                status: "active".into(),
-                detail: "/proc process discovery fallback".into(),
+            self.fanotify_status.clone(),
+            self.ebpf_status.clone(),
+            if self.ebpf.is_some() {
+                TelemetrySourceDto {
+                    source: TelemetrySource::ProcPolling.as_str().into(),
+                    status: "standby".into(),
+                    detail: "/proc process discovery fallback is not used while eBPF is active"
+                        .into(),
+                }
+            } else {
+                TelemetrySourceDto {
+                    source: TelemetrySource::ProcPolling.as_str().into(),
+                    status: "active".into(),
+                    detail: "/proc process discovery fallback".into(),
+                }
             },
             if self.fanotify.is_some() {
                 TelemetrySourceDto {
@@ -126,14 +263,239 @@ impl TelemetryManager {
                     detail: "Filesystem metadata polling fallback".into(),
                 }
             },
-            self.fanotify_status.clone(),
-            TelemetrySourceDto {
-                source: TelemetrySource::Ebpf.as_str().into(),
-                status: "not_built".into(),
-                detail: "eBPF collector is reserved for Batch 5B".into(),
-            },
         ]
     }
+}
+
+struct EbpfCollector {
+    _bpf: Ebpf,
+    events: RingBuf<MapData>,
+}
+
+impl EbpfCollector {
+    fn new(object_path: &Path) -> Result<Self, String> {
+        if !object_path.exists() {
+            return Err(format!("object not found: {}", object_path.display()));
+        }
+
+        let mut bpf = Ebpf::load_file(object_path).map_err(|error| error.to_string())?;
+
+        let process: &mut TracePoint = bpf
+            .program_mut("dendrite_process_exec")
+            .ok_or_else(|| "missing dendrite_process_exec program".to_string())?
+            .try_into()
+            .map_err(|error: aya::programs::ProgramError| error.to_string())?;
+        process.load().map_err(|error| error.to_string())?;
+        process
+            .attach("sched", "sched_process_exec")
+            .map_err(|error| error.to_string())?;
+
+        let connect: &mut KProbe = bpf
+            .program_mut("dendrite_connect")
+            .ok_or_else(|| "missing dendrite_connect program".to_string())?
+            .try_into()
+            .map_err(|error: aya::programs::ProgramError| error.to_string())?;
+        connect.load().map_err(|error| error.to_string())?;
+        connect
+            .attach("__sys_connect", 0)
+            .map_err(|error| format!("attach __sys_connect: {error}"))?;
+
+        let map = bpf
+            .take_map("EVENTS")
+            .ok_or_else(|| "missing EVENTS ring buffer".to_string())?;
+        let events = RingBuf::try_from(map).map_err(|error| error.to_string())?;
+
+        Ok(Self { _bpf: bpf, events })
+    }
+
+    fn collect(&mut self) -> Vec<CollectedObservation> {
+        let mut observations = Vec::new();
+        while observations.len() < MAX_EVENTS_PER_COLLECTION {
+            let Some(item) = self.events.next() else {
+                break;
+            };
+            let bytes = item.as_ref();
+            if bytes.len() != std::mem::size_of::<EbpfEvent>() {
+                continue;
+            }
+
+            let mut event = EbpfEvent::zeroed(0);
+            // SAFETY: both regions are valid for exactly size_of::<EbpfEvent>() bytes and do not
+            // overlap. EbpfEvent contains only integer/byte-array fields and accepts any bit pattern.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    (&mut event as *mut EbpfEvent).cast::<u8>(),
+                    std::mem::size_of::<EbpfEvent>(),
+                );
+            }
+
+            if let Some(observation) = ebpf_observation(event) {
+                observations.push(observation);
+            }
+        }
+        observations
+    }
+}
+
+fn ebpf_observation(event: EbpfEvent) -> Option<CollectedObservation> {
+    let now = unix_time();
+    let process_id = if event.tgid > 0 {
+        event.tgid
+    } else {
+        event.pid
+    };
+    let process = read_process(process_id);
+    let source = process
+        .as_ref()
+        .map(ProcessInfo::descriptor)
+        .unwrap_or_else(|| unresolved_process_descriptor(process_id, &event.comm));
+
+    match event.kind {
+        EVENT_PROCESS_EXEC => {
+            let (observation, related_observations) = match process {
+                Some(process) => {
+                    let instance = process.descriptor();
+                    let mut related = process_context_observations(&process, now, "ebpf", false);
+
+                    if let Some(parent) = process.parent_pid.and_then(read_process) {
+                        related.push(Observation {
+                            id: ObservationId(format!(
+                                "ebpf-spawn:{}:{}",
+                                process.pid, process.start_ticks
+                            )),
+                            kind: ObservationKind::ProcessStarted,
+                            source: parent.descriptor(),
+                            target: Some(instance.clone()),
+                            observed_at: now,
+                            expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+                            severity: Severity::Low,
+                            confidence: Confidence::new(100).expect("100 is valid confidence"),
+                        });
+                    }
+
+                    let (kind, target, confidence) = match process.executable_descriptor() {
+                        Some(executable) => (ObservationKind::FileExecuted, Some(executable), 100),
+                        None => (ObservationKind::ProcessStarted, None, 90),
+                    };
+                    (
+                        Observation {
+                            id: ObservationId(format!(
+                                "ebpf-exec:{process_id}:{}",
+                                event.timestamp_ns
+                            )),
+                            kind,
+                            source: instance,
+                            target,
+                            observed_at: now,
+                            expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+                            severity: Severity::Low,
+                            confidence: Confidence::new(confidence)
+                                .expect("telemetry confidence is valid"),
+                        },
+                        related,
+                    )
+                }
+                None => (
+                    Observation {
+                        id: ObservationId(format!("ebpf-exec:{process_id}:{}", event.timestamp_ns)),
+                        kind: ObservationKind::ProcessStarted,
+                        source,
+                        target: None,
+                        observed_at: now,
+                        expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+                        severity: Severity::Low,
+                        confidence: Confidence::new(80).expect("80 is valid confidence"),
+                    },
+                    Vec::new(),
+                ),
+            };
+
+            Some(CollectedObservation {
+                source: TelemetrySource::Ebpf,
+                event: "process_executed".into(),
+                process_id: Some(process_id),
+                observation,
+                related_observations,
+            })
+        }
+        EVENT_NETWORK_CONNECT => {
+            let endpoint = ebpf_endpoint(&event)?;
+            let endpoint_label = format_endpoint(endpoint.0, event.port);
+            let target = ObjectDescriptor {
+                id: ObjectId(format!("network:{endpoint_label}")),
+                kind: EntityKind::NetworkEndpoint,
+                label: endpoint_label,
+            };
+            Some(CollectedObservation {
+                source: TelemetrySource::Ebpf,
+                event: "network_connect".into(),
+                process_id: Some(process_id),
+                observation: Observation {
+                    id: ObservationId(format!(
+                        "ebpf-connect:{process_id}:{}:{}:{}",
+                        stable_hash(&target.id.0),
+                        event.port,
+                        event.timestamp_ns
+                    )),
+                    kind: ObservationKind::NetworkConnection,
+                    source,
+                    target: Some(target),
+                    observed_at: now,
+                    expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+                    severity: Severity::Low,
+                    confidence: Confidence::new(100).expect("100 is valid confidence"),
+                },
+                related_observations: Vec::new(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn unresolved_process_descriptor(process_id: u32, comm: &[u8; 16]) -> ObjectDescriptor {
+    let label = ebpf_comm(comm).unwrap_or_else(|| format!("pid {process_id}"));
+    ObjectDescriptor {
+        id: ObjectId(format!("process_identity:comm:{}", stable_hash(&label))),
+        kind: EntityKind::Process,
+        label,
+    }
+}
+
+fn ebpf_comm(bytes: &[u8; 16]) -> Option<String> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
+fn format_endpoint(address: IpAddr, port: u16) -> String {
+    match address {
+        IpAddr::V4(address) => format!("{address}:{port}"),
+        IpAddr::V6(address) => format!("[{address}]:{port}"),
+    }
+}
+
+fn ebpf_endpoint(event: &EbpfEvent) -> Option<(IpAddr, u16)> {
+    let address = match event.family {
+        ADDRESS_FAMILY_INET => IpAddr::V4(Ipv4Addr::new(
+            event.address[0],
+            event.address[1],
+            event.address[2],
+            event.address[3],
+        )),
+        ADDRESS_FAMILY_INET6 => IpAddr::V6(Ipv6Addr::from(event.address)),
+        _ => return None,
+    };
+    Some((address, event.port))
+}
+
+fn is_dendrite_process(label: &str) -> bool {
+    matches!(label, "dendrited" | "dendrite-cli" | "dendrite-ui")
 }
 
 struct ProcessCollector {
@@ -194,6 +556,7 @@ impl ProcessCollector {
                         severity: Severity::Low,
                         confidence: Confidence::new(100).expect("100 is valid confidence"),
                     },
+                    related_observations: process_context_observations(&process, now, "proc", true),
                 });
             }
         }
@@ -211,6 +574,8 @@ struct ProcessInfo {
     start_ticks: u64,
     id: String,
     label: String,
+    executable: Option<PathBuf>,
+    user_id: Option<u32>,
 }
 
 impl ProcessInfo {
@@ -221,6 +586,69 @@ impl ProcessInfo {
             label: self.label.clone(),
         }
     }
+
+    fn executable_descriptor(&self) -> Option<ObjectDescriptor> {
+        let executable = self.executable.as_ref()?;
+        let label = executable.to_string_lossy().into_owned();
+        Some(ObjectDescriptor {
+            id: ObjectId(format!("file:{label}")),
+            kind: EntityKind::File,
+            label,
+        })
+    }
+
+    fn user_descriptor(&self) -> Option<ObjectDescriptor> {
+        let user_id = self.user_id?;
+        Some(ObjectDescriptor {
+            id: ObjectId(format!("user:uid:{user_id}")),
+            kind: EntityKind::User,
+            label: format!("uid {user_id}"),
+        })
+    }
+}
+
+fn process_context_observations(
+    process: &ProcessInfo,
+    now: u64,
+    prefix: &str,
+    include_executable: bool,
+) -> Vec<Observation> {
+    let instance = process.descriptor();
+    let mut observations = Vec::new();
+
+    if include_executable && let Some(executable) = process.executable_descriptor() {
+        observations.push(Observation {
+            id: ObservationId(format!(
+                "{prefix}-executable:{}:{}",
+                process.pid, process.start_ticks
+            )),
+            kind: ObservationKind::FileExecuted,
+            source: instance.clone(),
+            target: Some(executable),
+            observed_at: now,
+            expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+            severity: Severity::Low,
+            confidence: Confidence::new(100).expect("100 is valid confidence"),
+        });
+    }
+
+    if let Some(user) = process.user_descriptor() {
+        observations.push(Observation {
+            id: ObservationId(format!(
+                "{prefix}-user:{}:{}",
+                process.pid, process.start_ticks
+            )),
+            kind: ObservationKind::Associated,
+            source: instance,
+            target: Some(user),
+            observed_at: now,
+            expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+            severity: Severity::Low,
+            confidence: Confidence::new(95).expect("95 is valid confidence"),
+        });
+    }
+
+    observations
 }
 
 fn read_process(pid: u32) -> Option<ProcessInfo> {
@@ -238,6 +666,16 @@ fn read_process(pid: u32) -> Option<ProcessInfo> {
         .ok()
         .filter(|value| *value > 0);
     let start_ticks = fields.get(19)?.parse::<u64>().ok()?;
+    let executable = fs::read_link(format!("/proc/{pid}/exe")).ok();
+    let user_id = fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with("Uid:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|value| value.parse::<u32>().ok())
+        });
 
     Some(ProcessInfo {
         pid,
@@ -245,6 +683,8 @@ fn read_process(pid: u32) -> Option<ProcessInfo> {
         start_ticks,
         id: format!("process:{pid}:{start_ticks}"),
         label,
+        executable,
+        user_id,
     })
 }
 
@@ -305,6 +745,7 @@ impl FilesystemCollector {
                         now,
                         90,
                     ),
+                    related_observations: Vec::new(),
                 });
             }
         }
@@ -327,12 +768,192 @@ struct FanotifyEventMetadata {
     pid: i32,
 }
 
+/// Filesystem types that are never worth marking: kernel-internal/virtual
+/// interfaces with no persistent-storage security relevance and, in most
+/// cases, enormous synthetic event volume for zero benefit. Deliberately
+/// does NOT include `tmpfs` (backs real, security-relevant paths like
+/// `/tmp` and `/dev/shm`) or `overlay` (what container filesystems use —
+/// exactly what we want to see).
+const PSEUDO_FILESYSTEM_TYPES: &[&str] = &[
+    "proc",
+    "sysfs",
+    "cgroup",
+    "cgroup2",
+    "devpts",
+    "devtmpfs",
+    "debugfs",
+    "tracefs",
+    "securityfs",
+    "pstore",
+    "autofs",
+    "mqueue",
+    "hugetlbfs",
+    "binfmt_misc",
+    "configfs",
+    "fusectl",
+    "bpf",
+    "nsfs",
+    "rpc_pipefs",
+    "sunrpc",
+    "efivarfs",
+];
+
+/// Undoes the octal-escaping (`\040` for space, etc.) `/proc/self/mountinfo`
+/// applies to mount point paths containing whitespace or backslashes — real
+/// on removable media mounted at a label-derived path.
+fn unescape_mountinfo_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(&raw[i + 1..i + 4], 8)
+        {
+            out.push(value as char);
+            i += 4;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Parses `/proc/self/mountinfo` into (mount point, filesystem type) pairs.
+/// Format per proc(5): a variable number of optional fields between the
+/// mount options and a literal `-` separator, then filesystem type, mount
+/// source, and superblock options. We only need field 5 (mount point) and
+/// the field immediately after the `-` separator (filesystem type).
+fn parse_mountinfo(contents: &str) -> Vec<(PathBuf, String)> {
+    let mut mounts = Vec::new();
+    for line in contents.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(dash) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let (Some(mount_point), Some(fstype)) = (fields.get(4), fields.get(dash + 1)) else {
+            continue;
+        };
+        mounts.push((
+            PathBuf::from(unescape_mountinfo_path(mount_point)),
+            (*fstype).to_string(),
+        ));
+    }
+    mounts
+}
+
+/// Discovers every currently-mounted, non-pseudo filesystem — this is the
+/// full default watch scope: `DENDRITE_FANOTIFY` is opt-out, not opt-in, and
+/// once it's on, coverage should look like a real EDR/AV product (watch
+/// everything real by default), not require a hand-maintained path list.
+/// `restrict_to` (from `DENDRITE_WATCH_MOUNTS`, if set) narrows this down to
+/// just the listed mount points instead of every discovered one.
+fn discover_watchable_mounts(restrict_to: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(contents) = fs::read_to_string("/proc/self/mountinfo") else {
+        return Vec::new();
+    };
+    parse_mountinfo(&contents)
+        .into_iter()
+        .filter(|(_, fstype)| !PSEUDO_FILESYSTEM_TYPES.contains(&fstype.as_str()))
+        .map(|(mount_point, _)| mount_point)
+        .filter(|mount_point| restrict_to.is_empty() || restrict_to.contains(mount_point))
+        .collect()
+}
+
+/// Whether an observed path falls under any of `exclude_paths` and should be
+/// dropped before it ever becomes an observation. Prefix match on path
+/// components, not a raw string prefix (so `/etc-backup` is not excluded by
+/// an exclude entry of `/etc`).
+fn is_excluded(path: &Path, exclude_paths: &[PathBuf]) -> bool {
+    exclude_paths
+        .iter()
+        .any(|excluded| path.starts_with(excluded))
+}
+
+/// Whether any entry in `include_paths` and `exclude_paths` contradict each
+/// other — equal, or one a path-component ancestor of the other in either
+/// direction. Rejected outright rather than silently resolved one way:
+/// picking a winner (e.g. "exclude always wins") would make it easy to
+/// believe a path is covered when it silently isn't, or vice versa — a
+/// security-relevant footgun this codebase consistently rejects rather than
+/// papers over (see `validate_behaviour_condition` in `vulnerability.rs` for
+/// the same philosophy applied elsewhere).
+fn find_watch_path_collision(
+    include_paths: &[PathBuf],
+    exclude_paths: &[PathBuf],
+) -> Option<(PathBuf, PathBuf)> {
+    for include in include_paths {
+        for exclude in exclude_paths {
+            if include.starts_with(exclude) || exclude.starts_with(include) {
+                return Some((include.clone(), exclude.clone()));
+            }
+        }
+    }
+    None
+}
+
+/// Recursively collects directories under `path` (following the same
+/// pattern as the pre-`FAN_MARK_FILESYSTEM` design), up to `remaining`
+/// entries — used only for `DENDRITE_WATCH_INCLUDE_PATHS`, which adds
+/// specific extra paths rather than an entire mount, so a directory-by-
+/// directory walk (bounded by a cap, since an include path could still be
+/// large) is the right tool here, unlike for mount-level coverage.
+fn collect_directories(path: &Path, output: &mut Vec<PathBuf>, remaining: usize) {
+    if output.len() >= remaining {
+        return;
+    }
+
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return;
+    }
+
+    output.push(path.to_path_buf());
+    if output.len() >= remaining {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        collect_directories(&entry.path(), output, remaining);
+        if output.len() >= remaining {
+            break;
+        }
+    }
+}
+
 struct FanotifyCollector {
     fd: RawFd,
+    exclude_paths: Vec<PathBuf>,
+    restrict_to: Vec<PathBuf>,
+    include_paths: Vec<PathBuf>,
+    marked_devices: HashSet<u64>,
 }
 
 impl FanotifyCollector {
-    fn new(watch_paths: &[PathBuf]) -> Result<Self, String> {
+    const MASK: u64 =
+        libc::FAN_OPEN | libc::FAN_MODIFY | libc::FAN_CLOSE_WRITE | libc::FAN_EVENT_ON_CHILD;
+
+    fn new(
+        restrict_to: &[PathBuf],
+        include_paths: &[PathBuf],
+        exclude_paths: &[PathBuf],
+    ) -> Result<Self, String> {
+        if let Some((include, exclude)) = find_watch_path_collision(include_paths, exclude_paths) {
+            return Err(format!(
+                "DENDRITE_WATCH_INCLUDE_PATHS entry {include:?} conflicts with \
+                 DENDRITE_WATCH_EXCLUDE_PATHS entry {exclude:?} (one contains the other) — \
+                 fix the overlap before fanotify can start"
+            ));
+        }
+
         let flags = libc::FAN_CLASS_NOTIF | libc::FAN_CLOEXEC | libc::FAN_NONBLOCK;
         let event_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_LARGEFILE;
 
@@ -342,10 +963,48 @@ impl FanotifyCollector {
             return Err(std::io::Error::last_os_error().to_string());
         }
 
-        let mut marked = 0usize;
-        for root in watch_paths {
+        let mut collector = Self {
+            fd,
+            exclude_paths: exclude_paths.to_vec(),
+            restrict_to: restrict_to.to_vec(),
+            include_paths: include_paths.to_vec(),
+            marked_devices: HashSet::new(),
+        };
+
+        let mounts = discover_watchable_mounts(&collector.restrict_to);
+        let mut marked = collector.mark_new_mounts(&mounts);
+        marked += collector.mark_include_paths();
+
+        if marked == 0 {
+            // SAFETY: fd was returned by fanotify_init and is owned here.
+            unsafe { libc::close(fd) };
+            return Err("no filesystem mounts or include paths could be marked".into());
+        }
+
+        Ok(collector)
+    }
+
+    /// Marks every `DENDRITE_WATCH_INCLUDE_PATHS` entry whose underlying
+    /// device isn't already covered by an existing filesystem-wide mark —
+    /// directory-by-directory (see `collect_directories`), since these are
+    /// meant to add specific extra coverage, not an entire mount. Skips an
+    /// include path entirely if its device is already marked, to avoid a
+    /// redundant walk over ground already covered.
+    fn mark_include_paths(&mut self) -> usize {
+        let mut newly_marked = 0usize;
+        let mut remaining = MAX_FANOTIFY_INCLUDE_DIRECTORIES;
+        for include_path in self.include_paths.clone() {
+            if remaining == 0 {
+                break;
+            }
+            if let Ok(meta) = fs::metadata(&include_path)
+                && self.marked_devices.contains(&meta.dev())
+            {
+                continue;
+            }
+
             let mut directories = Vec::new();
-            collect_directories(root, &mut directories, MAX_FANOTIFY_DIRECTORIES - marked);
+            collect_directories(&include_path, &mut directories, remaining);
 
             for directory in directories {
                 let Some(path) = directory.to_str() else {
@@ -354,44 +1013,84 @@ impl FanotifyCollector {
                 let Ok(c_path) = CString::new(path) else {
                     continue;
                 };
-
-                let mask = libc::FAN_OPEN
-                    | libc::FAN_MODIFY
-                    | libc::FAN_CLOSE_WRITE
-                    | libc::FAN_EVENT_ON_CHILD;
-
-                // SAFETY: fd is an owned fanotify fd and c_path is NUL-terminated for this call.
+                // SAFETY: self.fd is an owned fanotify fd and c_path is NUL-terminated for this call.
                 let result = unsafe {
                     libc::fanotify_mark(
-                        fd,
+                        self.fd,
                         libc::FAN_MARK_ADD,
-                        mask,
+                        Self::MASK,
                         libc::AT_FDCWD,
                         c_path.as_ptr(),
                     )
                 };
-
                 if result == 0 {
-                    marked += 1;
+                    newly_marked += 1;
+                    remaining -= 1;
                 }
-
-                if marked >= MAX_FANOTIFY_DIRECTORIES {
+                if remaining == 0 {
                     break;
                 }
             }
+        }
+        newly_marked
+    }
 
-            if marked >= MAX_FANOTIFY_DIRECTORIES {
-                break;
+    /// Marks any of `mount_points` whose underlying device isn't already
+    /// covered by an existing mark. Called once at startup with every
+    /// discovered mount, and again periodically (piggybacking on the
+    /// telemetry polling interval) to pick up mounts that appeared after
+    /// startup — a USB drive, a newly-started container's overlay mount,
+    /// etc. This purely extends fanotify's coverage; it does not itself
+    /// generate an observation about the mount appearing (that's a
+    /// potential future signal in its own right, not implemented here).
+    /// Returns how many new marks were actually added.
+    fn mark_new_mounts(&mut self, mount_points: &[PathBuf]) -> usize {
+        let mut newly_marked = 0usize;
+        for mount_point in mount_points {
+            let Ok(meta) = fs::metadata(mount_point) else {
+                continue;
+            };
+            if self.marked_devices.contains(&meta.dev()) {
+                continue;
+            }
+            let Some(path) = mount_point.to_str() else {
+                continue;
+            };
+            let Ok(c_path) = CString::new(path) else {
+                continue;
+            };
+            // SAFETY: self.fd is an owned fanotify fd and c_path is NUL-terminated for this call.
+            let result = unsafe {
+                libc::fanotify_mark(
+                    self.fd,
+                    libc::FAN_MARK_ADD | libc::FAN_MARK_FILESYSTEM,
+                    Self::MASK,
+                    libc::AT_FDCWD,
+                    c_path.as_ptr(),
+                )
+            };
+            if result == 0 {
+                self.marked_devices.insert(meta.dev());
+                newly_marked += 1;
             }
         }
+        newly_marked
+    }
 
-        if marked == 0 {
-            // SAFETY: fd was returned by fanotify_init and is owned here.
-            unsafe { libc::close(fd) };
-            return Err("no watch directories could be marked".into());
+    /// Re-reads `/proc/self/mountinfo` and marks any newly-appeared mount.
+    /// Intended to be called on the same cadence as
+    /// `DENDRITE_TELEMETRY_INTERVAL_SECONDS`. Logs to stderr when it picks
+    /// up something new, purely for operator visibility — this is
+    /// deliberately just coverage maintenance, not a security signal in
+    /// its own right.
+    fn rescan_mounts(&mut self) {
+        let mounts = discover_watchable_mounts(&self.restrict_to);
+        let newly_marked = self.mark_new_mounts(&mounts);
+        if newly_marked > 0 {
+            eprintln!(
+                "fanotify: detected and began watching {newly_marked} newly-appeared mount(s)"
+            );
         }
-
-        Ok(Self { fd })
     }
 
     fn collect(&mut self) -> Vec<CollectedObservation> {
@@ -418,7 +1117,9 @@ impl FanotifyCollector {
             let bytes = bytes as usize;
             let mut offset = 0usize;
 
-            while offset + std::mem::size_of::<FanotifyEventMetadata>() <= bytes {
+            while offset + std::mem::size_of::<FanotifyEventMetadata>() <= bytes
+                && observations.len() < MAX_EVENTS_PER_COLLECTION
+            {
                 // SAFETY: bounds above guarantee enough bytes; read_unaligned handles buffer alignment.
                 let metadata = unsafe {
                     std::ptr::read_unaligned(
@@ -437,7 +1138,7 @@ impl FanotifyCollector {
 
                 if metadata.fd >= 0 {
                     let event_fd = metadata.fd;
-                    if let Some(event) = fanotify_event(metadata, event_fd) {
+                    if let Some(event) = fanotify_event(metadata, event_fd, &self.exclude_paths) {
                         let key = (
                             event.process_id,
                             event.event.clone(),
@@ -459,6 +1160,10 @@ impl FanotifyCollector {
 
                 offset += event_len;
             }
+
+            if observations.len() >= MAX_EVENTS_PER_COLLECTION {
+                break;
+            }
         }
 
         observations
@@ -475,8 +1180,12 @@ impl Drop for FanotifyCollector {
 fn fanotify_event(
     metadata: FanotifyEventMetadata,
     event_fd: RawFd,
+    exclude_paths: &[PathBuf],
 ) -> Option<CollectedObservation> {
     let path = fs::read_link(format!("/proc/self/fd/{event_fd}")).ok()?;
+    if is_excluded(&path, exclude_paths) {
+        return None;
+    }
     let path_text = path.to_string_lossy().into_owned();
     let now = unix_time();
     let pid = u32::try_from(metadata.pid).ok();
@@ -501,6 +1210,7 @@ fn fanotify_event(
         event: event.into(),
         process_id: pid,
         observation: file_observation(source, &path_text, kind, "fanotify", now, confidence),
+        related_observations: Vec::new(),
     })
 }
 
@@ -530,36 +1240,6 @@ fn file_observation(
         expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
         severity: Severity::Low,
         confidence: Confidence::new(confidence).expect("telemetry confidence is valid"),
-    }
-}
-
-fn collect_directories(path: &Path, output: &mut Vec<PathBuf>, remaining: usize) {
-    if output.len() >= remaining {
-        return;
-    }
-
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
-    };
-
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return;
-    }
-
-    output.push(path.to_path_buf());
-    if output.len() >= remaining {
-        return;
-    }
-
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        collect_directories(&entry.path(), output, remaining);
-        if output.len() >= remaining {
-            break;
-        }
     }
 }
 
@@ -646,9 +1326,131 @@ mod tests {
     }
 
     #[test]
+    fn mountinfo_parser_extracts_mount_point_and_fstype() {
+        let sample = "36 35 98:0 / /mnt1 rw,noatime master:1 - ext3 /dev/root rw,errors=continue\n\
+                       21 25 0:19 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw";
+        let mounts = parse_mountinfo(sample);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0], (PathBuf::from("/mnt1"), "ext3".to_string()));
+        assert_eq!(mounts[1], (PathBuf::from("/proc"), "proc".to_string()));
+    }
+
+    #[test]
+    fn mountinfo_paths_with_escaped_whitespace_are_unescaped() {
+        // A USB drive labelled "My Drive" mounts with the space escaped as \040.
+        assert_eq!(
+            unescape_mountinfo_path(r"/media/user/My\040Drive"),
+            "/media/user/My Drive"
+        );
+    }
+
+    #[test]
+    fn discover_watchable_mounts_excludes_pseudo_filesystems_and_reads_the_real_root() {
+        // Reads this sandbox's own real /proc/self/mountinfo — not a fixture — so this
+        // doubles as a smoke test that discovery works against a genuine kernel-provided file.
+        let mounts = discover_watchable_mounts(&[]);
+        assert!(
+            mounts.contains(&PathBuf::from("/")),
+            "root filesystem must be discovered: {mounts:?}"
+        );
+        assert!(
+            !mounts.iter().any(|mount| mount == Path::new("/proc")),
+            "a pseudo-filesystem must not be in the discovered set: {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn discover_watchable_mounts_respects_a_restrict_list() {
+        let restrict = vec![PathBuf::from("/this-mount-point-does-not-exist")];
+        let mounts = discover_watchable_mounts(&restrict);
+        assert!(
+            mounts.is_empty(),
+            "restricting to an unmounted path must yield nothing"
+        );
+    }
+
+    #[test]
+    fn exclude_paths_match_by_path_component_not_raw_string_prefix() {
+        let excluded = vec![PathBuf::from("/etc")];
+        assert!(is_excluded(Path::new("/etc/passwd"), &excluded));
+        assert!(is_excluded(Path::new("/etc"), &excluded));
+        // A raw string prefix match would incorrectly exclude this; a path-component match must not.
+        assert!(!is_excluded(Path::new("/etc-backup/passwd"), &excluded));
+        assert!(!is_excluded(Path::new("/var/log"), &excluded));
+    }
+
+    #[test]
+    fn watch_path_collision_detects_exclude_containing_include() {
+        let include = vec![PathBuf::from("/etc/important")];
+        let exclude = vec![PathBuf::from("/etc")];
+        assert!(find_watch_path_collision(&include, &exclude).is_some());
+    }
+
+    #[test]
+    fn watch_path_collision_detects_include_containing_exclude() {
+        let include = vec![PathBuf::from("/data")];
+        let exclude = vec![PathBuf::from("/data/cache")];
+        assert!(find_watch_path_collision(&include, &exclude).is_some());
+    }
+
+    #[test]
+    fn watch_path_collision_detects_exact_equality() {
+        let include = vec![PathBuf::from("/srv/app")];
+        let exclude = vec![PathBuf::from("/srv/app")];
+        assert!(find_watch_path_collision(&include, &exclude).is_some());
+    }
+
+    #[test]
+    fn watch_path_collision_is_none_for_genuinely_unrelated_paths() {
+        let include = vec![PathBuf::from("/srv/app")];
+        let exclude = vec![PathBuf::from("/etc"), PathBuf::from("/tmp")];
+        assert!(find_watch_path_collision(&include, &exclude).is_none());
+        // A sibling with a shared string prefix but a different path component must not collide.
+        let include = vec![PathBuf::from("/etc-backup")];
+        let exclude = vec![PathBuf::from("/etc")];
+        assert!(find_watch_path_collision(&include, &exclude).is_none());
+    }
+
+    #[test]
     fn stable_hash_is_deterministic() {
         assert_eq!(stable_hash("/tmp/example"), stable_hash("/tmp/example"));
         assert_ne!(stable_hash("/tmp/example"), stable_hash("/tmp/other"));
+    }
+
+    #[test]
+    fn unresolved_ebpf_processes_collapse_to_stable_command_identity() {
+        let mut comm = [0u8; 16];
+        comm[..3].copy_from_slice(b"cat");
+        let first = unresolved_process_descriptor(101, &comm);
+        let second = unresolved_process_descriptor(202, &comm);
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.label, "cat");
+        assert!(first.id.0.starts_with("process_identity:comm:"));
+    }
+
+    #[test]
+    fn ebpf_event_layout_is_stable() {
+        assert_eq!(std::mem::size_of::<EbpfEvent>(), 64);
+        assert_eq!(std::mem::align_of::<EbpfEvent>(), 8);
+    }
+
+    #[test]
+    fn ebpf_endpoint_formats_ipv4_and_ipv6() {
+        assert_eq!(
+            format_endpoint(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8766),
+            "127.0.0.1:8766"
+        );
+        assert_eq!(
+            format_endpoint(IpAddr::V6(Ipv6Addr::LOCALHOST), 8766),
+            "[::1]:8766"
+        );
+    }
+
+    #[test]
+    fn ebpf_command_trims_nul_padding() {
+        let mut command = [0u8; 16];
+        command[..4].copy_from_slice(b"curl");
+        assert_eq!(ebpf_comm(&command).as_deref(), Some("curl"));
     }
 
     #[test]
@@ -660,5 +1462,25 @@ mod tests {
         );
         assert_eq!(TelemetrySource::Fanotify.as_str(), "fanotify");
         assert_eq!(TelemetrySource::Ebpf.as_str(), "ebpf");
+    }
+
+    #[test]
+    fn scope_names_and_reasoning_policy_are_stable() {
+        assert_eq!(TelemetryScope::Host.as_str(), "host");
+        assert_eq!(
+            TelemetryScope::DendriteControlPlane.as_str(),
+            "dendrite_control_plane"
+        );
+        assert!(TelemetryScope::Host.feeds_security_reasoning());
+        assert!(!TelemetryScope::DendriteControlPlane.feeds_security_reasoning());
+    }
+
+    #[test]
+    fn dendrite_process_classification_is_exact() {
+        assert!(is_dendrite_process("dendrited"));
+        assert!(is_dendrite_process("dendrite-cli"));
+        assert!(is_dendrite_process("dendrite-ui"));
+        assert!(!is_dendrite_process("dendrited-malware"));
+        assert!(!is_dendrite_process("firefox"));
     }
 }

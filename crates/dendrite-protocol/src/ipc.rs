@@ -71,12 +71,50 @@ pub enum IpcRequest {
         severity: String,
         description: String,
     },
+    VulnerabilityStatus,
+    VulnerabilityInventory,
+    Vulnerabilities {
+        include_resolved: bool,
+    },
+    Vulnerability {
+        id: String,
+    },
+    VulnerabilityRefresh,
+    VulnerabilityImport {
+        path: String,
+    },
+    VulnerabilityManual {
+        id: String,
+    },
+    VulnerabilityAuthorise {
+        id: String,
+    },
+    VulnerabilityUpdate {
+        id: String,
+    },
+    VulnerabilityIgnore {
+        id: String,
+    },
+    VulnerabilityDelete {
+        id: String,
+    },
     Health,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceSigningKeyDto {
+    pub key_id: String,
+    pub algorithm: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonStatusDto {
     pub version: String,
+    pub instance_id: String,
+    pub signing_key: InstanceSigningKeyDto,
     pub observations_ingested: u64,
     pub incidents_open: u64,
     pub memory_nodes_known: u64,
@@ -101,6 +139,7 @@ pub struct EvidenceDto {
     pub description: String,
     pub confidence: u8,
     pub observed_at: u64,
+    pub objects: Vec<crate::EvidenceObjectRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +160,43 @@ pub struct MemoryNodeDto {
     pub created_at: u64,
     pub last_seen_at: u64,
     pub expires_at: Option<u64>,
+    pub origin_instance_id: Option<String>,
+    pub imported_from_instance_id: Option<String>,
+    pub derived_by_instance_id: Option<String>,
+    pub lineage: Vec<String>,
+    #[serde(default)]
+    pub correlation_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRelationshipDto {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub target: String,
+    pub state: String,
+    pub priority: String,
+    pub retention: String,
+    pub strength: u8,
+    pub effective_strength: u8,
+    pub confidence: u8,
+    pub observation_count: u64,
+    pub created_at: u64,
+    pub last_seen_at: u64,
+    pub expires_at: Option<u64>,
+    pub origin_instance_id: Option<String>,
+    pub imported_from_instance_id: Option<String>,
+    pub derived_by_instance_id: Option<String>,
+    pub lineage: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryGraphDto {
+    pub nodes: Vec<MemoryNodeDto>,
+    pub relationships: Vec<MemoryRelationshipDto>,
+    pub truncated: bool,
+    pub total_nodes: u64,
+    pub total_relationships: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +275,9 @@ pub struct TelemetryEventDto {
     pub event: String,
     pub observation_kind: String,
     pub process_id: Option<u32>,
+    pub scope: String,
     pub source_object: String,
+    pub source_label: String,
     pub target_object: Option<String>,
     pub target_label: Option<String>,
     pub observed_at: u64,
@@ -213,10 +291,96 @@ pub struct TelemetrySourceDto {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TelemetryPipelineLaneDto {
+    pub queue_depth: usize,
+    pub queue_capacity: usize,
+    pub peak_queue_depth: usize,
+    pub events_received: u64,
+    pub events_processed: u64,
+    pub events_dropped: u64,
+    pub last_queue_wait_ms: u64,
+    pub max_queue_wait_ms: u64,
+    pub last_processing_ms: u64,
+    pub max_processing_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TelemetryPipelineDto {
+    pub queue_depth: usize,
+    pub queue_capacity: usize,
+    pub peak_queue_depth: usize,
+    pub events_received: u64,
+    pub events_processed: u64,
+    pub events_dropped: u64,
+    pub security_observations_ingested: u64,
+    pub last_queue_wait_ms: u64,
+    pub max_queue_wait_ms: u64,
+    pub last_processing_ms: u64,
+    pub max_processing_ms: u64,
+    pub high_value: TelemetryPipelineLaneDto,
+    pub routine: TelemetryPipelineLaneDto,
+    pub scheduler_high_value_weight: usize,
+    pub scheduler_routine_weight: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryStatusDto {
     pub sources: Vec<TelemetrySourceDto>,
     pub recent_events: usize,
+    pub pipeline: TelemetryPipelineDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageInventoryDto {
+    pub name: String,
+    pub architecture: String,
+    pub version: String,
+    pub source: String,
+    pub first_seen_at: u64,
+    pub last_seen_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulnerabilityExposureDto {
+    pub id: String,
+    pub cve_id: String,
+    pub package: String,
+    pub architecture: String,
+    pub installed_version: String,
+    pub fixed_version: Option<String>,
+    pub severity: String,
+    pub status: String,
+    pub first_seen_at: u64,
+    pub last_seen_at: u64,
+    pub resolution_source: Option<String>,
+    pub awaiting_manual: bool,
+    pub authorised_at: Option<u64>,
+    /// The `installed_version` at the moment this exposure was ignored — used
+    /// to detect "a package update revealed the same CVE again" (the
+    /// installed version has since changed while still matching the CVE)
+    /// and automatically re-raise it. `None` unless `status == "ignored"`.
+    pub ignored_version: Option<String>,
+    pub ignored_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveKnowledgeStatusDto {
+    pub records: u64,
+    pub packages: u64,
+    pub inventory_packages: u64,
+    pub open_exposures: u64,
+    pub source: Option<String>,
+    pub generated_at: Option<u64>,
+    pub last_imported_at: Option<u64>,
+    pub inventory_last_refreshed_at: Option<u64>,
+    pub assessment_last_run_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulnerabilityRemediationDto {
+    pub exposure: VulnerabilityExposureDto,
+    pub action: ActionDetailDto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +427,24 @@ pub enum IpcResponse {
         events: Vec<TelemetryEventDto>,
     },
     TelemetryStatus(TelemetryStatusDto),
+    VulnerabilityStatus(CveKnowledgeStatusDto),
+    VulnerabilityInventory {
+        packages: Vec<PackageInventoryDto>,
+    },
+    Vulnerabilities {
+        exposures: Vec<VulnerabilityExposureDto>,
+    },
+    Vulnerability {
+        exposure: VulnerabilityExposureDto,
+    },
+    VulnerabilityImport {
+        imported: usize,
+        status: CveKnowledgeStatusDto,
+    },
+    VulnerabilityRemediation(Box<VulnerabilityRemediationDto>),
+    VulnerabilityDeleted {
+        deleted: bool,
+    },
     Health(HealthDto),
     Error {
         message: String,
