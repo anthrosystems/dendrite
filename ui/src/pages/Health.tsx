@@ -154,8 +154,8 @@ export function HealthPage() {
           </div>
           <div className="health-ingestion-lanes">
             <div className="health-ingestion-lane health-ingestion-lane--high">
-              <div><span>High-value</span><strong>{telemetry.data.pipeline.high_value.queue_depth.toLocaleString()} / {telemetry.data.pipeline.high_value.queue_capacity.toLocaleString()}</strong></div>
-              <small>{telemetry.data.pipeline.high_value.events_dropped.toLocaleString()} dropped · max wait {telemetry.data.pipeline.high_value.max_queue_wait_ms} ms</small>
+              <div><span>Priority</span><strong>{telemetry.data.pipeline.priority.queue_depth.toLocaleString()} / {telemetry.data.pipeline.priority.queue_capacity.toLocaleString()}</strong></div>
+              <small>{telemetry.data.pipeline.priority.events_dropped.toLocaleString()} dropped · max wait {telemetry.data.pipeline.priority.max_queue_wait_ms} ms</small>
             </div>
             <div className="health-ingestion-lane health-ingestion-lane--routine">
               <div><span>Routine</span><strong>{telemetry.data.pipeline.routine.queue_depth.toLocaleString()} / {telemetry.data.pipeline.routine.queue_capacity.toLocaleString()}</strong></div>

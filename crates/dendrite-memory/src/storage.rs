@@ -213,6 +213,30 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Starts an explicit transaction spanning subsequent writes on this
+    /// connection, until `commit_batch`/`rollback_batch`. SQLite transactions
+    /// are connection-scoped, not per-call — so any of `MemoryStore`'s
+    /// existing individual `save_node`/`save_relationship`/etc. calls made
+    /// while a batch is open automatically become part of it, with no
+    /// changes needed to those methods themselves. Used by the routine
+    /// ingestion worker to commit many observations at once instead of one
+    /// autocommit per statement, which is where most of SQLite's per-write
+    /// overhead actually comes from.
+    pub fn begin_batch(&self) -> rusqlite::Result<()> {
+        self.connection.execute_batch("BEGIN")
+    }
+
+    pub fn commit_batch(&self) -> rusqlite::Result<()> {
+        self.connection.execute_batch("COMMIT")
+    }
+
+    /// Best-effort — if COMMIT itself already failed, ROLLBACK may also
+    /// fail, but there's nothing more useful to do at that point than log it
+    /// (which the caller does) and move on to the next batch.
+    pub fn rollback_batch(&self) -> rusqlite::Result<()> {
+        self.connection.execute_batch("ROLLBACK")
+    }
+
     pub fn node_count(&self) -> rusqlite::Result<u64> {
         self.connection
             .query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))

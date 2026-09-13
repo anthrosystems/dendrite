@@ -296,6 +296,24 @@ impl DaemonCore {
         })
     }
 
+    /// Starts a batched-write transaction on the Memory Graph store — see
+    /// `MemoryStore::begin_batch`'s doc comment for why this is enough to
+    /// make every subsequent `ingest_observation` call in the batch part of
+    /// one commit, with no changes to `ingest_observation` itself.
+    pub fn begin_memory_batch(&self) -> Result<(), DaemonError> {
+        Ok(self.memory.begin_batch()?)
+    }
+
+    pub fn commit_memory_batch(&self) -> Result<(), DaemonError> {
+        Ok(self.memory.commit_batch()?)
+    }
+
+    /// Best-effort: logs nothing itself, just tries — the caller is
+    /// responsible for logging, since it knows why the rollback happened.
+    pub fn rollback_memory_batch(&self) {
+        let _ = self.memory.rollback_batch();
+    }
+
     pub fn instance_id(&self) -> &str {
         &self.instance_id
     }

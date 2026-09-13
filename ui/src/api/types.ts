@@ -215,9 +215,9 @@ export interface TelemetryPipeline {
   max_queue_wait_ms: number
   last_processing_ms: number
   max_processing_ms: number
-  high_value: TelemetryPipelineLane
+  priority: TelemetryPipelineLane
   routine: TelemetryPipelineLane
-  scheduler_high_value_weight: number
+  scheduler_priority_weight: number
   scheduler_routine_weight: number
 }
 

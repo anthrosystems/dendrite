@@ -60,6 +60,20 @@ impl LiveBroadcaster {
     }
 
     pub fn publish<T: Serialize>(&self, kind: &str, payload: &T) {
+        // Skip the JSON serialization entirely when nobody's listening — this
+        // runs on the hot ingestion path, once per processed observation, so
+        // paying for it unconditionally (as before) means real, avoidable CPU
+        // cost on every single event whenever no UI/WebSocket client is
+        // connected, which is the common case for unattended operation.
+        let has_subscribers = self
+            .subscribers
+            .lock()
+            .map(|subscribers| !subscribers.is_empty())
+            .unwrap_or(false);
+        if !has_subscribers {
+            return;
+        }
+
         let Ok(message) = serde_json::to_string(&serde_json::json!({
             "kind": kind,
             "payload": payload,

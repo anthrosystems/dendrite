@@ -318,9 +318,9 @@ pub struct TelemetryPipelineDto {
     pub max_queue_wait_ms: u64,
     pub last_processing_ms: u64,
     pub max_processing_ms: u64,
-    pub high_value: TelemetryPipelineLaneDto,
+    pub priority: TelemetryPipelineLaneDto,
     pub routine: TelemetryPipelineLaneDto,
-    pub scheduler_high_value_weight: usize,
+    pub scheduler_priority_weight: usize,
     pub scheduler_routine_weight: usize,
 }
 

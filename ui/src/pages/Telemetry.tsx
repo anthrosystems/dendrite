@@ -96,14 +96,14 @@ export function Telemetry() {
               <h2>{status.data.pipeline.queue_depth.toLocaleString()} / {status.data.pipeline.queue_capacity.toLocaleString()} queued</h2>
             </div>
             <span>
-              Scheduler {status.data.pipeline.scheduler_high_value_weight}:{status.data.pipeline.scheduler_routine_weight}
-              {' '}high-value:routine
+              Scheduler {status.data.pipeline.scheduler_priority_weight}:{status.data.pipeline.scheduler_routine_weight}
+              {' '}priority:routine
             </span>
           </div>
 
           <div className="ingestion-lanes">
             {([
-              ['High-value', status.data.pipeline.high_value, 'high'],
+              ['Priority', status.data.pipeline.priority, 'high'],
               ['Routine', status.data.pipeline.routine, 'routine'],
             ] as const).map(([label, lane, tone]) => (
               <section className={`ingestion-lane ingestion-lane--${tone}`} key={label}>

@@ -192,3 +192,43 @@ still be open when Checkpoint A is signed off.
   their own notes. A direct SQLite edit wouldn't have been a substitute
   test either way, since the cap lives in the model layer, not the
   read/decode path.
+- [x] Ingestion pipeline saturation, found via real numbers on the physical
+  Proxmox host (`/` watched, EBPF off): routine lane 57,258/57,344 with
+  2,263 dropped, `Max combined wait: 721,143 ms`, yet only 68 Memory Graph
+  nodes/44 relationships — confirming most received telemetry was still
+  backlogged, not "healthily deduplicated." Root cause: a single shared
+  worker thread for both lanes (only turn-order weighted, not actually
+  parallel), plus no batching at all (every `save_node`/`save_relationship`/
+  correlation-key write autocommits individually, despite WAL +
+  `synchronous=NORMAL` already being configured correctly). Considered and
+  rejected an external queue (Redis/etc.) for this — it doesn't address the
+  actual bottleneck (SQLite write throughput on this host), adds a new
+  unauthenticated network service on top of the already-tracked HTTP/WS gap,
+  and conflicts with "raw telemetry is short-lived" as a design principle.
+  Fixed instead: priority and routine now have fully separate dedicated
+  worker threads (`spawn_priority_worker`/`spawn_routine_worker` in
+  `runtime.rs`) — this directly addresses "a genuine attack could saturate
+  priority the same way," since a routine flood can no longer occupy
+  priority's only processing slot the way a shared thread did. Routine
+  additionally batches up to `ROUTINE_BATCH_SIZE` (200) jobs into one
+  transaction (`MemoryStore::begin_batch`/`commit_batch`/`rollback_batch` in
+  `dendrite-memory`, delegated via `DaemonCore`) instead of autocommitting
+  per statement — no changes needed to `ingest_observation` itself, since
+  SQLite transactions are connection-scoped, so its existing individual
+  writes automatically join whatever transaction is open. Also fixed a
+  separate, unconditional cost found while reading this code:
+  `LiveBroadcaster::publish` was JSON-serializing every event even with zero
+  WebSocket subscribers connected — now skipped entirely when nobody's
+  listening.
+  **Still open, deliberately not attempted this pass**: if batching alone
+  doesn't clear the backlog under real sustained load, the next step within
+  this same architecture (not a new queue technology) is splitting routine
+  further into parallel CPU-bound prep threads feeding one dedicated SQLite
+  writer thread — respects the single-writer constraint while still
+  parallelizing the part that can be. Needs real load data first to know if
+  it's actually necessary.
+  **Unverified, as always for a live daemon this session couldn't run**: no
+  `cargo check`/`cargo test` against this — brace/paren balance checked
+  manually across all four touched files (`runtime.rs`, `core.rs`,
+  `dendrite-memory/storage.rs`, `live.rs`), which catches structural
+  corruption but not type errors or borrow-checker issues.

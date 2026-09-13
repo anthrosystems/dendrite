@@ -27,9 +27,9 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-const HIGH_VALUE_QUEUE_CAPACITY: usize = 8_192;
+const PRIORITY_QUEUE_CAPACITY: usize = 8_192;
 const ROUTINE_QUEUE_CAPACITY: usize = 57_344;
-const INGESTION_QUEUE_CAPACITY: usize = HIGH_VALUE_QUEUE_CAPACITY + ROUTINE_QUEUE_CAPACITY;
+const INGESTION_QUEUE_CAPACITY: usize = PRIORITY_QUEUE_CAPACITY + ROUTINE_QUEUE_CAPACITY;
 const COMPLETED_QUEUE_CAPACITY: usize = 2_048;
 const MAX_COMPLETIONS_PER_TICK: usize = 512;
 const MAX_CONTROL_CLIENTS_PER_TICK: usize = 32;
@@ -93,7 +93,7 @@ struct IngestionJob {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IngestionLane {
-    HighValue,
+    Priority,
     Routine,
 }
 
@@ -109,7 +109,7 @@ fn ingestion_lane(job: &IngestionJob) -> IngestionLane {
             .is_some_and(|target| matches!(target.kind, EntityKind::Threat | EntityKind::Incident));
 
     if high_severity || threat_related {
-        IngestionLane::HighValue
+        IngestionLane::Priority
     } else {
         IngestionLane::Routine
     }
@@ -166,14 +166,14 @@ struct PipelineMetrics {
     max_queue_wait_ms: AtomicU64,
     last_processing_ms: AtomicU64,
     max_processing_ms: AtomicU64,
-    high_value: PipelineLaneMetrics,
+    priority: PipelineLaneMetrics,
     routine: PipelineLaneMetrics,
 }
 
 impl PipelineMetrics {
     fn lane(&self, lane: IngestionLane) -> &PipelineLaneMetrics {
         match lane {
-            IngestionLane::HighValue => &self.high_value,
+            IngestionLane::Priority => &self.priority,
             IngestionLane::Routine => &self.routine,
         }
     }
@@ -193,9 +193,9 @@ impl PipelineMetrics {
             max_queue_wait_ms: self.max_queue_wait_ms.load(Ordering::Relaxed),
             last_processing_ms: self.last_processing_ms.load(Ordering::Relaxed),
             max_processing_ms: self.max_processing_ms.load(Ordering::Relaxed),
-            high_value: self.high_value.snapshot(HIGH_VALUE_QUEUE_CAPACITY),
+            priority: self.priority.snapshot(PRIORITY_QUEUE_CAPACITY),
             routine: self.routine.snapshot(ROUTINE_QUEUE_CAPACITY),
-            scheduler_high_value_weight: 4,
+            scheduler_priority_weight: 4,
             scheduler_routine_weight: 1,
         }
     }
@@ -293,7 +293,7 @@ pub struct DaemonRuntime {
     vulnerability: VulnerabilityService,
     socket_path: PathBuf,
     telemetry_interval: Duration,
-    high_value_tx: SyncSender<IngestionJob>,
+    priority_tx: SyncSender<IngestionJob>,
     routine_tx: SyncSender<IngestionJob>,
     completed_rx: Receiver<TelemetryEventDto>,
     pipeline: Arc<PipelineMetrics>,
@@ -364,21 +364,28 @@ impl DaemonRuntime {
         core.set_telemetry_sources(telemetry.status());
 
         let pipeline = Arc::new(PipelineMetrics::default());
-        let (high_value_tx, high_value_rx) = mpsc::sync_channel(HIGH_VALUE_QUEUE_CAPACITY);
+        let (priority_tx, priority_rx) = mpsc::sync_channel(PRIORITY_QUEUE_CAPACITY);
         let (routine_tx, routine_rx) = mpsc::sync_channel(ROUTINE_QUEUE_CAPACITY);
         let (completed_tx, completed_rx) = mpsc::sync_channel(COMPLETED_QUEUE_CAPACITY);
-        spawn_ingestion_worker(
-            high_value_rx,
+        let ingestion_stores = IngestionWorkerStores {
+            self_path: self_store,
+            memory_path: memory,
+            incident_path: incidents,
+            guard_path: guard,
+        };
+        spawn_priority_worker(
+            priority_rx,
+            completed_tx.clone(),
+            Arc::clone(&pipeline),
+            live.clone(),
+            ingestion_stores.clone(),
+        )?;
+        spawn_routine_worker(
             routine_rx,
             completed_tx,
             Arc::clone(&pipeline),
             live.clone(),
-            IngestionWorkerStores {
-                self_path: self_store,
-                memory_path: memory,
-                incident_path: incidents,
-                guard_path: guard,
-            },
+            ingestion_stores,
         )?;
 
         Ok(Self {
@@ -389,7 +396,7 @@ impl DaemonRuntime {
             vulnerability,
             socket_path: config.socket_path,
             telemetry_interval: config.telemetry_interval,
-            high_value_tx,
+            priority_tx,
             routine_tx,
             completed_rx,
             pipeline,
@@ -421,15 +428,15 @@ impl DaemonRuntime {
                     let lane = ingestion_lane(&job);
                     self.pipeline.received(lane);
                     let sender = match lane {
-                        IngestionLane::HighValue => &self.high_value_tx,
+                        IngestionLane::Priority => &self.priority_tx,
                         IngestionLane::Routine => &self.routine_tx,
                     };
                     match sender.try_send(job) {
                         Ok(()) => self.pipeline.queued(lane),
                         Err(TrySendError::Full(job)) => {
-                            if lane == IngestionLane::HighValue {
+                            if lane == IngestionLane::Priority {
                                 eprintln!(
-                                    "high-value telemetry queue saturated; preserving control-plane responsiveness while dropping event {}",
+                                    "priority telemetry queue saturated; preserving control-plane responsiveness while dropping event {}",
                                     job.collected.observation.id.0
                                 );
                             }
@@ -898,6 +905,7 @@ fn live_kind_for_ipc_request(request: &IpcRequest) -> Option<&'static str> {
     }
 }
 
+#[derive(Clone)]
 struct IngestionWorkerStores {
     self_path: String,
     memory_path: String,
@@ -905,16 +913,24 @@ struct IngestionWorkerStores {
     guard_path: String,
 }
 
-fn spawn_ingestion_worker(
-    high_value_rx: Receiver<IngestionJob>,
-    routine_rx: Receiver<IngestionJob>,
+const ROUTINE_BATCH_SIZE: usize = 200;
+
+/// Priority telemetry (threat-related or high/critical severity) gets its
+/// own dedicated worker thread, fully independent of routine. This is the
+/// direct fix for "a routine flood could delay priority processing too" —
+/// previously both lanes shared one thread with only turn-order weighting,
+/// so a saturated routine lane still occupied the only processing slot
+/// priority had. Separate threads mean routine volume can never delay
+/// priority throughput, regardless of how saturated routine gets.
+fn spawn_priority_worker(
+    priority_rx: Receiver<IngestionJob>,
     completed_tx: SyncSender<TelemetryEventDto>,
     pipeline: Arc<PipelineMetrics>,
     live: LiveBroadcaster,
     stores: IngestionWorkerStores,
 ) -> Result<(), RuntimeError> {
     let _worker = thread::Builder::new()
-        .name("dendrite-ingestion".into())
+        .name("dendrite-ingestion-priority".into())
         .spawn(move || {
             let mut core = match DaemonCore::open_with_stores(
                 &stores.self_path,
@@ -924,123 +940,19 @@ fn spawn_ingestion_worker(
             ) {
                 Ok(core) => core,
                 Err(error) => {
-                    eprintln!("telemetry ingestion worker failed to open stores: {error:?}");
+                    eprintln!("priority ingestion worker failed to open stores: {error:?}");
                     return;
                 }
             };
 
-            let mut last_lifecycle_sweep = Instant::now();
-            let mut high_value_budget = 4usize;
-            loop {
-                let mut selected: Option<(IngestionLane, IngestionJob)> = None;
-
-                // Weighted priority: after four high-value jobs, routine telemetry gets a turn
-                // when available. Idle capacity is always borrowed by whichever lane has work.
-                if high_value_budget > 0 {
-                    match high_value_rx.try_recv() {
-                        Ok(job) => {
-                            selected = Some((IngestionLane::HighValue, job));
-                            high_value_budget -= 1;
-                        }
-                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {}
-                    }
-                }
-                if selected.is_none() {
-                    match routine_rx.try_recv() {
-                        Ok(job) => {
-                            selected = Some((IngestionLane::Routine, job));
-                            high_value_budget = 4;
-                        }
-                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {}
-                    }
-                }
-                if selected.is_none() && high_value_budget == 0 {
-                    high_value_budget = 4;
-                }
-                if selected.is_none() {
-                    match high_value_rx.recv_timeout(Duration::from_millis(10)) {
-                        Ok(job) => selected = Some((IngestionLane::HighValue, job)),
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            if let Ok(job) = routine_rx.try_recv() {
-                                selected = Some((IngestionLane::Routine, job));
-                            }
-                        }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            if let Ok(job) = routine_rx.try_recv() {
-                                selected = Some((IngestionLane::Routine, job));
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-                let Some((lane, job)) = selected else {
-                    continue;
-                };
-
+            while let Ok(job) = priority_rx.recv() {
+                let lane = IngestionLane::Priority;
                 pipeline.dequeued(lane);
-                let queue_wait_ms = duration_ms(job.queued_at.elapsed());
-                pipeline.queue_wait(lane, queue_wait_ms);
+                pipeline.queue_wait(lane, duration_ms(job.queued_at.elapsed()));
 
                 let started = Instant::now();
-                let incident_ids = if job.scope.feeds_security_reasoning() {
-                    let mut incident_ids = std::collections::BTreeSet::new();
-                    for observation in std::iter::once(&job.collected.observation)
-                        .chain(job.collected.related_observations.iter())
-                    {
-                        match core.ingest_observation(observation) {
-                            Ok(outcome) => {
-                                pipeline
-                                    .security_observations_ingested
-                                    .fetch_add(1, Ordering::Relaxed);
-                                incident_ids.extend(
-                                    outcome.incidents.into_iter().map(|incident| incident.0),
-                                );
-                            }
-                            Err(error) => {
-                                eprintln!("telemetry ingestion failed: {error:?}");
-                            }
-                        }
-                    }
-                    incident_ids.into_iter().collect()
-                } else {
-                    Vec::new()
-                };
-
-                let event = TelemetryEventDto {
-                    id: job.collected.observation.id.0.clone(),
-                    source: job.collected.source.as_str().into(),
-                    event: job.collected.event,
-                    observation_kind: observation_kind_name(job.collected.observation.kind).into(),
-                    process_id: job.collected.process_id,
-                    scope: job.scope.as_str().into(),
-                    source_object: job.collected.observation.source.id.0.clone(),
-                    source_label: job.collected.observation.source.label.clone(),
-                    target_object: job
-                        .collected
-                        .observation
-                        .target
-                        .as_ref()
-                        .map(|target| target.id.0.clone()),
-                    target_label: job
-                        .collected
-                        .observation
-                        .target
-                        .as_ref()
-                        .map(|target| target.label.clone()),
-                    observed_at: job.collected.observation.observed_at,
-                    incident_ids,
-                };
-
-                let processing_ms = duration_ms(started.elapsed());
-                pipeline.processed(lane, processing_ms);
-
-                if last_lifecycle_sweep.elapsed() >= Duration::from_secs(30) {
-                    if let Err(error) = core.expire_memory(unix_now()) {
-                        eprintln!("memory lifecycle sweep failed: {error:?}");
-                    }
-                    last_lifecycle_sweep = Instant::now();
-                }
+                let event = process_job(&mut core, &pipeline, job);
+                pipeline.processed(lane, duration_ms(started.elapsed()));
 
                 live.publish("telemetry", &event);
                 if !event.incident_ids.is_empty() {
@@ -1053,6 +965,178 @@ fn spawn_ingestion_worker(
             }
         })?;
     Ok(())
+}
+
+/// Routine telemetry (the vast majority of raw volume — file/process/network
+/// noise) gets its own dedicated worker, batching several jobs' Memory Graph
+/// writes into one transaction rather than autocommitting per statement.
+/// Nothing in `ingest_observation` itself changes: SQLite transactions are
+/// connection-scoped, so every individual `save_node`/`save_relationship`/
+/// correlation-key write it already makes automatically becomes part of
+/// whatever transaction is currently open on that connection.
+fn spawn_routine_worker(
+    routine_rx: Receiver<IngestionJob>,
+    completed_tx: SyncSender<TelemetryEventDto>,
+    pipeline: Arc<PipelineMetrics>,
+    live: LiveBroadcaster,
+    stores: IngestionWorkerStores,
+) -> Result<(), RuntimeError> {
+    let _worker = thread::Builder::new()
+        .name("dendrite-ingestion-routine".into())
+        .spawn(move || {
+            let mut core = match DaemonCore::open_with_stores(
+                &stores.self_path,
+                &stores.memory_path,
+                &stores.incident_path,
+                &stores.guard_path,
+            ) {
+                Ok(core) => core,
+                Err(error) => {
+                    eprintln!("routine ingestion worker failed to open stores: {error:?}");
+                    return;
+                }
+            };
+
+            let mut last_lifecycle_sweep = Instant::now();
+            loop {
+                // Block (with a timeout, so the lifecycle sweep below still runs
+                // periodically even under no load at all) for the first job of a
+                // batch, then drain whatever else is already queued without
+                // waiting, up to the batch cap.
+                let first = match routine_rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(job) => job,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if last_lifecycle_sweep.elapsed() >= Duration::from_secs(30) {
+                            if let Err(error) = core.expire_memory(unix_now()) {
+                                eprintln!("memory lifecycle sweep failed: {error:?}");
+                            }
+                            last_lifecycle_sweep = Instant::now();
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+
+                let mut batch = vec![first];
+                while batch.len() < ROUTINE_BATCH_SIZE {
+                    match routine_rx.try_recv() {
+                        Ok(job) => batch.push(job),
+                        Err(_) => break,
+                    }
+                }
+
+                let lane = IngestionLane::Routine;
+                for job in &batch {
+                    pipeline.dequeued(lane);
+                    pipeline.queue_wait(lane, duration_ms(job.queued_at.elapsed()));
+                }
+
+                let started = Instant::now();
+                if let Err(error) = core.begin_memory_batch() {
+                    eprintln!("routine batch: failed to begin transaction: {error:?}");
+                    // Fall through and process anyway, without a transaction —
+                    // slower (back to per-statement autocommit), but processing
+                    // this batch un-batched beats dropping it outright.
+                }
+
+                let mut events = Vec::with_capacity(batch.len());
+                for job in batch {
+                    events.push(process_job(&mut core, &pipeline, job));
+                }
+
+                if let Err(error) = core.commit_memory_batch() {
+                    eprintln!("routine batch: commit failed, rolling back: {error:?}");
+                    core.rollback_memory_batch();
+                }
+                pipeline.processed(lane, duration_ms(started.elapsed()));
+
+                if last_lifecycle_sweep.elapsed() >= Duration::from_secs(30) {
+                    if let Err(error) = core.expire_memory(unix_now()) {
+                        eprintln!("memory lifecycle sweep failed: {error:?}");
+                    }
+                    last_lifecycle_sweep = Instant::now();
+                }
+
+                let mut disconnected = false;
+                for event in events {
+                    live.publish("telemetry", &event);
+                    if !event.incident_ids.is_empty() {
+                        live.publish("incidents", &event.incident_ids);
+                    }
+                    match completed_tx.try_send(event) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
+                if disconnected {
+                    break;
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Shared per-job processing, used by both dedicated workers: runs
+/// `ingest_observation` for the primary observation and any related ones
+/// (unless the job's scope doesn't warrant touching the Memory Graph at
+/// all), and builds the `TelemetryEventDto` reported over the live feed and
+/// the completed-events queue. Deliberately does not publish/send anything
+/// itself — the routine worker needs to defer that until after its batch
+/// actually commits, so it's left to each caller.
+fn process_job(
+    core: &mut DaemonCore,
+    pipeline: &PipelineMetrics,
+    job: IngestionJob,
+) -> TelemetryEventDto {
+    let incident_ids = if job.scope.feeds_security_reasoning() {
+        let mut incident_ids = std::collections::BTreeSet::new();
+        for observation in std::iter::once(&job.collected.observation)
+            .chain(job.collected.related_observations.iter())
+        {
+            match core.ingest_observation(observation) {
+                Ok(outcome) => {
+                    pipeline
+                        .security_observations_ingested
+                        .fetch_add(1, Ordering::Relaxed);
+                    incident_ids.extend(outcome.incidents.into_iter().map(|incident| incident.0));
+                }
+                Err(error) => {
+                    eprintln!("telemetry ingestion failed: {error:?}");
+                }
+            }
+        }
+        incident_ids.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+
+    TelemetryEventDto {
+        id: job.collected.observation.id.0.clone(),
+        source: job.collected.source.as_str().into(),
+        event: job.collected.event,
+        observation_kind: observation_kind_name(job.collected.observation.kind).into(),
+        process_id: job.collected.process_id,
+        scope: job.scope.as_str().into(),
+        source_object: job.collected.observation.source.id.0.clone(),
+        source_label: job.collected.observation.source.label.clone(),
+        target_object: job
+            .collected
+            .observation
+            .target
+            .as_ref()
+            .map(|target| target.id.0.clone()),
+        target_label: job
+            .collected
+            .observation
+            .target
+            .as_ref()
+            .map(|target| target.label.clone()),
+        observed_at: job.collected.observation.observed_at,
+        incident_ids,
+    }
 }
 
 fn duration_ms(duration: Duration) -> u64 {
