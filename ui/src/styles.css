@@ -9377,3 +9377,16 @@ tbody tr:hover td {
     height: calc(100vh - 245px);
   }
 }
+
+/* Layout guard: the sidebar must size to its grid track. An older legibility
+   pass set a fixed 260px width, which made it overflow the 220px/190px
+   Zoraxy-style shell columns and cover the left edge of page content. */
+.sidebar {
+  width: 100%;
+  min-width: 0;
+}
+
+.workspace,
+.content {
+  min-width: 0;
+}
