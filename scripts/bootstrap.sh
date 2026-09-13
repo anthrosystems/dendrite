@@ -35,10 +35,12 @@ automatically via apt where possible. Genuine build failures after that
 (not just a missing tool) fall back to a warning rather than aborting,
 since eBPF and the UI are both optional at runtime (Dendrite falls back to
 fanotify/polling, and the UI can still be run via 'npm run dev'
-separately). curl and a C compiler (build-essential — rusqlite's "bundled"
-feature compiles SQLite from source) are on the critical path instead,
-since nothing else in this script can proceed without them, so those two
-fail the whole script rather than degrading.
+separately). curl, a C compiler (build-essential — rusqlite's "bundled"
+feature compiles SQLite from source), and the workspace gate itself
+(fmt/check/test/clippy, then the real dendrited/dendrite-cli build) are all
+on the critical path instead — this script exits immediately (via `set -e`)
+on the first failure among those, same as the manual command sequence it
+replaces.
 USAGE
 }
 
@@ -87,11 +89,18 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo
-echo "-- dendrited + dendrite-cli --"
+echo "-- workspace gate: fmt/check/test/clippy --"
 if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
     echo "No C compiler found — installing build-essential (rusqlite's \"bundled\" feature compiles SQLite from source, needing one)..."
     ensure_apt_packages build-essential
 fi
+cargo fmt --all
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo
+echo "-- dendrited + dendrite-cli --"
 cargo build -p dendrited -p dendrite-cli
 
 EBPF_OBJECT="ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf"
@@ -106,8 +115,14 @@ else
         echo "Installing nightly toolchain (needed for eBPF)..."
         rustup toolchain install nightly
     fi
-    if ! rustup target list --toolchain nightly --installed 2>/dev/null | grep -q '^bpfel-unknown-none$'; then
-        rustup target add bpfel-unknown-none --toolchain nightly
+    if ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -q '^rust-src'; then
+        # bpfel-unknown-none is Tier 3 with no prebuilt std/core component at
+        # all — `rustup target add` for it always fails ("no prebuilt
+        # artifacts available"), which isn't a real error, it's just the
+        # wrong fix. build-ebpf.sh's `-Z build-std=core` compiles core from
+        # source for this target instead, which needs rust-src, not a
+        # prebuilt target.
+        rustup component add rust-src --toolchain nightly
     fi
     # bpf-linker links against libelf/zlib at build and/or link time; not
     # detectable via a simple `command -v` check the way a binary is, so
@@ -116,16 +131,27 @@ else
     ensure_apt_packages libelf-dev zlib1g-dev || true
     if ! command -v bpf-linker >/dev/null 2>&1; then
         echo "Installing bpf-linker (needed for eBPF)..."
-        # No +toolchain override here — bpf-linker itself just needs a normal
-        # (non-nightly) Rust to build, and running from inside the repo
-        # already resolves to the pinned 1.98.0 via rust-toolchain.toml,
-        # which is guaranteed installed already (step 1 just used it). An
-        # explicit `+stable` would risk referencing a toolchain that was
-        # never separately installed, since we deliberately install rustup
-        # above with --default-toolchain none.
+        # bpf-linker itself just needs a normal (non-nightly) Rust to run —
+        # no +toolchain override needed, since running from inside the repo
+        # already resolves to the pinned 1.98.0 via rust-toolchain.toml.
+        # But it must come from a PREBUILT release, not `cargo install`:
+        # building it from source needs a matching local LLVM/llvm-config,
+        # which bpf-linker's own docs explicitly warn against relying on
+        # (https://github.com/aya-rs/bpf-linker#installation) — this script
+        # has no reliable way to know or install the right LLVM version for
+        # this bpf-linker release across distros, so cargo-binstall (which
+        # fetches a prebuilt binary) is the real fix, not a fallback.
+        if ! command -v cargo-binstall >/dev/null 2>&1; then
+            echo "Installing cargo-binstall first (so bpf-linker comes from a prebuilt release, not a from-source build needing a matching local LLVM)..."
+            curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+            # shellcheck source=/dev/null
+            source "$HOME/.cargo/env" 2>/dev/null || true
+        fi
         if command -v cargo-binstall >/dev/null 2>&1; then
             cargo binstall --no-confirm bpf-linker
         else
+            echo "Warning: cargo-binstall install itself failed — falling back to 'cargo install bpf-linker'," >&2
+            echo "  which needs a matching local LLVM/llvm-config and may fail the same way this just did." >&2
             cargo install bpf-linker
         fi
     fi
