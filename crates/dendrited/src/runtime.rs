@@ -47,13 +47,6 @@ pub struct RuntimeConfig {
     pub socket_mode: u32,
     pub socket_group: Option<String>,
     pub http_addr: SocketAddr,
-    /// Directory containing the built UI (`ui/dist`) to serve as static
-    /// files alongside the HTTP API, for packaged installs where the target
-    /// machine has no Node/npm to run a dev server. `None` (the development
-    /// default) means the daemon serves no UI itself — local dev runs
-    /// `npm run dev`'s Vite server separately, proxying `/api`/`/ws` to this
-    /// daemon (see `ui/vite.config.ts`).
-    pub ui_dir: Option<PathBuf>,
     pub watch_mounts: Vec<PathBuf>,
     pub watch_include_paths: Vec<PathBuf>,
     pub watch_exclude_paths: Vec<PathBuf>,
@@ -78,7 +71,6 @@ impl RuntimeConfig {
             http_addr: "127.0.0.1:8766"
                 .parse()
                 .expect("default HTTP address must be valid"),
-            ui_dir: None,
             watch_mounts: Vec::new(),
             watch_include_paths: Vec::new(),
             watch_exclude_paths: Vec::new(),
@@ -300,7 +292,6 @@ pub struct DaemonRuntime {
     telemetry: TelemetryManager,
     vulnerability: VulnerabilityService,
     socket_path: PathBuf,
-    ui_dir: Option<PathBuf>,
     telemetry_interval: Duration,
     priority_tx: SyncSender<IngestionJob>,
     routine_tx: SyncSender<IngestionJob>,
@@ -415,7 +406,6 @@ impl DaemonRuntime {
             telemetry,
             vulnerability,
             socket_path: config.socket_path,
-            ui_dir: config.ui_dir,
             telemetry_interval: config.telemetry_interval,
             priority_tx,
             routine_tx,
@@ -531,7 +521,6 @@ impl DaemonRuntime {
                             &mut self.core,
                             &mut self.vulnerability,
                             &self.socket_path,
-                            self.ui_dir.as_deref(),
                             &self.live,
                             stream,
                         ) && !is_peer_disconnect_kind(error.kind())

@@ -63,13 +63,17 @@ Two different things, don't conflate them (see `docs/ROADMAP.md`'s Batch 7):
   automatically on a fresh clone. The UI runs via `npm run dev` (Vite),
   proxying `/api`/`/ws` to a locally-running `dendrited`.
 - **Distribution packaging**: `scripts/build-deb.sh` builds the eBPF
-  object, builds the UI (`ui/dist`), then runs `cargo deb -p dendrited`.
-  The resulting `.deb` installs a dedicated `dendrite` system user/group,
-  systemd unit, and serves the built UI itself via `DENDRITE_UI_DIR`
-  (packaged installs have no Node/npm at runtime). Config lives in
-  `/etc/dendrite/dendrited.env` (a conffile — survives upgrades/removal,
-  only `purge` deletes it), state in `/var/lib/dendrite` (via systemd's
-  `StateDirectory=`, same survival rules).
+  object, builds the UI (`ui/dist`, baked with an absolute `dendrited`
+  origin — see `docs/CONFIGURATION.md`), then runs `cargo deb -p dendrited`.
+  The resulting `.deb` installs a dedicated `dendrite` system user/group and
+  **two** independent systemd units: `dendrited.service` (the daemon) and
+  `dendrite-ui.service` (`dendrite-ui-server`, a minimal unprivileged
+  static-file server for the UI — see `crates/dendrite-ui-server/README.md`
+  for why it's a separate process/unit rather than something `dendrited`
+  serves itself). Config lives in `/etc/dendrite/dendrited.env` (a
+  conffile — survives upgrades/removal, only `purge` deletes it), state in
+  `/var/lib/dendrite` (via systemd's `StateDirectory=`, same survival
+  rules).
 
 ## Testing
 

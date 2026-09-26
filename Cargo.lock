@@ -258,6 +258,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dendrite-ui-server"
+version = "0.1.0"
+
+[[package]]
 name = "dendrite-updater"
 version = "0.1.0"
 dependencies = [

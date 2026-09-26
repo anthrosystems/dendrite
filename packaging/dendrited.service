@@ -44,7 +44,6 @@ Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
 Environment=DENDRITE_SOCKET_GROUP=dendrite
 Environment=DENDRITE_SOCKET_MODE=0660
 Environment=DENDRITE_HTTP_ADDR=127.0.0.1:8766
-Environment=DENDRITE_UI_DIR=/usr/share/dendrite/ui
 Environment=DENDRITE_EBPF=1
 Environment=DENDRITE_EBPF_OBJECT=/usr/lib/dendrite/dendrite-ebpf
 Environment=DENDRITE_FANOTIFY=1

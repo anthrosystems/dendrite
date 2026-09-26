@@ -60,9 +60,21 @@ Confirm:
   WebSocket client talking to the daemon's real upgrade handshake, not a
   raw socket script.
 
-For a packaged build, `npm run build` then point `DENDRITE_UI_DIR` at
-`ui/dist` and confirm `dendrited` serves it directly (no `npm run dev`
-needed).
+For a packaged-style build (the UI's own separate process), build it with
+an absolute `dendrited` origin baked in, then run `dendrite-ui-server`
+against the result:
+
+```bash
+cd ui && VITE_DENDRITE_API_BASE="http://127.0.0.1:8766/api/v1" \
+  VITE_DENDRITE_WS_URL="ws://127.0.0.1:8766/ws" npm run build
+DENDRITE_UI_DIR=ui/dist DENDRITE_UI_ADDR=127.0.0.1:8767 \
+  /path/to/target/debug/dendrite-ui-server
+```
+
+Open `http://127.0.0.1:8767` and confirm the same things as above, plus that
+this is genuinely a separate process from `dendrited` — stopping
+`dendrite-ui-server` should leave `dendrited`'s API/CLI/telemetry entirely
+unaffected, and vice versa.
 
 ## 4. Antiserum export pipeline
 
@@ -93,17 +105,22 @@ second instance on the same machine for this.
 ```
 
 Then, in a disposable container or VM (not your main dev machine — this
-installs a system user and a systemd service):
+installs a system user and two systemd services):
 
 ```bash
 sudo dpkg -i target/debian/dendrite_*.deb
 systemctl status dendrited
+systemctl status dendrite-ui
+sudo systemctl disable --now dendrite-ui   # confirm dendrited is unaffected
 sudo dpkg -r dendrite   # confirm /var/lib/dendrite and /etc/dendrite survive
 sudo dpkg -P dendrite   # confirm purge removes them
 ```
 
-Confirm the service starts, the user/group exist, `/etc/dendrite/dendrited.env`
-is preserved across a plain removal and only deleted on purge, and (if your
+Confirm both services start (two independent systemd units, one package —
+see `crates/dendrite-ui-server/README.md` for why the UI is split out), that
+disabling `dendrite-ui` doesn't affect `dendrited` or vice versa, the
+user/group exist, `/etc/dendrite/dendrited.env` is preserved across a plain
+removal and only deleted on purge, and (if your
 test environment has a real `bpf-linker`/nightly toolchain, unlike a sandbox
 without one) that the packaged eBPF object actually loads rather than
 falling back to `/proc` polling.

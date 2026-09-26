@@ -55,13 +55,24 @@ maintainer-scripts = "../../packaging"
 assets = [
     ["target/release/dendrited", "usr/bin/dendrited", "755"],
     ["target/release/dendrite-cli", "usr/bin/dendrite-cli", "755"],
+    ["target/release/dendrite-ui-server", "usr/bin/dendrite-ui-server", "755"],
     ["../../ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf", "usr/lib/dendrite/dendrite-ebpf", "644"],
     ["../../ui/dist/**/*", "usr/share/dendrite/ui/", "644"],
     ["../../packaging/dendrited.env.example", "etc/dendrite/dendrited.env", "644"],
 ]
 
+# Two independent systemd units, one package: dendrited (the security daemon
+# itself) and dendrite-ui (the UI's static file server — see
+# packaging/dendrite-ui.service for why it's a separate unit rather than
+# something dendrited serves itself). `unit-name` disambiguates which
+# `packaging/*.service` file each block installs/enables, since
+# `maintainer-scripts` now holds two.
 [[package.metadata.deb.systemd-units]]
-# unit-scripts defaults to `maintainer-scripts` above, which is where
-# packaging/dendrited.service (and postinst/postrm) already live.
+unit-name = "dendrited"
+enable = true
+start = true
+
+[[package.metadata.deb.systemd-units]]
+unit-name = "dendrite-ui"
 enable = true
 start = true

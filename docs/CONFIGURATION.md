@@ -25,15 +25,25 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 | `DENDRITE_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket |
 | `DENDRITE_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
 | `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address — also serves the live-event WebSocket (see below) |
-| `DENDRITE_UI_DIR` | unset (daemon serves no UI) | Directory containing the built UI (`ui/dist`) to serve as static files alongside the API. The packaged `.deb` sets this to `/usr/share/dendrite/ui`; local dev leaves it unset and runs `npm run dev`'s own Vite server instead (see `ui/vite.config.ts`'s proxy config) |
 
 `DENDRITE_HTTP_ADDR` is silently ignored if it fails to parse as a socket address — the default is kept in that case with no warning printed. `DENDRITE_SOCKET_MODE` is stricter: an unparseable value logs an error and exits with status `2`.
 
-When `DENDRITE_UI_DIR` is set, any `GET` request that isn't `/api/...` or the `/ws` upgrade is served from that directory: a request matching a real file gets that file (with a content type inferred from its extension); anything else — a client-side route like `/incidents/123`, a bare `/` — falls back to `index.html` so the UI's own router handles it, the same convention as any single-page-app static host. A request that resolves (after following `..` segments) to somewhere outside `DENDRITE_UI_DIR` is rejected the same way — it falls back to `index.html` rather than ever reading the escaped path.
-
 The live event stream is a WebSocket upgrade of a normal request to `/ws` on this same address/port — there is no separate `DENDRITE_WS_ADDR` any more (removed as part of Batch 7's "one address, just works" distribution-packaging goal; see `ROADMAP.md`'s Batch 10 note on the merge). `dendrited` detects the upgrade (`Connection: Upgrade`, `Upgrade: websocket`, `Sec-WebSocket-Key` headers on a `GET /ws` request) itself on its ordinary HTTP accept loop and performs the handshake by hand rather than via a second listener.
 
-Neither the HTTP API nor the `/ws` WebSocket endpoint currently perform any request authentication; the HTTP API (and, as of the port merge, `/ws` too) only enforces a CORS origin allowlist against the UI dev server origins. See the "Deliberately deferred" note in [`ROADMAP.md`](ROADMAP.md) Checkpoint A — this is being treated as an explicit pre-MCP item rather than an oversight, but it's worth keeping the endpoint bound to loopback until it's addressed.
+Neither the HTTP API nor the `/ws` WebSocket endpoint currently perform any request authentication; the HTTP API (and, as of the port merge, `/ws` too) only enforces a CORS origin allowlist against the UI's known origins (the Vite dev server and the packaged `dendrite-ui-server`, see below). See the "Deliberately deferred" note in [`ROADMAP.md`](ROADMAP.md) Checkpoint A — this is being treated as an explicit pre-MCP item rather than an oversight, but it's worth keeping the endpoint bound to loopback until it's addressed.
+
+### The UI, and its own process
+
+`dendrited` itself never serves the UI. The built UI (`ui/dist`) is served by a separate binary/systemd unit, `dendrite-ui-server`/`dendrite-ui.service` — a small, unprivileged static-file server with no dependency on `dendrited` being up to start, so an operator can `systemctl disable --now dendrite-ui` independently of the daemon. See `crates/dendrite-ui-server/README.md` for its own two environment variables (`DENDRITE_UI_DIR`, `DENDRITE_UI_ADDR`).
+
+Because the UI's static assets and `dendrited`'s API/WebSocket now live on different origins/ports, the UI's own JS talks to `dendrited` cross-origin — that's what the CORS allowlist above is for. The UI is built with two Vite env vars baking in `dendrited`'s absolute origin:
+
+| Build-time variable | Default (relative, single-origin) | Set to (packaged, split-origin) |
+|---|---|---|
+| `VITE_DENDRITE_API_BASE` | `/api/v1` | `http://<dendrited-host>:8766/api/v1` |
+| `VITE_DENDRITE_WS_URL` | same-origin `/ws`, derived from `window.location` | `ws://<dendrited-host>:8766/ws` |
+
+Local dev (`npm run dev`) leaves both unset — Vite's own dev-proxy (`ui/vite.config.ts`) forwards `/api`/`/ws` to `dendrited` on the same apparent origin, so no cross-origin call ever happens there. `scripts/build-deb.sh` sets both explicitly when building `ui/dist` for packaging (see `DENDRITE_PACKAGED_HTTP_ORIGIN` in that script if `dendrited`'s HTTP API will be reachable somewhere other than `127.0.0.1:8766` on the target host).
 
 ## Telemetry collectors
 

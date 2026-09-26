@@ -31,12 +31,6 @@ fn main() {
     {
         config.http_addr = address;
     }
-    if let Ok(value) = env::var("DENDRITE_UI_DIR") {
-        let value = value.trim();
-        if !value.is_empty() {
-            config.ui_dir = Some(PathBuf::from(value));
-        }
-    }
     if let Ok(value) = env::var("DENDRITE_SOCKET_GROUP") {
         let value = value.trim();
         if !value.is_empty() {

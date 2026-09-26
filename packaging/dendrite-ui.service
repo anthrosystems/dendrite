@@ -1,0 +1,50 @@
+[Unit]
+Description=Dendrite operator UI (static file server)
+Documentation=https://github.com/anthrosystems/dendrite
+After=network.target local-fs.target
+# Deliberately no hard dependency on dendrited: this unit only serves the
+# built UI's static files (ui/dist) and holds no daemon state of its own, so
+# an operator can stop/disable it independently without touching telemetry,
+# the Memory Graph, or action authorisation at all. The UI's own JS talks to
+# dendrited's HTTP/WebSocket port directly, cross-origin (see
+# docs/CONFIGURATION.md) — this unit doesn't proxy or depend on that being
+# up to start.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dendrite-ui-server
+Restart=on-failure
+RestartSec=2
+
+# --- Identity ---
+# Same dedicated non-root account as dendrited (created by the package's
+# postinst) — no reason for a separate account for a read-only static file
+# server, but it needs none of dendrited's capabilities.
+User=dendrite
+Group=dendrite
+NoNewPrivileges=yes
+
+Environment=DENDRITE_UI_DIR=/usr/share/dendrite/ui
+Environment=DENDRITE_UI_ADDR=127.0.0.1:8767
+
+# --- Sandboxing / hardening ---
+# This process never writes anywhere and needs no special kernel access —
+# lock it down harder than dendrited can be today.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+[Install]
+WantedBy=multi-user.target
