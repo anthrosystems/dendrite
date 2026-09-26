@@ -1,0 +1,27 @@
+#!/bin/sh
+# postrm for the dendrited .deb package.
+#
+# Ordinary removal (`apt remove dendrite`) leaves all state alone —
+# /var/lib/dendrite (the Memory Graph, incidents, Guard trust state, self
+# identity/signing keys) and /etc/dendrite/dendrited.env (a conffile dpkg
+# already handles on its own) survive so a reinstall picks up where it left
+# off. Only `apt purge` removes runtime state and the dedicated system
+# account, matching Debian policy for a package's own generated data.
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /var/lib/dendrite
+        rmdir --ignore-fail-on-non-empty /etc/dendrite 2>/dev/null || true
+        if getent passwd dendrite >/dev/null; then
+            deluser --system dendrite >/dev/null 2>&1 || true
+        fi
+        if getent group dendrite >/dev/null; then
+            delgroup --system dendrite >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

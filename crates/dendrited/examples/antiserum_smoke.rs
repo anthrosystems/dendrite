@@ -30,7 +30,8 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let self_db = env::var("DENDRITE_SELF_DB").unwrap_or_else(|_| "data/self.sqlite3".into());
-    let memory_db = env::var("DENDRITE_MEMORY_DB").unwrap_or_else(|_| "data/memory.sqlite3".into());
+    let stm_db = env::var("DENDRITE_STM_DB").unwrap_or_else(|_| "data/stm.sqlite3".into());
+    let ltm_db = env::var("DENDRITE_LTM_DB").unwrap_or_else(|_| "data/ltm.sqlite3".into());
     let incidents_db =
         env::var("DENDRITE_INCIDENT_DB").unwrap_or_else(|_| "data/incidents.sqlite3".into());
     let guard_db = env::var("DENDRITE_GUARD_DB").unwrap_or_else(|_| "data/guard.sqlite3".into());
@@ -40,8 +41,9 @@ fn run() -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("data/antiserum-smoke"));
     let now = unix_now()?;
 
-    let mut core = DaemonCore::open_with_stores(&self_db, &memory_db, &incidents_db, &guard_db)
-        .map_err(debug_error)?;
+    let mut core =
+        DaemonCore::open_with_tiered_stores(&self_db, &stm_db, &ltm_db, &incidents_db, &guard_db)
+            .map_err(debug_error)?;
     let instance_id = core.instance_id().to_owned();
     let signing_key = core.signing_key_status();
 

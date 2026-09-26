@@ -2,6 +2,11 @@
 name = "dendrited"
 version = "0.1.0"
 edition = "2024"
+description = "Dendrite endpoint security daemon"
+license = "Apache-2.0"
+readme = "../../README.md"
+homepage = "https://github.com/anthrosystems/dendrite"
+repository = "https://github.com/anthrosystems/dendrite"
 
 [dependencies]
 aya = "0.13.1"
@@ -23,3 +28,42 @@ signal-hook = "0.4.4"
 tungstenite = "0.30.0"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 uuid = { version = "1", features = ["v4"] }
+
+# Distribution packaging (docs/ROADMAP.md Batch 7). Built with:
+#
+#   cargo +stable deb -p dendrited
+#
+# after running scripts/build-ebpf.sh and `npm run build` in ui/ — cargo-deb
+# only packages what already exists on disk (it does rebuild dendrited's and
+# dendrite-cli's own Cargo binaries itself, automatically adding --workspace
+# to the build since dendrite-cli is a sibling crate — see the `assets`
+# entries below and cargo-deb's README on the special `target/release/`
+# source prefix), but the eBPF object and the built UI use toolchains
+# outside plain `cargo build` and must be produced first.
+[package.metadata.deb]
+# TODO: replace with a real maintainer contact before this is actually
+# published/distributed.
+maintainer = "Anthrosystems <packaging@anthrosys.example>"
+copyright = "2026, Anthrosystems"
+extended-description = """\
+Dendrite is a Linux-native endpoint security daemon: eBPF/fanotify \
+telemetry, a tiered (short/long-term) Memory Graph for behavioural \
+correlation, deterministic MAGI/policy/Guard action gating, and CVE/package \
+vulnerability tracking, with a local web UI and CLI."""
+depends = "$auto, adduser"
+section = "admin"
+priority = "optional"
+maintainer-scripts = "../../packaging"
+assets = [
+    ["target/release/dendrited", "usr/bin/dendrited", "755"],
+    ["target/release/dendrite-cli", "usr/bin/dendrite-cli", "755"],
+    ["../../ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf", "usr/lib/dendrite/dendrite-ebpf", "644"],
+    ["../../ui/dist/**/*", "usr/share/dendrite/ui/", "644"],
+    ["../../packaging/dendrited.env.example", "etc/dendrite/dendrited.env", "644"],
+]
+
+[[package.metadata.deb.systemd-units]]
+# unit-scripts defaults to `maintainer-scripts` above, which is where
+# packaging/dendrited.service (and postinst/postrm) already live.
+enable = true
+start = true

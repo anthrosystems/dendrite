@@ -61,11 +61,9 @@ done
 HOST_ROOT="${DENDRITE_HOST_ROOT:-$HOME/dendrite-hosts}"
 PID_FILE="$HOST_ROOT/lineage-chain.pids"
 BASE_HTTP_PORT=9100
-BASE_WS_PORT=9101
 
 host_dir() { echo "$HOST_ROOT/lineage-$1"; }
 http_port() { echo $((BASE_HTTP_PORT + 2 * $1)); }
-ws_port() { echo $((BASE_WS_PORT + 2 * $1)); }
 
 if [[ "$DO_CLEANUP" == 1 ]]; then
     if [[ -f "$PID_FILE" ]]; then
@@ -131,16 +129,15 @@ start_hop() {
     local dir; dir="$(host_dir "$n")"
     local data="$dir/data"
     local http; http="$(http_port "$n")"
-    local ws; ws="$(ws_port "$n")"
     mkdir -p "$data"
-    echo "Starting lineage-$n (HTTP 127.0.0.1:$http, WS 127.0.0.1:$ws)..."
+    echo "Starting lineage-$n (HTTP + WebSocket 127.0.0.1:$http)..."
     DENDRITE_SELF_DB="$data/self.sqlite3" \
-    DENDRITE_MEMORY_DB="$data/memory.sqlite3" \
+    DENDRITE_STM_DB="$data/stm.sqlite3" \
+    DENDRITE_LTM_DB="$data/ltm.sqlite3" \
     DENDRITE_INCIDENT_DB="$data/incidents.sqlite3" \
     DENDRITE_GUARD_DB="$data/guard.sqlite3" \
     DENDRITE_SOCKET="$dir/dendrited.sock" \
     DENDRITE_HTTP_ADDR="127.0.0.1:$http" \
-    DENDRITE_WS_ADDR="127.0.0.1:$ws" \
     target/debug/dendrited >"$dir/dendrited.log" 2>&1 &
     PIDS+=("$!")
     wait_for_ready "$http"

@@ -4,9 +4,11 @@ use crate::{
     live::LiveBroadcaster,
     telemetry::{CollectedObservation, TelemetryScope},
 };
+use dendrite_memory::storage::MemoryStore;
 use dendrite_protocol::{
-    DaemonStatusDto, IntegritySeverity, IpcRequest, IpcResponse, MemoryPathDto, ObservationKind,
-    TelemetryEventDto, TelemetryPipelineDto, TelemetryPipelineLaneDto, TrustState,
+    Confidence, DaemonStatusDto, EntityKind, IntegritySeverity, IpcRequest, IpcResponse,
+    MemoryPathDto, ObjectDescriptor, ObjectId, Observation, ObservationId, ObservationKind,
+    Severity, TelemetryEventDto, TelemetryPipelineDto, TelemetryPipelineLaneDto, TrustState,
     VulnerabilityRemediationDto,
 };
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -36,7 +38,8 @@ const MAX_CONTROL_CLIENTS_PER_TICK: usize = 32;
 
 pub struct RuntimeConfig {
     pub self_path: PathBuf,
-    pub memory_path: PathBuf,
+    pub stm_path: PathBuf,
+    pub ltm_path: PathBuf,
     pub incident_path: PathBuf,
     pub guard_path: PathBuf,
     pub cve_snapshot_path: PathBuf,
@@ -44,7 +47,13 @@ pub struct RuntimeConfig {
     pub socket_mode: u32,
     pub socket_group: Option<String>,
     pub http_addr: SocketAddr,
-    pub websocket_addr: SocketAddr,
+    /// Directory containing the built UI (`ui/dist`) to serve as static
+    /// files alongside the HTTP API, for packaged installs where the target
+    /// machine has no Node/npm to run a dev server. `None` (the development
+    /// default) means the daemon serves no UI itself — local dev runs
+    /// `npm run dev`'s Vite server separately, proxying `/api`/`/ws` to this
+    /// daemon (see `ui/vite.config.ts`).
+    pub ui_dir: Option<PathBuf>,
     pub watch_mounts: Vec<PathBuf>,
     pub watch_include_paths: Vec<PathBuf>,
     pub watch_exclude_paths: Vec<PathBuf>,
@@ -58,7 +67,8 @@ impl RuntimeConfig {
     pub fn development_defaults() -> Self {
         Self {
             self_path: PathBuf::from("data/self.sqlite3"),
-            memory_path: PathBuf::from("data/memory.sqlite3"),
+            stm_path: PathBuf::from("data/stm.sqlite3"),
+            ltm_path: PathBuf::from("data/ltm.sqlite3"),
             incident_path: PathBuf::from("data/incidents.sqlite3"),
             guard_path: PathBuf::from("data/guard.sqlite3"),
             cve_snapshot_path: PathBuf::from("knowledge/cve-snapshot.json"),
@@ -68,15 +78,13 @@ impl RuntimeConfig {
             http_addr: "127.0.0.1:8766"
                 .parse()
                 .expect("default HTTP address must be valid"),
-            websocket_addr: "127.0.0.1:8767"
-                .parse()
-                .expect("default WebSocket address must be valid"),
+            ui_dir: None,
             watch_mounts: Vec::new(),
             watch_include_paths: Vec::new(),
             watch_exclude_paths: Vec::new(),
             // Opt-out, not opt-in — see the comment on DENDRITE_FANOTIFY parsing in main.rs.
             fanotify_enabled: true,
-            ebpf_enabled: false,
+            ebpf_enabled: true,
             ebpf_object: PathBuf::from(
                 "ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf",
             ),
@@ -292,6 +300,7 @@ pub struct DaemonRuntime {
     telemetry: TelemetryManager,
     vulnerability: VulnerabilityService,
     socket_path: PathBuf,
+    ui_dir: Option<PathBuf>,
     telemetry_interval: Duration,
     priority_tx: SyncSender<IngestionJob>,
     routine_tx: SyncSender<IngestionJob>,
@@ -304,7 +313,8 @@ pub struct DaemonRuntime {
 impl DaemonRuntime {
     pub fn open(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         ensure_parent(&config.self_path)?;
-        ensure_parent(&config.memory_path)?;
+        ensure_parent(&config.stm_path)?;
+        ensure_parent(&config.ltm_path)?;
         ensure_parent(&config.incident_path)?;
         ensure_parent(&config.guard_path)?;
         ensure_parent(&config.socket_path)?;
@@ -328,13 +338,15 @@ impl DaemonRuntime {
 
         let http_listener = TcpListener::bind(config.http_addr)?;
         http_listener.set_nonblocking(true)?;
-        let live = LiveBroadcaster::start(config.websocket_addr)?;
+        let live = LiveBroadcaster::new();
 
         let self_store = config.self_path.to_string_lossy().into_owned();
-        let memory = config.memory_path.to_string_lossy().into_owned();
+        let stm = config.stm_path.to_string_lossy().into_owned();
+        let ltm = config.ltm_path.to_string_lossy().into_owned();
         let incidents = config.incident_path.to_string_lossy().into_owned();
         let guard = config.guard_path.to_string_lossy().into_owned();
-        let mut core = DaemonCore::open_with_stores(&self_store, &memory, &incidents, &guard)?;
+        let mut core =
+            DaemonCore::open_with_tiered_stores(&self_store, &stm, &ltm, &incidents, &guard)?;
         let mut vulnerability = VulnerabilityService::open(&incidents)?;
         let now = unix_now();
         if config.cve_snapshot_path.exists()
@@ -367,9 +379,17 @@ impl DaemonRuntime {
         let (priority_tx, priority_rx) = mpsc::sync_channel(PRIORITY_QUEUE_CAPACITY);
         let (routine_tx, routine_rx) = mpsc::sync_channel(ROUTINE_QUEUE_CAPACITY);
         let (completed_tx, completed_rx) = mpsc::sync_channel(COMPLETED_QUEUE_CAPACITY);
-        let ingestion_stores = IngestionWorkerStores {
+        let priority_memory = core.memory().fork_reader().map_err(DaemonError::Database)?;
+        let routine_memory = core.memory().fork_reader().map_err(DaemonError::Database)?;
+        let priority_stores = IngestionWorkerStores {
+            self_path: self_store.clone(),
+            memory: priority_memory,
+            incident_path: incidents.clone(),
+            guard_path: guard.clone(),
+        };
+        let routine_stores = IngestionWorkerStores {
             self_path: self_store,
-            memory_path: memory,
+            memory: routine_memory,
             incident_path: incidents,
             guard_path: guard,
         };
@@ -378,14 +398,14 @@ impl DaemonRuntime {
             completed_tx.clone(),
             Arc::clone(&pipeline),
             live.clone(),
-            ingestion_stores.clone(),
+            priority_stores,
         )?;
         spawn_routine_worker(
             routine_rx,
             completed_tx,
             Arc::clone(&pipeline),
             live.clone(),
-            ingestion_stores,
+            routine_stores,
         )?;
 
         Ok(Self {
@@ -395,6 +415,7 @@ impl DaemonRuntime {
             telemetry,
             vulnerability,
             socket_path: config.socket_path,
+            ui_dir: config.ui_dir,
             telemetry_interval: config.telemetry_interval,
             priority_tx,
             routine_tx,
@@ -510,6 +531,7 @@ impl DaemonRuntime {
                             &mut self.core,
                             &mut self.vulnerability,
                             &self.socket_path,
+                            self.ui_dir.as_deref(),
                             &self.live,
                             stream,
                         ) && !is_peer_disconnect_kind(error.kind())
@@ -884,6 +906,80 @@ impl DaemonRuntime {
                     })
                 }
             }
+            IpcRequest::DebugInjectPriority { label } => {
+                #[cfg(debug_assertions)]
+                {
+                    let now = unix_now();
+                    let suffix = format!("{now}:{}", uuid::Uuid::new_v4());
+                    let label = label.as_deref().unwrap_or("Synthetic priority-lane test");
+                    // Severity::Critical alone is enough for ingestion_lane() to route
+                    // this to the priority channel — no Threat-kind target needed, but
+                    // one is included anyway so it also exercises the same
+                    // threat-relatedness check real priority traffic would hit.
+                    let source = ObjectDescriptor {
+                        id: ObjectId(format!("debug:process:{suffix}")),
+                        kind: EntityKind::Process,
+                        label: format!("{label} process"),
+                    };
+                    let target = ObjectDescriptor {
+                        id: ObjectId(format!("debug:threat:{suffix}")),
+                        kind: EntityKind::Threat,
+                        label: format!("{label} threat"),
+                    };
+                    let observation = Observation {
+                        id: ObservationId(format!("debug:priority-inject:{suffix}")),
+                        kind: ObservationKind::Associated,
+                        source,
+                        target: Some(target),
+                        observed_at: now,
+                        expires_at: None,
+                        severity: Severity::Critical,
+                        confidence: Confidence::new(100).expect("100 is a valid confidence"),
+                    };
+                    let collected = CollectedObservation {
+                        source: crate::telemetry::TelemetrySource::Fanotify,
+                        event: "debug_priority_inject".into(),
+                        process_id: None,
+                        observation,
+                        related_observations: Vec::new(),
+                    };
+                    let job = IngestionJob {
+                        scope: TelemetryScope::Host,
+                        collected,
+                        queued_at: Instant::now(),
+                    };
+                    let lane = ingestion_lane(&job);
+                    self.pipeline.received(lane);
+                    let sender = match lane {
+                        IngestionLane::Priority => &self.priority_tx,
+                        IngestionLane::Routine => &self.routine_tx,
+                    };
+                    let queued = match sender.try_send(job) {
+                        Ok(()) => {
+                            self.pipeline.queued(lane);
+                            true
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            self.pipeline.dropped(lane);
+                            false
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err(DaemonError::Debug(
+                                "priority ingestion worker has stopped".into(),
+                            ));
+                        }
+                    };
+                    Ok(IpcResponse::DebugInjectPriority { queued })
+                }
+
+                #[cfg(not(debug_assertions))]
+                {
+                    let _ = label;
+                    Ok(IpcResponse::Error {
+                        message: "debug commands are disabled in release builds".into(),
+                    })
+                }
+            }
             IpcRequest::Health => Ok(IpcResponse::Health(self.core.health_check()?)),
         }
     }
@@ -905,15 +1001,22 @@ fn live_kind_for_ipc_request(request: &IpcRequest) -> Option<&'static str> {
     }
 }
 
-#[derive(Clone)]
 struct IngestionWorkerStores {
     self_path: String,
-    memory_path: String,
+    memory: MemoryStore,
     incident_path: String,
     guard_path: String,
 }
 
 const ROUTINE_BATCH_SIZE: usize = 200;
+/// Threat-path search depth used for routine-lane observations, vs. the
+/// full depth of 6 that priority observations always get (via
+/// `DaemonCore::ingest_observation`'s default). Routine is the overwhelming
+/// majority of volume with a near-zero hit rate; capping its search depth
+/// is the direct fix for that cost without weakening priority-lane
+/// detection at all — see `ingest_observation_with_max_depth`'s doc comment
+/// in core.rs for the full reasoning.
+const ROUTINE_THREAT_PATH_MAX_DEPTH: usize = 2;
 
 /// Priority telemetry (threat-related or high/critical severity) gets its
 /// own dedicated worker thread, fully independent of routine. This is the
@@ -932,11 +1035,17 @@ fn spawn_priority_worker(
     let _worker = thread::Builder::new()
         .name("dendrite-ingestion-priority".into())
         .spawn(move || {
-            let mut core = match DaemonCore::open_with_stores(
-                &stores.self_path,
-                &stores.memory_path,
-                &stores.incident_path,
-                &stores.guard_path,
+            let IngestionWorkerStores {
+                self_path,
+                memory,
+                incident_path,
+                guard_path,
+            } = stores;
+            let mut core = match DaemonCore::open_with_shared_memory(
+                &self_path,
+                memory,
+                &incident_path,
+                &guard_path,
             ) {
                 Ok(core) => core,
                 Err(error) => {
@@ -951,7 +1060,7 @@ fn spawn_priority_worker(
                 pipeline.queue_wait(lane, duration_ms(job.queued_at.elapsed()));
 
                 let started = Instant::now();
-                let event = process_job(&mut core, &pipeline, job);
+                let event = process_job(&mut core, &pipeline, job, 6);
                 pipeline.processed(lane, duration_ms(started.elapsed()));
 
                 live.publish("telemetry", &event);
@@ -968,12 +1077,10 @@ fn spawn_priority_worker(
 }
 
 /// Routine telemetry (the vast majority of raw volume — file/process/network
-/// noise) gets its own dedicated worker, batching several jobs' Memory Graph
-/// writes into one transaction rather than autocommitting per statement.
-/// Nothing in `ingest_observation` itself changes: SQLite transactions are
-/// connection-scoped, so every individual `save_node`/`save_relationship`/
-/// correlation-key write it already makes automatically becomes part of
-/// whatever transaction is currently open on that connection.
+/// noise) keeps its own worker and queue. In tiered operation `MemoryStore`
+/// routes each physical mutation through the dedicated STM or LTM writer
+/// actor, so routine and priority workers can process concurrently without
+/// opening competing SQLite writers for either database file.
 fn spawn_routine_worker(
     routine_rx: Receiver<IngestionJob>,
     completed_tx: SyncSender<TelemetryEventDto>,
@@ -984,11 +1091,17 @@ fn spawn_routine_worker(
     let _worker = thread::Builder::new()
         .name("dendrite-ingestion-routine".into())
         .spawn(move || {
-            let mut core = match DaemonCore::open_with_stores(
-                &stores.self_path,
-                &stores.memory_path,
-                &stores.incident_path,
-                &stores.guard_path,
+            let IngestionWorkerStores {
+                self_path,
+                memory,
+                incident_path,
+                guard_path,
+            } = stores;
+            let mut core = match DaemonCore::open_with_shared_memory(
+                &self_path,
+                memory,
+                &incident_path,
+                &guard_path,
             ) {
                 Ok(core) => core,
                 Err(error) => {
@@ -1032,21 +1145,68 @@ fn spawn_routine_worker(
                 }
 
                 let started = Instant::now();
-                if let Err(error) = core.begin_memory_batch() {
-                    eprintln!("routine batch: failed to begin transaction: {error:?}");
-                    // Fall through and process anyway, without a transaction —
-                    // slower (back to per-statement autocommit), but processing
-                    // this batch un-batched beats dropping it outright.
+
+                // Flatten every job that feeds security reasoning into a
+                // single list of observations (a job may carry related
+                // observations alongside its primary one - see
+                // `CollectedObservation`), so the whole batch's persistence
+                // and threat-path search can run as one `run_stm_batch` call
+                // instead of one writer round trip per job. `job_ranges`
+                // remembers which slice of `flat_observations` belongs to
+                // which job so results can be regrouped afterward; a job
+                // that doesn't feed security reasoning gets an empty range
+                // and is skipped exactly as `process_job` skips it today.
+                let mut flat_observations: Vec<(Observation, usize)> = Vec::new();
+                let mut job_ranges: Vec<(usize, usize)> = Vec::with_capacity(batch.len());
+                for job in &batch {
+                    let start = flat_observations.len();
+                    if job.scope.feeds_security_reasoning() {
+                        flat_observations.push((
+                            job.collected.observation.clone(),
+                            ROUTINE_THREAT_PATH_MAX_DEPTH,
+                        ));
+                        for related in &job.collected.related_observations {
+                            flat_observations
+                                .push((related.clone(), ROUTINE_THREAT_PATH_MAX_DEPTH));
+                        }
+                    }
+                    job_ranges.push((start, flat_observations.len()));
                 }
+
+                let mut results = core.ingest_routine_batch(flat_observations).into_iter();
 
                 let mut events = Vec::with_capacity(batch.len());
-                for job in batch {
-                    events.push(process_job(&mut core, &pipeline, job));
-                }
-
-                if let Err(error) = core.commit_memory_batch() {
-                    eprintln!("routine batch: commit failed, rolling back: {error:?}");
-                    core.rollback_memory_batch();
+                for (job, (start, end)) in batch.into_iter().zip(job_ranges) {
+                    let mut incident_ids = std::collections::BTreeSet::new();
+                    for _ in start..end {
+                        // `results` is a plain iterator consumed in lockstep
+                        // with `job_ranges`, which was built from the exact
+                        // same `flat_observations` push order above, so
+                        // `.next()` always lines up with the right job's
+                        // slice - `expect` here would only fire on a bug in
+                        // that pairing, not on anything ingestion itself can
+                        // produce.
+                        let result = results
+                            .next()
+                            .expect("job_ranges must match flat_observations 1:1");
+                        match result {
+                            Ok(outcome) => {
+                                pipeline
+                                    .security_observations_ingested
+                                    .fetch_add(1, Ordering::Relaxed);
+                                incident_ids.extend(
+                                    outcome.incidents.into_iter().map(|incident| incident.0),
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!("telemetry ingestion failed: {error:?}");
+                            }
+                        }
+                    }
+                    events.push(build_telemetry_event(
+                        job,
+                        incident_ids.into_iter().collect(),
+                    ));
                 }
                 pipeline.processed(lane, duration_ms(started.elapsed()));
 
@@ -1090,13 +1250,14 @@ fn process_job(
     core: &mut DaemonCore,
     pipeline: &PipelineMetrics,
     job: IngestionJob,
+    max_depth: usize,
 ) -> TelemetryEventDto {
     let incident_ids = if job.scope.feeds_security_reasoning() {
         let mut incident_ids = std::collections::BTreeSet::new();
         for observation in std::iter::once(&job.collected.observation)
             .chain(job.collected.related_observations.iter())
         {
-            match core.ingest_observation(observation) {
+            match core.ingest_observation_with_max_depth(observation, max_depth) {
                 Ok(outcome) => {
                     pipeline
                         .security_observations_ingested
@@ -1113,6 +1274,16 @@ fn process_job(
         Vec::new()
     };
 
+    build_telemetry_event(job, incident_ids)
+}
+
+/// Builds the `TelemetryEventDto` reported over the live feed and the
+/// completed-events queue for one job, given whatever incident ids its
+/// ingestion (however it ran - one job at a time via `process_job`, or as
+/// part of a routine batch) produced. Split out of `process_job` so the
+/// routine worker's batched path can share it without duplicating the DTO
+/// field mapping.
+fn build_telemetry_event(job: IngestionJob, incident_ids: Vec<String>) -> TelemetryEventDto {
     TelemetryEventDto {
         id: job.collected.observation.id.0.clone(),
         source: job.collected.source.as_str().into(),

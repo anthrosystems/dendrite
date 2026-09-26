@@ -7,18 +7,28 @@ use dendrite_protocol::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tungstenite::handshake::derive_accept_key;
+use tungstenite::protocol::{Role, WebSocket};
 
 const ALLOWED_ORIGINS: [&str; 2] = ["http://127.0.0.1:5173", "http://localhost:5173"];
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// The live-event WebSocket path. It shares this listener/port with the
+/// rest of the HTTP API (see the module doc comment below) rather than
+/// binding a separate `DENDRITE_WS_ADDR` port, so distribution packaging
+/// only needs to expose one address for both.
+const WEBSOCKET_PATH: &str = "/ws";
 
 pub fn handle_http_stream(
     core: &mut DaemonCore,
     vulnerability: &mut VulnerabilityService,
     socket_path: &Path,
+    ui_dir: Option<&Path>,
     live: &LiveBroadcaster,
     mut stream: TcpStream,
 ) -> io::Result<()> {
@@ -28,6 +38,9 @@ pub fn handle_http_stream(
 
     let mut origin = None;
     let mut content_length = 0usize;
+    let mut connection_header = None;
+    let mut upgrade_header = None;
+    let mut sec_websocket_key = None;
 
     loop {
         let mut line = String::new();
@@ -41,6 +54,12 @@ pub fn handle_http_stream(
                 origin = Some(value.trim().to_owned());
             } else if name.eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse::<usize>().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("connection") {
+                connection_header = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("upgrade") {
+                upgrade_header = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("sec-websocket-key") {
+                sec_websocket_key = Some(value.trim().to_owned());
             }
         }
     }
@@ -54,6 +73,51 @@ pub fn handle_http_stream(
             &ErrorBody::new("origin is not allowed"),
             None,
         );
+    }
+
+    let mut upgrade_parts = request_line.split_whitespace();
+    let upgrade_method = upgrade_parts.next().unwrap_or_default();
+    let upgrade_target = upgrade_parts.next().unwrap_or_default();
+    let upgrade_path = upgrade_target
+        .split_once('?')
+        .map_or(upgrade_target, |(path, _)| path);
+    let is_websocket_upgrade = upgrade_method == "GET"
+        && upgrade_path == WEBSOCKET_PATH
+        && connection_header
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("upgrade"))
+        && upgrade_header
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+
+    if is_websocket_upgrade {
+        return match sec_websocket_key {
+            Some(key) => {
+                complete_websocket_upgrade(&mut stream, live, &key)?;
+                Ok(())
+            }
+            None => write_json(
+                &mut stream,
+                400,
+                &ErrorBody::new("WebSocket upgrade is missing Sec-WebSocket-Key"),
+                origin.as_deref(),
+            ),
+        };
+    }
+
+    // Packaged installs have no Node/npm at runtime to run a separate UI dev
+    // server, so `dendrited` serves the built UI (`ui/dist`) itself as
+    // static files for any GET that isn't an API call or the WS upgrade
+    // above. In local dev, `ui_dir` is `None` (the UI runs via `npm run dev`
+    // instead, proxying `/api`/`/ws` to this daemon — see
+    // `ui/vite.config.ts`), so this branch is simply skipped and unmatched
+    // GETs fall through to the ordinary 404 below, unchanged from before.
+    if let Some(ui_dir) = ui_dir
+        && upgrade_method == "GET"
+        && !upgrade_path.starts_with("/api/")
+        && upgrade_path != WEBSOCKET_PATH
+    {
+        return serve_static_file(&mut stream, ui_dir, upgrade_path);
     }
 
     if content_length > MAX_BODY_BYTES {
@@ -120,6 +184,120 @@ pub fn handle_http_stream(
             origin.as_deref(),
         ),
     }
+}
+
+/// Completes an already-detected WebSocket upgrade request on this HTTP
+/// listener's connection: writes the `101 Switching Protocols` handshake
+/// response by hand (the handshake headers were already parsed by the
+/// caller's ordinary HTTP header loop, so this deliberately does not call
+/// `tungstenite`'s own handshake reader — that expects to read the request
+/// itself from a fresh stream), then hands the connection to
+/// `WebSocket::from_raw_socket` for framing and registers it with `live` as
+/// a subscriber. `stream`'s write half is used directly; the read half was
+/// already consumed up through the blank line terminating the request
+/// headers by the caller's `BufReader`-wrapped clone of the same socket.
+fn complete_websocket_upgrade(
+    stream: &mut TcpStream,
+    live: &LiveBroadcaster,
+    sec_websocket_key: &str,
+) -> io::Result<()> {
+    let accept_key = derive_accept_key(sec_websocket_key.as_bytes());
+    write!(
+        stream,
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept_key}\r\n\r\n"
+    )?;
+    stream.flush()?;
+    let websocket = WebSocket::from_raw_socket(stream.try_clone()?, Role::Server, None);
+    live.accept_websocket(websocket);
+    Ok(())
+}
+
+/// Serves the built UI (`ui/dist`, copied to `ui_dir` — see `DENDRITE_UI_DIR`
+/// in `docs/CONFIGURATION.md`) as static files for a packaged install with
+/// no Node/npm at runtime. `request_path` is the request's path only (query
+/// string already stripped by the caller).
+///
+/// A path that resolves to a real file under `ui_dir` is served as-is. A
+/// path that doesn't (a client-side route like `/incidents/123`, a
+/// directory, or a path-traversal attempt — rejected by the containment
+/// check below) falls back to `index.html`, letting the UI's own router
+/// handle it, same as any single-page-app static host. If `ui_dir` itself
+/// or its `index.html` is missing (the UI wasn't actually built/copied in),
+/// that's reported as a clear 404 rather than silently serving nothing.
+fn serve_static_file(stream: &mut TcpStream, ui_dir: &Path, request_path: &str) -> io::Result<()> {
+    let resolved_ui_dir = match ui_dir.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            return write_plain_text(stream, 500, "configured UI directory does not exist");
+        }
+    };
+
+    let relative = request_path.trim_start_matches('/');
+    let requested = (!relative.is_empty()).then(|| resolved_ui_dir.join(relative));
+
+    let served = requested
+        .as_deref()
+        .and_then(|path| path.canonicalize().ok())
+        .filter(|path| path.starts_with(&resolved_ui_dir) && path.is_file());
+
+    let served = match served {
+        Some(path) => path,
+        None => {
+            let index = resolved_ui_dir.join("index.html");
+            if !index.is_file() {
+                return write_plain_text(stream, 404, "UI is not installed on this daemon");
+            }
+            index
+        }
+    };
+
+    let bytes = fs::read(&served)?;
+    write_static_bytes(stream, &bytes, static_content_type(&served))
+}
+
+fn static_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json" | "map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("wasm") => "application/wasm",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn write_plain_text(stream: &mut TcpStream, status: u16, body: &str) -> io::Result<()> {
+    let reason = match status {
+        403 => "Forbidden",
+        404 => "Not Found",
+        _ => "Internal Server Error",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )?;
+    stream.flush()
+}
+
+fn write_static_bytes(stream: &mut TcpStream, body: &[u8], content_type: &str) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()
 }
 
 enum HttpBody {

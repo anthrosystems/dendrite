@@ -61,17 +61,17 @@ fi
 
 mkdir -p "$DATA_DIR"
 
-echo "Starting Dendrite Host A — HTTP 127.0.0.1:8766, WS 127.0.0.1:8767"
+echo "Starting Dendrite Host A — HTTP + WebSocket 127.0.0.1:8766 (WS path /ws)"
 echo "Data dir: $DATA_DIR"
 echo "Socket:   $SOCKET"
 
 DENDRITE_SELF_DB="$DATA_DIR/self.sqlite3" \
-DENDRITE_MEMORY_DB="$DATA_DIR/memory.sqlite3" \
+DENDRITE_STM_DB="$DATA_DIR/stm.sqlite3" \
+DENDRITE_LTM_DB="$DATA_DIR/ltm.sqlite3" \
 DENDRITE_INCIDENT_DB="$DATA_DIR/incidents.sqlite3" \
 DENDRITE_GUARD_DB="$DATA_DIR/guard.sqlite3" \
 DENDRITE_SOCKET="$SOCKET" \
 DENDRITE_HTTP_ADDR="127.0.0.1:8766" \
-DENDRITE_WS_ADDR="127.0.0.1:8767" \
 DENDRITE_SOCKET_GROUP="${DENDRITE_SOCKET_GROUP:-dendrite}" \
 DENDRITE_SOCKET_MODE="${DENDRITE_SOCKET_MODE:-0660}" \
 DENDRITE_EBPF="${DENDRITE_EBPF:-1}" \

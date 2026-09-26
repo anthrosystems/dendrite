@@ -1,62 +1,53 @@
 use serde::Serialize;
-use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::TcpStream;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
-use tungstenite::{Message, accept};
+use tungstenite::Message;
+use tungstenite::protocol::WebSocket;
 
+/// Broadcasts live daemon events (ingestion pipeline snapshots, HTTP
+/// mutation notifications) to connected WebSocket clients.
+///
+/// This no longer owns a `TcpListener` of its own: the WebSocket endpoint
+/// (`/ws`) shares the HTTP API's single TCP listener/port rather than
+/// binding a separate `DENDRITE_WS_ADDR` port, so that distribution
+/// packaging only needs to expose one address for both (see
+/// `http::complete_websocket_upgrade`, which performs the handshake and
+/// hands the resulting connection to `accept_websocket` below).
 #[derive(Clone, Default)]
 pub struct LiveBroadcaster {
     subscribers: Arc<Mutex<Vec<mpsc::SyncSender<String>>>>,
 }
 
 impl LiveBroadcaster {
-    pub fn start(addr: SocketAddr) -> io::Result<Self> {
-        let listener = TcpListener::bind(addr)?;
-        listener.set_nonblocking(true)?;
-        let broadcaster = Self::default();
-        let subscribers = Arc::clone(&broadcaster.subscribers);
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-        let _acceptor = thread::Builder::new()
-            .name("dendrite-live-ws".into())
+    /// Registers an already-handshaken WebSocket connection as a subscriber
+    /// and spawns a dedicated thread that forwards published events to it
+    /// until the client disconnects or a write fails. The handshake itself
+    /// (reading the upgrade request, writing the `101` response) has
+    /// already happened by the time this is called — see
+    /// `http::complete_websocket_upgrade`.
+    pub fn accept_websocket(&self, mut websocket: WebSocket<TcpStream>) {
+        let subscribers = Arc::clone(&self.subscribers);
+        if let Err(error) = thread::Builder::new()
+            .name("dendrite-live-client".into())
             .spawn(move || {
-                loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            let subscribers = Arc::clone(&subscribers);
-                            if let Err(error) = thread::Builder::new()
-                                .name("dendrite-live-client".into())
-                                .spawn(move || {
-                                    let Ok(mut websocket) = accept(stream) else {
-                                        return;
-                                    };
-                                    let (tx, rx) = mpsc::sync_channel::<String>(512);
-                                    if let Ok(mut list) = subscribers.lock() {
-                                        list.push(tx);
-                                    }
-                                    while let Ok(payload) = rx.recv() {
-                                        if websocket.write(Message::Text(payload.into())).is_err() {
-                                            break;
-                                        }
-                                    }
-                                })
-                            {
-                                eprintln!("failed to start WebSocket client worker: {error}");
-                            }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(25));
-                        }
-                        Err(error) => {
-                            eprintln!("WebSocket listener failed: {error}");
-                            thread::sleep(Duration::from_millis(250));
-                        }
+                let (tx, rx) = mpsc::sync_channel::<String>(512);
+                if let Ok(mut list) = subscribers.lock() {
+                    list.push(tx);
+                }
+                while let Ok(payload) = rx.recv() {
+                    if websocket.write(Message::Text(payload.into())).is_err() {
+                        break;
                     }
                 }
-            })?;
-
-        Ok(broadcaster)
+            })
+        {
+            eprintln!("failed to start WebSocket client worker: {error}");
+        }
     }
 
     pub fn publish<T: Serialize>(&self, kind: &str, payload: &T) {

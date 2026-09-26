@@ -8,8 +8,11 @@ fn main() {
     if let Ok(value) = env::var("DENDRITE_SELF_DB") {
         config.self_path = PathBuf::from(value);
     }
-    if let Ok(value) = env::var("DENDRITE_MEMORY_DB") {
-        config.memory_path = PathBuf::from(value);
+    if let Ok(value) = env::var("DENDRITE_STM_DB") {
+        config.stm_path = PathBuf::from(value);
+    }
+    if let Ok(value) = env::var("DENDRITE_LTM_DB") {
+        config.ltm_path = PathBuf::from(value);
     }
     if let Ok(value) = env::var("DENDRITE_INCIDENT_DB") {
         config.incident_path = PathBuf::from(value);
@@ -28,10 +31,11 @@ fn main() {
     {
         config.http_addr = address;
     }
-    if let Ok(value) = env::var("DENDRITE_WS_ADDR")
-        && let Ok(address) = value.parse()
-    {
-        config.websocket_addr = address;
+    if let Ok(value) = env::var("DENDRITE_UI_DIR") {
+        let value = value.trim();
+        if !value.is_empty() {
+            config.ui_dir = Some(PathBuf::from(value));
+        }
     }
     if let Ok(value) = env::var("DENDRITE_SOCKET_GROUP") {
         let value = value.trim();
@@ -60,6 +64,9 @@ fn main() {
         );
     }
     if let Ok(value) = env::var("DENDRITE_EBPF") {
+        // Opt-out, not opt-in: the default (this var unset) is enabled — see
+        // RuntimeConfig::development_defaults(). Setting this to anything
+        // other than a truthy value (e.g. "0", "false") explicitly disables it.
         config.ebpf_enabled = matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
@@ -100,10 +107,9 @@ fn main() {
     }
 
     eprintln!(
-        "dendrited starting on {} (HTTP {}, WebSocket {})",
+        "dendrited starting on {} (HTTP + WebSocket {}, WebSocket path /ws)",
         config.socket_path.display(),
         config.http_addr,
-        config.websocket_addr
     );
     if let Err(error) = DaemonRuntime::open(config).and_then(DaemonRuntime::run) {
         eprintln!("dendrited failed: {error:?}");

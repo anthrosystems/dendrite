@@ -9,7 +9,8 @@ This is development-time plumbing. Batch 7 packaging should replace ad-hoc envir
 | Variable | Default | Description |
 |---|---|---|
 | `DENDRITE_SELF_DB` | `data/self.sqlite3` | Self store (instance identity, signing keys) |
-| `DENDRITE_MEMORY_DB` | `data/memory.sqlite3` | Memory Graph database |
+| `DENDRITE_STM_DB` | `data/stm.sqlite3` | Short Term Memory Graph database |
+| `DENDRITE_LTM_DB` | `data/ltm.sqlite3` | Long Term Memory Graph database |
 | `DENDRITE_INCIDENT_DB` | `data/incidents.sqlite3` | Incidents/evidence database — also backs the vulnerability, CVE, and behaviour-knowledge tables (`VulnerabilityService`/`KnowledgeService` both open this same file; there is no separate vulnerability/knowledge DB path) |
 | `DENDRITE_GUARD_DB` | `data/guard.sqlite3` | Guard trust state / integrity findings database |
 | `DENDRITE_CVE_SNAPSHOT` | `knowledge/cve-snapshot.json` | Bundled CVE/behaviour knowledge, auto-imported once at startup |
@@ -23,26 +24,30 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 | `DENDRITE_SOCKET` | `/tmp/dendrited.sock` | Unix socket path for `dendrite-cli` IPC |
 | `DENDRITE_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket |
 | `DENDRITE_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
-| `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address |
-| `DENDRITE_WS_ADDR` | `127.0.0.1:8767` | Localhost WebSocket bind address (live event stream) |
+| `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address — also serves the live-event WebSocket (see below) |
+| `DENDRITE_UI_DIR` | unset (daemon serves no UI) | Directory containing the built UI (`ui/dist`) to serve as static files alongside the API. The packaged `.deb` sets this to `/usr/share/dendrite/ui`; local dev leaves it unset and runs `npm run dev`'s own Vite server instead (see `ui/vite.config.ts`'s proxy config) |
 
-Both `DENDRITE_HTTP_ADDR` and `DENDRITE_WS_ADDR` are silently ignored if they fail to parse as a socket address — the default is kept in that case with no warning printed. `DENDRITE_SOCKET_MODE` is stricter: an unparseable value logs an error and exits with status `2`.
+`DENDRITE_HTTP_ADDR` is silently ignored if it fails to parse as a socket address — the default is kept in that case with no warning printed. `DENDRITE_SOCKET_MODE` is stricter: an unparseable value logs an error and exits with status `2`.
 
-Neither the HTTP API nor the WebSocket endpoint currently perform any request authentication; the HTTP API only enforces a CORS origin allowlist against the UI dev server origins. See the "Deliberately deferred" note in [`ROADMAP.md`](ROADMAP.md) Checkpoint A — this is being treated as an explicit pre-MCP item rather than an oversight, but it's worth keeping both endpoints bound to loopback until it's addressed.
+When `DENDRITE_UI_DIR` is set, any `GET` request that isn't `/api/...` or the `/ws` upgrade is served from that directory: a request matching a real file gets that file (with a content type inferred from its extension); anything else — a client-side route like `/incidents/123`, a bare `/` — falls back to `index.html` so the UI's own router handles it, the same convention as any single-page-app static host. A request that resolves (after following `..` segments) to somewhere outside `DENDRITE_UI_DIR` is rejected the same way — it falls back to `index.html` rather than ever reading the escaped path.
+
+The live event stream is a WebSocket upgrade of a normal request to `/ws` on this same address/port — there is no separate `DENDRITE_WS_ADDR` any more (removed as part of Batch 7's "one address, just works" distribution-packaging goal; see `ROADMAP.md`'s Batch 10 note on the merge). `dendrited` detects the upgrade (`Connection: Upgrade`, `Upgrade: websocket`, `Sec-WebSocket-Key` headers on a `GET /ws` request) itself on its ordinary HTTP accept loop and performs the handshake by hand rather than via a second listener.
+
+Neither the HTTP API nor the `/ws` WebSocket endpoint currently perform any request authentication; the HTTP API (and, as of the port merge, `/ws` too) only enforces a CORS origin allowlist against the UI dev server origins. See the "Deliberately deferred" note in [`ROADMAP.md`](ROADMAP.md) Checkpoint A — this is being treated as an explicit pre-MCP item rather than an oversight, but it's worth keeping the endpoint bound to loopback until it's addressed.
 
 ## Telemetry collectors
 
 | Variable | Default | Description |
 |---|---|---|
 | `DENDRITE_FANOTIFY` | `true` | Enable the fanotify filesystem collector. This is opt-**out**, not opt-in — set to a non-truthy value (`0`, `false`, etc.) to disable. Truthy values: `1`, `true`, `yes`, `on` (case-insensitive) |
-| `DENDRITE_EBPF` | `false` | Enable the eBPF process/network collector. Opt-in, unlike fanotify above. Same truthy parsing |
+| `DENDRITE_EBPF` | `true` | Enable the eBPF process/network collector. Also opt-**out**, like fanotify above (not opt-in) — set to a non-truthy value to disable. Same truthy parsing. Failing to load (missing object, missing capabilities) falls back to `/proc` polling rather than blocking startup — same graceful-fallback behaviour as fanotify |
 | `DENDRITE_EBPF_OBJECT` | `ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf` | Path to the compiled eBPF object to load when `DENDRITE_EBPF` is enabled |
 | `DENDRITE_WATCH_MOUNTS` | unset (empty) | Colon-separated list of mount points to *restrict* fanotify to. Unset/empty means every real mount, auto-discovered from `/proc/self/mountinfo` (pseudo-filesystems like `proc`/`sysfs`/`cgroup` are always skipped). This narrows discovery, it does not add to it — see the section below |
 | `DENDRITE_WATCH_INCLUDE_PATHS` | unset (empty) | Colon-separated list of *specific extra paths* to mark, in addition to whatever `DENDRITE_WATCH_MOUNTS` covers — for a path whose mount you don't otherwise want fully watched. Marked directory-by-directory (capped at 4,096 directories), not filesystem-wide |
 | `DENDRITE_WATCH_EXCLUDE_PATHS` | unset (empty) | Colon-separated list of path prefixes to exclude from fanotify events, applied by path component (so `/etc` excludes `/etc/passwd` but not `/etc-backup/passwd`) |
 | `DENDRITE_TELEMETRY_INTERVAL_SECONDS` | `5` | Polling interval for fallback collectors, in seconds (minimum enforced value is `1`). Also the cadence for fanotify's periodic mount rescan — see below |
 
-eBPF is opt-in; fanotify is opt-out (see above) — a fresh `dendrited` with no environment overrides watches every real mount by default. See [`TELEMETRY.md`](TELEMETRY.md) for collector precedence and fallback behaviour, and the required capability set (`CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`) for enabling eBPF/fanotify.
+eBPF and fanotify are both opt-out now, not opt-in — a fresh `dendrited` with no environment overrides watches every real mount and collects process/network telemetry via eBPF by default, falling back gracefully (to `/proc` polling, or filesystem polling respectively) wherever either one can't actually load. See [`TELEMETRY.md`](TELEMETRY.md) for collector precedence and fallback behaviour, and the required capability set (`CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`) for enabling eBPF/fanotify.
 
 ### How fanotify decides what to watch
 
@@ -58,11 +63,15 @@ By default (no configuration at all), Dendrite watches every real, currently-mou
 
 **Collisions are rejected, not silently resolved.** If any `DENDRITE_WATCH_INCLUDE_PATHS` entry and any `DENDRITE_WATCH_EXCLUDE_PATHS` entry are equal, or one is a path-component ancestor of the other, fanotify refuses to start (falls back to polling, with the conflict named in the fallback status detail) rather than picking a winner — silently resolving it either way would make it easy to believe a path is covered when it isn't, or vice versa.
 
+**Two things are always on, deliberately not configurable:**
+- **Self-exclusion.** Events generated by Dendrite's own PID are filtered out — its own writes to `stm.sqlite3`/`ltm.sqlite3`/`incidents.sqlite3`/`guard.sqlite3` would otherwise be watched and re-observed, a real amplification loop confirmed in practice, not just theoretical. This is scoped by *PID*, not by excluding those paths — a path-based exclude would also blind Dendrite to some other process tampering with those same files, which is exactly the kind of thing worth catching. There's no legitimate reason to want this off, so it isn't a setting.
+- **`FAN_UNLIMITED_QUEUE`/`FAN_UNLIMITED_MARKS`** at `fanotify_init`, replacing the kernel's default 16,384-event queue cap and 8,192-mark cap. Both already require `CAP_SYS_ADMIN`, already mandatory for fanotify at all, so this asks nothing new of the operator. Without `FAN_UNLIMITED_QUEUE` specifically, the kernel can silently drop events once its queue fills, before Dendrite ever sees them — invisible to every metric Dendrite itself reports.
+
 `FAN_MARK_FILESYSTEM` only covers the *one* mounted filesystem containing the marked path — a separately mounted `/home`, or a container's overlay/bind mount, is its own entry in the discovered/restricted mount list, not automatically covered by watching `/`.
 
 ## Example: development startup
 
-Since `DENDRITE_FANOTIFY` is now on by default, an explicit `DENDRITE_FANOTIFY=1` is no longer needed — kept below only to match the historical `TESTS.md` Section 4 configuration for reference. `DENDRITE_WATCH_MOUNTS`/`DENDRITE_WATCH_INCLUDE_PATHS` are optional; unset means "every real mount":
+Since `DENDRITE_FANOTIFY` and `DENDRITE_EBPF` are both on by default now, neither needs to be set explicitly — both kept below only to match the historical `TESTS.md` Section 4 configuration for reference. `DENDRITE_WATCH_MOUNTS`/`DENDRITE_WATCH_INCLUDE_PATHS` are optional; unset means "every real mount":
 
 ```bash
 DENDRITE_SOCKET_GROUP=dendrite \
