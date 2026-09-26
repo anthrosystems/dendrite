@@ -1,80 +1,14 @@
 # dendrite-memory
 
-Dendrite Memory Graph and memory lifecycle.
+Dendrite's Memory Graph and memory lifecycle: typed nodes/relationships, bounded strength/confidence/decay, lifecycle state (`OBSERVED -> CORRELATED -> SUPPORTED -> ESTABLISHED`, plus `CONTRADICTED`/`SUPERSEDED`/`EXPIRED`/`REVOKED`), repeated-observation consolidation, and graph-reasoning primitives (neighbour discovery, bounded traversal, ranked threat-path finding).
 
-`dendrite-memory` is the semantic and temporal memory subsystem used by `dendrited`. It provides structured graph models, SQLite-backed persistence, lifecycle management, observation consolidation, and graph-reasoning primitives.
-
-## Responsibilities
-
-The crate currently handles:
-
-- memory nodes and relationships;
-- typed node and relationship kinds;
-- bounded strength, confidence, and decay values;
-- short-term, long-term, and persistent retention;
-- lifecycle state;
-- expiry and purge eligibility;
-- linear and exponential decay;
-- reinforcement and revocation;
-- repeated-observation consolidation;
-- inbound and outbound relationship queries;
-- neighbour discovery;
-- bounded breadth-first traversal;
-- directional path finding;
-- filtering by relationship kind, state, strength, confidence, and evaluation time;
-- ranked paths to threat nodes.
-
-## Memory states
-
-```text
-OBSERVED
-CORRELATED
-SUPPORTED
-ESTABLISHED
-CONTRADICTED
-SUPERSEDED
-EXPIRED
-REVOKED
-```
-
-Only reasoning-active states should participate in normal graph reasoning.
-
-## Lifecycle
-
-Nodes and relationships expire independently.
-
-Relationships are expected to decay and expire more aggressively than nodes. Expired data is not necessarily deleted immediately; purge eligibility is evaluated separately and persistent memories are protected from ordinary purging.
-
-Decay is evaluated non-destructively against stored baseline strength, avoiding repeated maintenance passes compounding decay incorrectly.
-
-## Observation consolidation
-
-Repeated observations of the same semantic relationship are consolidated instead of creating a permanent edge for every raw event.
-
-A consolidated relationship tracks information such as:
-
-- `created_at`
-- `last_seen_at`
-- `observation_count`
-- `expires_at`
-- state
-- retention
-- decay policy
-- strength
-- confidence
-- reinforcement provenance
-
-## Reasoning
-
-The crate provides topology and path primitives, not security authority.
-
-A graph result may contribute evidence to `dendrited`, but `dendrite-memory` must not execute actions or bypass MAGI, policy, guard, or transactional execution.
+The crate provides topology and path primitives, not security authority — a graph result may contribute evidence to `dendrited`, but must never bypass MAGI, policy, Guard, or transactional execution.
 
 ## Storage
 
-SQLite is currently used as the backing store.
+SQLite-backed, split into two physical tiers — short-term (STM) and long-term (LTM) — each with its own writer-actor thread and connection, coordinated so a batch of routine ingestion can read its own earlier writes within one transaction. See `docs/architecture.md` for the full model and `docs/ROADMAP.md`'s batching notes for why this is tiered rather than one connection.
 
-Stored values are decoded and validated at the storage boundary. Corrupt semantic values are surfaced through explicit storage errors rather than silently accepted.
+Stored values are decoded and validated at the storage boundary; corrupt semantic values surface as explicit storage errors rather than being silently accepted.
 
 ## Tests
 

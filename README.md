@@ -110,19 +110,36 @@ dendrite/
 │   ├── dendrite-action/
 │   ├── dendrite-guard/
 │   ├── dendrite-updater/
-│   └── dendrite-protocol/
+│   ├── dendrite-protocol/
+│   └── dendrite-ebpf-common/
+├── ebpf/
+│   └── dendrite-ebpf/
+├── antiserum/
 ├── ui/
 ├── python/
 ├── models/
 ├── migrations/
 ├── configs/
 ├── packaging/
-├── tests/
 ├── docs/
 └── scripts/
 ```
 
 The UI lives in the main repository as a first-class root component. Repository, crate, process, and security boundary are deliberately treated as different concepts.
+
+### Crates and components
+
+- [`crates/dendrited`](crates/dendrited/README.md) — the core daemon
+- [`crates/dendrite-cli`](crates/dendrite-cli/README.md) — the command-line client
+- [`crates/dendrite-memory`](crates/dendrite-memory/README.md) — the Memory Graph
+- [`crates/dendrite-action`](crates/dendrite-action/README.md) — the privileged-action boundary
+- [`crates/dendrite-guard`](crates/dendrite-guard/README.md) — trust, integrity and recovery
+- [`crates/dendrite-updater`](crates/dendrite-updater/README.md) — package verification/remediation
+- [`crates/dendrite-protocol`](crates/dendrite-protocol/README.md) — shared domain types
+- [`crates/dendrite-ebpf-common`](crates/dendrite-ebpf-common/README.md) — shared kernel/userspace ABI
+- [`ebpf/`](ebpf/README.md) and [`ebpf/dendrite-ebpf`](ebpf/dendrite-ebpf/README.md) — the kernel eBPF telemetry program
+- [`ui/`](ui/README.md) — the web operator console
+- [`antiserum/`](antiserum/README.md) — the signed threat-intelligence package format
 
 ## Development
 

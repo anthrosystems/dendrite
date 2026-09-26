@@ -1,53 +1,16 @@
 # dendrite-guard
 
-Independent trust, integrity, and recovery subsystem.
-
-`dendrite-guard` is intended to act as an independent trust root around Dendrite's security-sensitive components.
-
-## Responsibilities
-
-The final subsystem is expected to protect and assess:
-
-- `dendrited`;
-- Dendrite configuration;
-- quarantine state;
-- databases;
-- models;
-- policy;
-- telemetry mechanisms;
-- integrity-critical IPC;
-- recovery state.
-
-## Trust states
+Independent trust, integrity, and recovery subsystem — the central authority-removal boundary the rest of Dendrite calls through `evaluate_authority`/`trust_state`/`status`/`findings`.
 
 ```text
-TRUSTED
-DEGRADED
-SUSPECTED
-QUARANTINED
-COMPROMISED
-RECOVERING
+TRUSTED -> DEGRADED -> SUSPECTED -> QUARANTINED -> COMPROMISED -> RECOVERING
 ```
 
-The current foundation only allows action authority while the guard considers the system trusted.
-
-This policy can become more action-specific later, but the initial implementation intentionally fails closed.
-
-## Principle
+Action authority is only granted while Guard considers the system trusted. A degraded or compromised state must never increase privileges — it fails closed by design.
 
 > Compromise can remove authority, but cannot create authority.
 
-A degraded or compromised state must never increase privileges or action authority.
-
-## Future work
-
-- signed integrity manifests;
-- protected health state;
-- anti-tamper mechanisms;
-- authenticated IPC;
-- independent recovery;
-- quarantine integrity;
-- secure restart/recovery paths.
+**Current state is intentionally minimal**: a trust-state enum and an allow/deny match, linked directly into `dendrited`'s own process (no real process boundary yet). Hardening this — including splitting Guard into its own OS process over a dedicated IPC channel — is a deliberately separate, prioritized-ahead-of-destructive-actions batch of work. See `docs/ROADMAP.md`'s Batch 7 findings for the concrete plan and why the four-method call surface above already sets it up well.
 
 ## Testing
 

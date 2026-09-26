@@ -1,14 +1,6 @@
 # dendrite-updater
 
-Software update and remediation subsystem.
-
-`dendrite-updater` defines Dendrite's package remediation, verification, and rollback boundary.
-
-## Intended model
-
-Dendrite should use the operating system's package manager rather than arbitrary downloaded installers or scripts.
-
-The intended update flow is:
+Software update and remediation subsystem: Dendrite's package verification, application, and rollback boundary, built on the host's own package manager rather than arbitrary downloaded installers or scripts.
 
 ```text
 candidate
@@ -28,18 +20,9 @@ verify
    +---- failure ----> rollback
 ```
 
-## Security requirements
+Updates are executed only through this boundary and only under policy/authorization, the same rule as `dendrite-action`: a remediation candidate is not remediation authority.
 
-The production updater should eventually support:
-
-- signed update verification;
-- atomic or transaction-like updates where the OS permits;
-- rollback;
-- anti-downgrade protection;
-- provenance and audit records;
-- policy-controlled remediation.
-
-The current foundation includes only interfaces and does not mutate host packages.
+See `docs/VULNERABILITIES_AND_UPDATES.md` for the current implementation (including `execute_authorised_vulnerability_update`), what's already enforced, and what's still planned (anti-downgrade protection, provenance/audit records).
 
 ## Testing
 

@@ -1,63 +1,31 @@
 # dendrited
 
-Core Dendrite daemon and host telemetry service.
-
-`dendrited` is the central orchestration process for Dendrite. It is responsible for receiving observations, normalising them into Dendrite's domain model, coordinating the Memory Graph, producing evidence candidates, maintaining incidents, and creating action proposals.
-
-## Intended flow
+Dendrite's core daemon: the central orchestration process that owns the Memory Graph, telemetry collection, incident/evidence state, action-proposal creation, and the local HTTP/WebSocket/Unix-socket surfaces.
 
 ```text
-telemetry
+telemetry (eBPF / fanotify / /proc / filesystem polling)
    |
    v
 observation
    |
    v
-memory ingestion
+Memory Graph ingestion (tiered STM/LTM, batched under load)
    |
    v
-graph context / detection
-   |
-   v
-evidence candidate
-   |
-   v
-incident
+threat-path reasoning -> evidence -> incident
    |
    v
 action proposal
 ```
 
-Action proposals are not action authority.
+`dendrited` must not bypass MAGI/quorum, policy, `dendrite-guard`, or the transactional executor to reach a privileged action directly — action proposals are not action authority.
 
-`dendrited` must not directly bypass quorum, policy, `dendrite-guard`, or the transactional executor.
+## Interfaces
 
-## Current foundation
+- Unix socket: local IPC for `dendrite-cli` (see `docs/CLI.md`).
+- HTTP + WebSocket, one port (`DENDRITE_HTTP_ADDR`, default `127.0.0.1:8766`): the REST API (`docs/API.md`) and the live event stream at `/ws`, used by the operator UI (`docs/UI.md`). Also serves the built UI itself as static files when `DENDRITE_UI_DIR` is set (packaged installs).
 
-The current daemon foundation includes:
-
-- `MemoryStore` ownership;
-- observation ingestion;
-- object/node persistence;
-- relationship observation consolidation;
-- graph threat-path lookup;
-- conversion of graph findings into evidence candidates;
-- basic incident/evidence storage;
-- action-proposal creation.
-
-Persistent incident storage, authenticated IPC, and production host telemetry are still to come.
-
-## Future telemetry
-
-Linux telemetry is expected to include mechanisms such as:
-
-- eBPF;
-- fanotify;
-- filesystem events;
-- process events;
-- network telemetry.
-
-Telemetry collection should remain separate from privileged action execution.
+See `docs/CONFIGURATION.md` for every environment variable, `docs/architecture.md` for the full design, and `docs/SYSTEM_MAP.md` for end-to-end diagrams.
 
 ## Testing
 
@@ -65,7 +33,3 @@ Telemetry collection should remain separate from privileged action execution.
 cargo test -p dendrited
 cargo clippy -p dendrited --all-targets -- -D warnings
 ```
-
-## Batch 1+2 vertical slice
-
-`dendrited` now persists incidents/evidence in SQLite, serves local JSON IPC over a Unix socket, polls `/proc` for newly observed processes, and can poll configured filesystem roots for changes. Configure watched roots with `DENDRITE_WATCH_PATHS` (colon-separated).

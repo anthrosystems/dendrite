@@ -75,9 +75,10 @@ Two different things, don't conflate them (see `docs/ROADMAP.md`'s Batch 7):
 
 Inline `#[cfg(test)]` modules exist across most `dendrited` source files —
 run with `cargo +stable test --workspace`. `docs/TESTS.md` is a manual
-validation matrix, currently run by hand rather than automated (repo-root
-`tests/` is still just a placeholder — see `docs/ROADMAP.md`'s Batch 7
-open questions on whether that's worth automating).
+validation matrix, currently run by hand rather than automated — there is
+no `tests/` directory at the repo root (it never held more than a
+placeholder script, later removed); see `docs/ROADMAP.md`'s Batch 7 open
+questions on whether an automated integration harness is worth building.
 
 When auditing `.unwrap()`/`.expect()` calls (a recurring roadmap item):
 count only production code, not inline test modules — test-assertion

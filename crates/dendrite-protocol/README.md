@@ -44,7 +44,7 @@ ABSTAIN
 VETO
 ```
 
-Protocol types express decisions. They do not perform privileged actions.
+Protocol types express decisions. They do not perform privileged actions. See `docs/architecture.md` for how MAGI fits into the wider authorization pipeline and `docs/API.md` for the wire shapes of these types.
 
 ## Dependency direction
 
