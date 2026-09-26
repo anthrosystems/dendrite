@@ -11,7 +11,7 @@ eBPF/fanotify telemetry, a Memory Graph for behavioural correlation,
 incident/evidence tracking, policy-gated response actions, and CVE/package
 vulnerability tracking.
 
-`docs/ROADMAP.md` is the canonical implementation roadmap (organized into
+`docs/ROADMAP.md` is the canonical implementation roadmap (organised into
 numbered batches) — read it before starting non-trivial work to see what
 batch is active and what's already been decided. `docs/TODO.md` is a
 scratch tracking list, not a design doc; items should get resolved,

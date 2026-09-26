@@ -1,6 +1,6 @@
 # dendrite-ui
 
-Web-based operator console for Dendrite: daemon status, subsystem health, incidents and evidence, Memory Graph exploration, and the MAGI & Response view for reviewing and authorizing action proposals, kept live over the `/ws` event stream.
+Web-based operator console for Dendrite: daemon status, subsystem health, incidents and evidence, Memory Graph exploration, and the MAGI & Response view for reviewing and authorising action proposals, kept live over the `/ws` event stream.
 
 The UI is a client of `dendrited`'s HTTP/WebSocket surface, same as `dendrite-cli` is a client of its Unix-socket IPC — it is not a security authority. Everything it shows or lets an operator trigger still passes through the same MAGI/quorum, policy, Guard, and transactional-executor pipeline as any other caller; see `docs/architecture.md` and `docs/API.md`.
 

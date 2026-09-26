@@ -21,7 +21,7 @@ The same infection/artifact observed independently on Host A and Host B should n
 Cross-host equivalence is represented separately through correlation keys, fingerprints and reusable behaviours. Examples include:
 
 - SHA-256 artifact identity;
-- normalized domain/IP/URL;
+- normalised domain/IP/URL;
 - process/executable semantic fingerprint;
 - package/ecosystem/version identity;
 - CVE identity;
@@ -44,7 +44,7 @@ Relevant persisted knowledge records carry:
 - `origin_instance_id` — where the knowledge/object originated;
 - `imported_from_instance_id` — immediate Dendrite instance from which it was imported, or SQL `NULL` when not imported;
 - `derived_by_instance_id` — instance that derived the relationship/knowledge, or `NULL` when not derived;
-- `lineage` — ordered recent host lineage, capped at the most recent 10 hosts. Verified end-to-end across 12 real hops (`scripts/test_lineage_cap.sh`), not just unit-tested: the array correctly caps at 10 and the origin host ages out of it as expected past that point, while `origin_instance_id` (above) remains the correct source of truth for who originated the object regardless of how far it's since traveled.
+- `lineage` — ordered recent host lineage, capped at the most recent 10 hosts. Verified end-to-end across 12 real hops (`scripts/test_lineage_cap.sh`), not just unit-tested: the array correctly caps at 10 and the origin host ages out of it as expected past that point, while `origin_instance_id` (above) remains the correct source of truth for who originated the object regardless of how far it's since travelled.
 
 The original source remains separately preserved by `origin_instance_id`. Unused values are real SQL `NULL`, not placeholder strings.
 

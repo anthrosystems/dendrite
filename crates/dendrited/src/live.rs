@@ -51,7 +51,7 @@ impl LiveBroadcaster {
     }
 
     pub fn publish<T: Serialize>(&self, kind: &str, payload: &T) {
-        // Skip the JSON serialization entirely when nobody's listening — this
+        // Skip the JSON serialisation entirely when nobody's listening — this
         // runs on the hot ingestion path, once per processed observation, so
         // paying for it unconditionally (as before) means real, avoidable CPU
         // cost on every single event whenever no UI/WebSocket client is

@@ -10,7 +10,7 @@ Action authority is only granted while Guard considers the system trusted. A deg
 
 > Compromise can remove authority, but cannot create authority.
 
-**Current state is intentionally minimal**: a trust-state enum and an allow/deny match, linked directly into `dendrited`'s own process (no real process boundary yet). Hardening this — including splitting Guard into its own OS process over a dedicated IPC channel — is a deliberately separate, prioritized-ahead-of-destructive-actions batch of work. See `docs/ROADMAP.md`'s Batch 7 findings for the concrete plan and why the four-method call surface above already sets it up well.
+**Current state is intentionally minimal**: a trust-state enum and an allow/deny match, linked directly into `dendrited`'s own process (no real process boundary yet). Hardening this — including splitting Guard into its own OS process over a dedicated IPC channel — is a deliberately separate, prioritised-ahead-of-destructive-actions batch of work. See `docs/ROADMAP.md`'s Batch 7 findings for the concrete plan and why the four-method call surface above already sets it up well.
 
 ## Testing
 

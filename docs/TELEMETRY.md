@@ -1,6 +1,6 @@
 # Dendrite Telemetry
 
-Dendrite normalizes Linux telemetry into observations before graph/correlation reasoning. Raw telemetry is short-lived; semantic Memory Graph knowledge is selective and decays according to memory policy.
+Dendrite normalises Linux telemetry into observations before graph/correlation reasoning. Raw telemetry is short-lived; semantic Memory Graph knowledge is selective and decays according to memory policy.
 
 ## Sources
 

@@ -35,7 +35,7 @@ const FILE_TOUCH_CACHE_TTL_SECONDS: u64 = 120;
 /// daemon uptime. On overflow the whole cache is cleared rather than doing
 /// real LRU eviction — a temporary loss of dedup benefit right after a
 /// clear is a fine trade for not pulling in an LRU crate/more bookkeeping
-/// for what's meant to be a cheap, best-effort optimization.
+/// for what's meant to be a cheap, best-effort optimisation.
 const FILE_TOUCH_CACHE_MAX_ENTRIES: usize = 50_000;
 const MAX_FANOTIFY_INCLUDE_DIRECTORIES: usize = 4_096;
 

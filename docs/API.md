@@ -42,7 +42,7 @@ Memory node DTOs include host-local canonical IDs, provenance, and derived `corr
 | GET | `/api/v1/guard` | Current Guard state |
 | GET | `/api/v1/guard/findings` | Integrity/trust findings |
 | GET | `/api/v1/telemetry/status` | Collector status/fallback state |
-| GET | `/api/v1/telemetry/recent` | Recent normalized events |
+| GET | `/api/v1/telemetry/recent` | Recent normalised events |
 
 ## Actions
 
