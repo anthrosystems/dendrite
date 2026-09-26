@@ -37,6 +37,9 @@ pub enum Command {
     DebugSeedIncident {
         label: Option<String>,
     },
+    DebugInjectPriority {
+        label: Option<String>,
+    },
     DebugGuardState(String),
     DebugGuardFinding {
         target: String,
@@ -248,6 +251,16 @@ impl Command {
                     label: Some(label.clone()),
                 }
             }
+            [command, subcommand] if command == "debug" && subcommand == "inject-priority" => {
+                Self::DebugInjectPriority { label: None }
+            }
+            [command, subcommand, label]
+                if command == "debug" && subcommand == "inject-priority" =>
+            {
+                Self::DebugInjectPriority {
+                    label: Some(label.clone()),
+                }
+            }
             [command, subcommand, state] if command == "debug" && subcommand == "guard-state" => {
                 Self::DebugGuardState(state.clone())
             }
@@ -305,6 +318,9 @@ impl Command {
             Self::TelemetryStatus => Some(IpcRequest::TelemetryStatus),
             Self::TelemetryRecent { limit } => Some(IpcRequest::TelemetryRecent { limit: *limit }),
             Self::DebugSeedIncident { label } => Some(IpcRequest::DebugSeedIncident {
+                label: label.clone(),
+            }),
+            Self::DebugInjectPriority { label } => Some(IpcRequest::DebugInjectPriority {
                 label: label.clone(),
             }),
             Self::DebugGuardState(state) => Some(IpcRequest::DebugGuardState {
@@ -531,6 +547,30 @@ fn render_response(response: &IpcResponse) -> String {
                     status.pipeline.last_processing_ms,
                     status.pipeline.max_processing_ms
                 ),
+                format!(
+                    "  priority: {}/{} (peak {})  processed: {}  dropped: {}  wait: last={}ms max={}ms  processing: last={}ms max={}ms",
+                    status.pipeline.priority.queue_depth,
+                    status.pipeline.priority.queue_capacity,
+                    status.pipeline.priority.peak_queue_depth,
+                    status.pipeline.priority.events_processed,
+                    status.pipeline.priority.events_dropped,
+                    status.pipeline.priority.last_queue_wait_ms,
+                    status.pipeline.priority.max_queue_wait_ms,
+                    status.pipeline.priority.last_processing_ms,
+                    status.pipeline.priority.max_processing_ms
+                ),
+                format!(
+                    "  routine:  {}/{} (peak {})  processed: {}  dropped: {}  wait: last={}ms max={}ms  processing: last={}ms max={}ms",
+                    status.pipeline.routine.queue_depth,
+                    status.pipeline.routine.queue_capacity,
+                    status.pipeline.routine.peak_queue_depth,
+                    status.pipeline.routine.events_processed,
+                    status.pipeline.routine.events_dropped,
+                    status.pipeline.routine.last_queue_wait_ms,
+                    status.pipeline.routine.max_queue_wait_ms,
+                    status.pipeline.routine.last_processing_ms,
+                    status.pipeline.routine.max_processing_ms
+                ),
             ])
             .collect::<Vec<_>>()
             .join("\n"),
@@ -679,6 +719,13 @@ fn render_response(response: &IpcResponse) -> String {
                 "no such vulnerability exposure".to_string()
             }
         }
+        IpcResponse::DebugInjectPriority { queued } => {
+            if *queued {
+                "synthetic observation queued on the priority channel — check `telemetry` for its effect on the priority lane's queue depth/processing".to_string()
+            } else {
+                "priority channel was already full — synthetic observation dropped, same as real priority traffic would be under saturation".to_string()
+            }
+        }
         IpcResponse::Error { message } => format!("Error: {message}"),
     }
 }
@@ -798,7 +845,7 @@ fn help_telemetry() -> String {
 }
 
 fn help_debug() -> String {
-    "Development-only surfaces. Not a production operator API; disabled in release builds.\n\nUsage:\n  dendrite debug seed-incident [LABEL]\n  dendrite debug guard-state <STATE>\n  dendrite debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>\n\n  debug seed-incident [LABEL]                            Seed a synthetic incident/graph for local testing\n  debug guard-state <STATE>                              Force Guard trust state\n  debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>   Record a synthetic integrity finding\n\nTrust states (for guard-state):\n  trusted, degraded, suspected, quarantined, compromised, recovering\n\nSeverities (for guard-finding):\n  informational, warning, high, critical".into()
+    "Development-only surfaces. Not a production operator API; disabled in release builds.\n\nUsage:\n  dendrite debug seed-incident [LABEL]\n  dendrite debug inject-priority [LABEL]\n  dendrite debug guard-state <STATE>\n  dendrite debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>\n\n  debug seed-incident [LABEL]                            Seed a synthetic incident/graph for local testing\n  debug inject-priority [LABEL]                          Push a synthetic Critical-severity observation through the real priority ingestion channel, for testing priority-lane behaviour under load — seed-incident does NOT exercise this, it bypasses the ingestion queue entirely\n  debug guard-state <STATE>                              Force Guard trust state\n  debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>   Record a synthetic integrity finding\n\nTrust states (for guard-state):\n  trusted, degraded, suspected, quarantined, compromised, recovering\n\nSeverities (for guard-finding):\n  informational, warning, high, critical".into()
 }
 
 #[cfg(test)]
@@ -883,6 +930,20 @@ mod tests {
             Command::parse(&args(&["debug", "seed-incident", "ui-test"])),
             Command::DebugSeedIncident {
                 label: Some("ui-test".into())
+            }
+        );
+    }
+
+    #[test]
+    fn parses_debug_inject_priority() {
+        assert_eq!(
+            Command::parse(&args(&["debug", "inject-priority"])),
+            Command::DebugInjectPriority { label: None }
+        );
+        assert_eq!(
+            Command::parse(&args(&["debug", "inject-priority", "load-test"])),
+            Command::DebugInjectPriority {
+                label: Some("load-test".into())
             }
         );
     }

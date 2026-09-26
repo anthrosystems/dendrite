@@ -123,7 +123,7 @@ export function HealthPage() {
           <div className="key-value-list">
             <div><span>CLI Unix socket</span><code>{status.data?.socket_path ?? '—'}</code></div>
             <div><span>HTTP API endpoint</span><code>127.0.0.1:8766</code></div>
-            <div><span>WebSocket live stream</span><code>127.0.0.1:8767</code></div>
+            <div><span>WebSocket live stream</span><code>127.0.0.1:8766/ws</code></div>
             <div><span>UI role</span><strong>Optional local client</strong></div>
           </div>
         </article>

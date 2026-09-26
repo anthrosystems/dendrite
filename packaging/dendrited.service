@@ -35,7 +35,8 @@ RuntimeDirectory=dendrite
 RuntimeDirectoryMode=0750
 
 Environment=DENDRITE_SELF_DB=/var/lib/dendrite/self.sqlite3
-Environment=DENDRITE_MEMORY_DB=/var/lib/dendrite/memory.sqlite3
+Environment=DENDRITE_STM_DB=/var/lib/dendrite/stm.sqlite3
+Environment=DENDRITE_LTM_DB=/var/lib/dendrite/ltm.sqlite3
 Environment=DENDRITE_INCIDENT_DB=/var/lib/dendrite/incidents.sqlite3
 Environment=DENDRITE_GUARD_DB=/var/lib/dendrite/guard.sqlite3
 Environment=DENDRITE_CVE_SNAPSHOT=/etc/dendrite/cve-snapshot.json
@@ -43,7 +44,7 @@ Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
 Environment=DENDRITE_SOCKET_GROUP=dendrite
 Environment=DENDRITE_SOCKET_MODE=0660
 Environment=DENDRITE_HTTP_ADDR=127.0.0.1:8766
-Environment=DENDRITE_WS_ADDR=127.0.0.1:8767
+Environment=DENDRITE_UI_DIR=/usr/share/dendrite/ui
 Environment=DENDRITE_EBPF=1
 Environment=DENDRITE_EBPF_OBJECT=/usr/lib/dendrite/dendrite-ebpf
 Environment=DENDRITE_FANOTIFY=1

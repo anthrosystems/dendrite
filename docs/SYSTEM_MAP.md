@@ -202,12 +202,13 @@ Object identity and provenance stay host-scoped. Correlation is represented rath
 
 The normal Memory Graph page continues to use the live Memory Graph data source.
 
-## Adaptive Malware Analysis foundation
+## Culture foundation
 
 ```text
 ACTIVE DBs                         CAMPAIGN WORKSPACE
 self.sqlite3      ── snapshot ──► self.sqlite3
-memory.sqlite3    ── snapshot ──► memory.sqlite3
+stm.sqlite3       ── snapshot ──► stm.sqlite3
+ltm.sqlite3       ── snapshot ──► ltm.sqlite3
 incidents.sqlite3 ── snapshot ──► incidents.sqlite3
 guard.sqlite3     ── snapshot ──► guard.sqlite3
                                   artifacts/

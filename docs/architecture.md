@@ -219,6 +219,14 @@ reinforcement provenance
 
 Confirmed threat knowledge may be reinforced, but only relevant relationships should be strengthened. If a conclusion is revoked, reinforcement must be removable and normal decay must resume.
 
+### Physical storage: STM/LTM split, one writer per file
+
+The Memory Graph is physically split into two SQLite databases — short-term retention lives in `stm.sqlite3`, long-term/persistent retention in `ltm.sqlite3` — but this is a storage-layer detail, not a second graph: higher-level code continues to reason about one logical Memory Graph, and a relationship may freely connect nodes that physically live in different tiers.
+
+SQLite serializes writers per physical file, so each of the two files has exactly one dedicated writer; any number of independent read connections may exist concurrently (used by the runtime and by each ingestion worker) without competing for that write lock. Promotion between tiers (a record's retention changing to `LongTerm`/`Persistent`) is destination-first and idempotent — write the new tier, confirm it, then remove the stale copy — so a failure between those two steps leaves the record temporarily duplicated rather than lost, never the reverse ordering.
+
+Two invariants worth stating explicitly, both learned from real failures during development: don't let workers open independent physical writer connections to these files again — multiple `DaemonCore`/`MemoryStore` instances each writing to the same file produced `SQLITE_BUSY`/"database is locked" under real load, which is the reason the one-writer-per-file design exists at all. And don't route telemetry draining through the runtime's own control-plane thread as an alternative way to get a single writer — that was tried, and under full-host telemetry it pinned the runtime thread at 100% CPU and starved IPC (control-plane requests, including the CLI, became unresponsive). Priority/routine ingestion staying on their own dedicated worker threads, separate from runtime/IPC handling, is load-bearing for control-plane responsiveness, not just a performance nicety.
+
 ### Graph reasoning
 
 Dendrite can traverse causal/contextual paths in both directions, for example:
@@ -239,12 +247,14 @@ Current sources:
 proc_polling
 filesystem_polling
 fanotify
-ebpf              # reserved/not yet built
+ebpf
 ```
 
 The operational telemetry feed is short-lived and separate from semantic Memory Graph state.
 
-Current fanotify scope includes existing directories marked at daemon startup and file-open / file-write events. Dynamic new-directory marking, richer rename/delete handling, and FID-based identity are later hardening work.
+Ingestion is split into two dedicated worker threads/queues by relevance, not by source: **priority** for anything already threat-relevant or high/critical severity, **routine** for everything else — the overwhelming majority of raw volume. Each has its own queue and its own worker, so routine volume can never delay priority processing by occupying a shared thread; they only share the underlying storage layer's writer actors (see the Memory Graph section's STM/LTM note), not execution. Routine's threat-path search additionally runs at a shallower traversal depth than priority's, on the reasoning that routine telemetry has a near-zero hit rate for genuine threat connections and a connection only reachable many hops away was already a weak signal regardless of lane.
+
+Fanotify watches every real mounted filesystem by default (`FAN_MARK_FILESYSTEM`, one mark per mount, not a directory walk), narrowed or excluded via configuration — see `CONFIGURATION.md` for the full mechanism.
 
 ## 6. Evidence and incidents
 
@@ -631,10 +641,12 @@ Analysis owns Antiserum package creation/import/review. Server-side review sessi
 
 Antiserum creation selects semantic knowledge classes while provenance is mandatory. The physical v1 `.danti` package always contains all nine standard payload files, including schema-valid authenticated empty payloads.
 
+Automatic export of an attack chain (triggered by reinforcement, not a one-time event) is deduplicated per `(incident_id, behaviour_fingerprint)` — the fingerprint is a stable structural hash, unlike the chain's own literal ID, which embeds the evidence ID and so changes on every reinforcement. Without this, a persistently reinforced real attack chain would generate an unbounded number of signed packages, one per reinforcement, rather than one per distinct shape.
+
 Imported Antiserum remains evidence. Immediate-exporter authentication, replay protection and package verification do not transfer action authority.
 
-## 20. Adaptive Malware Analysis isolation foundation
+## 20. Culture isolation foundation
 
-The future Adaptive Malware Analysis system must never experiment against active Dendrite databases. A campaign snapshots active Self, Memory, Incidents and Guard stores into a restricted temporary campaign workspace and all experimental state changes occur against those copies. The current implementation is only this snapshot/lifecycle skeleton.
+Culture (working name; formerly "Adaptive Malware Analysis"/AMA) must never experiment against active Dendrite databases. A campaign snapshots the active Self, STM, LTM, Incidents, and Guard stores into a restricted temporary campaign workspace, and all experimental state changes occur against those copies. The current implementation is only this snapshot/lifecycle skeleton.
 
 Future sample execution must occur in an explicitly contained environment. Proposed counters still use the ordinary MAGI → policy → Guard → transaction pipeline in the contained campaign world. Promotion/export of resulting knowledge is explicit and provenance-preserving; campaigns do not silently mutate production knowledge.

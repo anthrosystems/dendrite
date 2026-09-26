@@ -34,7 +34,8 @@ impl From<serde_json::Error> for CultureError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CultureSources {
     pub self_db: PathBuf,
-    pub memory_db: PathBuf,
+    pub stm_db: PathBuf,
+    pub ltm_db: PathBuf,
     pub incidents_db: PathBuf,
     pub guard_db: PathBuf,
 }
@@ -74,7 +75,8 @@ impl CultureManager {
     ) -> Result<CultureCampaign, CultureError> {
         for (name, path) in [
             ("self", &sources.self_db),
-            ("memory", &sources.memory_db),
+            ("stm", &sources.stm_db),
+            ("ltm", &sources.ltm_db),
             ("incidents", &sources.incidents_db),
             ("guard", &sources.guard_db),
         ] {
@@ -93,14 +95,16 @@ impl CultureManager {
 
         let baseline = CultureSources {
             self_db: workspace.join("self.sqlite3"),
-            memory_db: workspace.join("memory.sqlite3"),
+            stm_db: workspace.join("stm.sqlite3"),
+            ltm_db: workspace.join("ltm.sqlite3"),
             incidents_db: workspace.join("incidents.sqlite3"),
             guard_db: workspace.join("guard.sqlite3"),
         };
 
         for (source, destination) in [
             (&sources.self_db, &baseline.self_db),
-            (&sources.memory_db, &baseline.memory_db),
+            (&sources.stm_db, &baseline.stm_db),
+            (&sources.ltm_db, &baseline.ltm_db),
             (&sources.incidents_db, &baseline.incidents_db),
             (&sources.guard_db, &baseline.guard_db),
         ] {
@@ -249,14 +253,16 @@ mod tests {
 
         let sources = CultureSources {
             self_db: active.join("self.sqlite3"),
-            memory_db: active.join("memory.sqlite3"),
+            stm_db: active.join("stm.sqlite3"),
+            ltm_db: active.join("ltm.sqlite3"),
             incidents_db: active.join("incidents.sqlite3"),
             guard_db: active.join("guard.sqlite3"),
         };
 
         for path in [
             &sources.self_db,
-            &sources.memory_db,
+            &sources.stm_db,
+            &sources.ltm_db,
             &sources.incidents_db,
             &sources.guard_db,
         ] {
@@ -269,13 +275,13 @@ mod tests {
             .create_campaign(&sources, Some("sample"), 10)
             .unwrap();
 
-        let campaign_memory = Connection::open(&campaign.baseline.memory_db).unwrap();
+        let campaign_memory = Connection::open(&campaign.baseline.stm_db).unwrap();
 
         campaign_memory
             .execute("UPDATE state SET value = 'campaign'", [])
             .unwrap();
 
-        let active_memory = Connection::open(&sources.memory_db).unwrap();
+        let active_memory = Connection::open(&sources.stm_db).unwrap();
 
         let active_value: String = active_memory
             .query_row("SELECT value FROM state", [], |row| row.get(0))

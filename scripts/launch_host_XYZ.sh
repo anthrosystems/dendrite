@@ -17,18 +17,21 @@ distinct hosts.
   HOST_NAME    Host label; used for the data directory name and default
                socket path. Default: b
 
-Ports default for HOST_NAME=b to 127.0.0.1:8866 (HTTP) / 127.0.0.1:8867
-(WebSocket), matching the original manual setup. For any other HOST_NAME
-you must set DENDRITE_HOST_HTTP_PORT and DENDRITE_HOST_WS_PORT explicitly —
-this is deliberate: it forces you to pick ports that don't collide with a
-host you already have running, rather than guessing at an auto-assigned one.
+Port defaults for HOST_NAME=b to 127.0.0.1:8866 (HTTP + WebSocket, one
+port — see DENDRITE_HOST_HTTP_PORT below), matching the original manual
+setup. For any other HOST_NAME you must set DENDRITE_HOST_HTTP_PORT
+explicitly — this is deliberate: it forces you to pick a port that doesn't
+collide with a host you already have running, rather than guessing at an
+auto-assigned one.
 
 Environment overrides:
   DENDRITE_HOST_ROOT        Parent directory for all host folders
                              (default: ~/dendrite-hosts — never inside
                              the repository)
-  DENDRITE_HOST_HTTP_PORT   HTTP port for this host
-  DENDRITE_HOST_WS_PORT     WebSocket port for this host
+  DENDRITE_HOST_HTTP_PORT   HTTP + WebSocket port for this host (the two
+                             share one listener; see docs/ROADMAP.md's
+                             Batch 7 "WebSocket merged onto the HTTP port"
+                             note)
 
 Flags:
   --cleanup       Delete this host's data/ folder (all DBs, the Antiserum
@@ -69,14 +72,12 @@ SOCKET="$HOST_DIR/dendrited.sock"
 
 if [[ "$HOST_NAME" == "b" ]]; then
     HTTP_PORT="${DENDRITE_HOST_HTTP_PORT:-8866}"
-    WS_PORT="${DENDRITE_HOST_WS_PORT:-8867}"
 else
-    if [[ -z "${DENDRITE_HOST_HTTP_PORT:-}" || -z "${DENDRITE_HOST_WS_PORT:-}" ]]; then
-        echo "error: DENDRITE_HOST_HTTP_PORT and DENDRITE_HOST_WS_PORT must both be set for any HOST_NAME other than 'b'" >&2
+    if [[ -z "${DENDRITE_HOST_HTTP_PORT:-}" ]]; then
+        echo "error: DENDRITE_HOST_HTTP_PORT must be set for any HOST_NAME other than 'b'" >&2
         exit 2
     fi
     HTTP_PORT="$DENDRITE_HOST_HTTP_PORT"
-    WS_PORT="$DENDRITE_HOST_WS_PORT"
 fi
 
 if [[ "$DO_REMOVE_HOST" == 1 ]]; then
@@ -104,17 +105,17 @@ fi
 
 mkdir -p "$DATA_DIR"
 
-echo "Starting Dendrite host '$HOST_NAME' — HTTP 127.0.0.1:$HTTP_PORT, WS 127.0.0.1:$WS_PORT"
+echo "Starting Dendrite host '$HOST_NAME' — HTTP + WebSocket 127.0.0.1:$HTTP_PORT (WS path /ws)"
 echo "Data dir: $DATA_DIR"
 echo "Socket:   $SOCKET"
 
 DENDRITE_SELF_DB="$DATA_DIR/self.sqlite3" \
-DENDRITE_MEMORY_DB="$DATA_DIR/memory.sqlite3" \
+DENDRITE_STM_DB="$DATA_DIR/stm.sqlite3" \
+DENDRITE_LTM_DB="$DATA_DIR/ltm.sqlite3" \
 DENDRITE_INCIDENT_DB="$DATA_DIR/incidents.sqlite3" \
 DENDRITE_GUARD_DB="$DATA_DIR/guard.sqlite3" \
 DENDRITE_SOCKET="$SOCKET" \
 DENDRITE_HTTP_ADDR="127.0.0.1:$HTTP_PORT" \
-DENDRITE_WS_ADDR="127.0.0.1:$WS_PORT" \
 DENDRITE_SOCKET_GROUP="${DENDRITE_SOCKET_GROUP:-dendrite}" \
 DENDRITE_SOCKET_MODE="${DENDRITE_SOCKET_MODE:-0660}" \
 DENDRITE_EBPF="${DENDRITE_EBPF:-1}" \

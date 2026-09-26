@@ -1,0 +1,33 @@
+#!/bin/sh
+# postinst for the dendrited .deb package.
+#
+# Responsibility split with the systemd-units fragment that cargo-deb
+# splices in below (at the marker line near the bottom of this file — it
+# gets replaced with the generated enable/start logic verbatim by a
+# whole-file string substitution, so that exact marker string must appear
+# nowhere else in this file, not even in a comment): this script only has
+# to make sure the `dendrite` system account exists *before* that fragment
+# tries to enable+start dendrited.service, because the unit runs as
+# User=dendrite/Group=dendrite (packaging/dendrited.service) and systemd's
+# StateDirectory=/RuntimeDirectory=/ConfigurationDirectory= directives
+# create and chown /var/lib/dendrite, /run/dendrite and /etc/dendrite for
+# that account automatically on first start — this script does not need to
+# (and should not) create or chown those itself.
+set -e
+
+case "$1" in
+    configure)
+        if ! getent group dendrite >/dev/null; then
+            addgroup --system dendrite
+        fi
+        if ! getent passwd dendrite >/dev/null; then
+            adduser --system --ingroup dendrite --no-create-home \
+                --home /var/lib/dendrite --shell /usr/sbin/nologin \
+                --gecos "Dendrite endpoint security daemon" dendrite
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

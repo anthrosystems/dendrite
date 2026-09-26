@@ -63,6 +63,19 @@ pub enum IpcRequest {
     DebugSeedIncident {
         label: Option<String>,
     },
+    /// Debug-only, like `DebugSeedIncident` — never available outside a
+    /// debug build (see `#[cfg(debug_assertions)]` at the handler). Unlike
+    /// `DebugSeedIncident`, this pushes a synthetic observation through the
+    /// *real* priority ingestion channel and worker — the same path real
+    /// high-severity telemetry takes — rather than seeding an incident
+    /// directly. Exists because there's no safe way to deliberately trigger
+    /// real priority-lane traffic otherwise: `ingestion_lane()` only routes
+    /// something there for `Severity::High`/`Critical` or a `Threat`/
+    /// `Incident`-kind entity, and nothing on a normal host reliably
+    /// produces that on demand.
+    DebugInjectPriority {
+        label: Option<String>,
+    },
     DebugGuardState {
         state: String,
     },
@@ -444,6 +457,13 @@ pub enum IpcResponse {
     VulnerabilityRemediation(Box<VulnerabilityRemediationDto>),
     VulnerabilityDeleted {
         deleted: bool,
+    },
+    /// `queued: true` means the synthetic observation was accepted onto the
+    /// real priority channel; `false` means it was dropped because that
+    /// channel was already full (itself a meaningful result to observe, not
+    /// an error).
+    DebugInjectPriority {
+        queued: bool,
     },
     Health(HealthDto),
     Error {

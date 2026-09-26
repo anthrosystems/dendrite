@@ -15,7 +15,8 @@ use dendrite_memory::model::{
     MemoryRelationshipKind, MemoryState, MemoryStrength, RetentionClass,
 };
 use dendrite_memory::storage::{
-    MemoryPath, MemoryStore, PathQuery, StorageError, ThreatPath, TraversalDirection,
+    GraphReader, MemoryPath, MemoryStore, PathQuery, StorageError, ThreatPath, TraversalDirection,
+    execute_node_upsert, execute_relationship_upsert,
 };
 use dendrite_protocol::{
     ActionDetailDto, ActionSummaryDto, Confidence, EntityKind, EvidenceCandidate, EvidenceId,
@@ -25,6 +26,7 @@ use dendrite_protocol::{
     TelemetryEventDto, TelemetryPipelineDto, TelemetrySourceDto, TelemetryStatusDto,
     VulnerabilityExposureDto,
 };
+use rusqlite::Connection;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -101,6 +103,20 @@ const REINFORCED_STM_MAX_TTL_SECONDS: u64 = 3_600;
 const REINFORCED_STM_HARD_LIFETIME_SECONDS: u64 = 21_600;
 const LTM_REINFORCED_TTL_SECONDS: u64 = 604_800;
 const LTM_PROMOTION_QUALIFIED_LINKS: usize = 3;
+
+/// Caps how many relationships the threat-path search expands through at
+/// any single node, at any hop of the BFS - see `PathQuery::max_relationships_per_node`'s
+/// doc comment. Without this, a hub node (an "unresolvable process" bucket
+/// like `host:local`, or a heavily-shared file/library) with a fan-out in
+/// the thousands turns a bounded-depth search into an effectively unbounded
+/// amount of work: `max_depth` limits how far the search goes, not how wide
+/// it is at each step. 200 is generous relative to what a real reasoning
+/// step needs (the strongest 200 edges at a node, not an arbitrary 200) and
+/// was picked to comfortably clear legitimate high-degree nodes seen in
+/// practice while still bounding a genuinely pathological one - not
+/// benchmarked against a specific worst-case target, so revisit if a hub
+/// node's fan-out ever approaches it in practice.
+const MAX_RELATIONSHIPS_PER_NODE_FOR_REASONING: usize = 200;
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -218,16 +234,57 @@ impl DaemonCore {
         incident_path: &str,
         guard_path: &str,
     ) -> Result<Self, DaemonError> {
+        Self::open_with_tiered_stores(
+            self_path,
+            memory_path,
+            ":memory:",
+            incident_path,
+            guard_path,
+        )
+    }
+
+    pub fn open_with_tiered_stores(
+        self_path: &str,
+        stm_path: &str,
+        ltm_path: &str,
+        incident_path: &str,
+        guard_path: &str,
+    ) -> Result<Self, DaemonError> {
+        let memory = MemoryStore::open_tiered(stm_path, ltm_path)?;
+        memory.initialise()?;
+        Self::open_with_memory_store(self_path, memory, incident_path, guard_path, true)
+    }
+
+    /// Opens another core around an existing tiered MemoryStore reader. The
+    /// reader has its own SQLite connection while physical writes are shared
+    /// with the store's per-tier writer actors. Runtime ingestion workers use
+    /// this so they can remain parallel without opening competing DB writers.
+    pub fn open_with_shared_memory(
+        self_path: &str,
+        memory: MemoryStore,
+        incident_path: &str,
+        guard_path: &str,
+    ) -> Result<Self, DaemonError> {
+        Self::open_with_memory_store(self_path, memory, incident_path, guard_path, false)
+    }
+
+    fn open_with_memory_store(
+        self_path: &str,
+        memory: MemoryStore,
+        incident_path: &str,
+        guard_path: &str,
+        run_memory_startup_maintenance: bool,
+    ) -> Result<Self, DaemonError> {
         let mut self_store = SelfStore::open(self_path)?;
         let instance_id = self_store.instance_id()?;
         let signing_key = self_store.ensure_active_signing_key()?;
-        let memory = MemoryStore::open(memory_path)?;
-        memory.initialise()?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        preserve_short_term_connectors(&memory, now)?;
-        memory.mark_expired(now)?;
+        if run_memory_startup_maintenance {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs());
+            preserve_short_term_connectors(&memory, now)?;
+            memory.mark_expired(now)?;
+        }
         let antiserum_store = AntiserumPackageStore::for_self_store(self_path)?;
         Ok(Self {
             self_store,
@@ -300,6 +357,15 @@ impl DaemonCore {
     /// `MemoryStore::begin_batch`'s doc comment for why this is enough to
     /// make every subsequent `ingest_observation` call in the batch part of
     /// one commit, with no changes to `ingest_observation` itself.
+    ///
+    /// Under tiered (STM/LTM) storage this is a no-op, same as
+    /// `MemoryStore::begin_batch` itself: routine ingestion's real batching
+    /// now goes through `ingest_routine_batch`/`MemoryStore::run_stm_batch`
+    /// instead, which needs a single writer-owned connection to let a
+    /// batch's later reads see its own earlier writes - something a
+    /// caller-side `BEGIN`/`COMMIT` around per-item writer-actor dispatch
+    /// could never provide. Kept for any other caller still relying on the
+    /// non-tiered (`open()`) compatibility path this preserves.
     pub fn begin_memory_batch(&self) -> Result<(), DaemonError> {
         Ok(self.memory.begin_batch()?)
     }
@@ -1094,7 +1160,7 @@ impl DaemonCore {
     }
 
     fn local_memory_node_id(&self, local_id: &str) -> MemoryNodeId {
-        MemoryNodeId(format!("{}::{local_id}", self.instance_id))
+        local_memory_node_id(&self.instance_id, local_id)
     }
 
     fn display_memory_node(&self, id: &MemoryNodeId) -> Result<String, DaemonError> {
@@ -1405,9 +1471,38 @@ impl DaemonCore {
         Ok(())
     }
 
+    /// Convenience wrapper preserving the original fixed-depth behaviour —
+    /// every existing caller (including the test suite) keeps working
+    /// unchanged. `spawn_routine_worker` calls `ingest_observation_with_max_depth`
+    /// directly with a tighter cap instead; see that method's doc comment.
     pub fn ingest_observation(
         &mut self,
         observation: &Observation,
+    ) -> Result<IngestionOutcome, DaemonError> {
+        self.ingest_observation_with_max_depth(observation, 6)
+    }
+
+    /// Same as `ingest_observation`, but with the threat-path search's
+    /// traversal depth as a parameter instead of the fixed default of 6.
+    ///
+    /// This exists specifically to make the routine ingestion lane cheaper
+    /// without weakening priority-lane detection at all: priority
+    /// observations are already pre-filtered to be threat-relevant and
+    /// latency-sensitive, so they keep the full depth via `ingest_observation`.
+    /// Routine observations are the overwhelming majority of volume with a
+    /// near-zero hit rate (a Perl interpreter opening its own module tree has
+    /// no realistic path to a threat node) — for those, `spawn_routine_worker`
+    /// calls this directly with a much shallower cap. A shallower search can
+    /// only ever find *fewer* paths than depth 6 would, never a different
+    /// one — nothing here changes scoring, ranking, or what counts as
+    /// significant, only how far the search is willing to look for routine
+    /// traffic, on the reasoning that a threat connection routine telemetry
+    /// can only reach many hops away is already a weak, speculative signal
+    /// on depth 6 too.
+    pub fn ingest_observation_with_max_depth(
+        &mut self,
+        observation: &Observation,
+        max_depth: usize,
     ) -> Result<IngestionOutcome, DaemonError> {
         self.persist_object(&observation.source, observation, false)?;
         if let Some(target) = &observation.target {
@@ -1416,12 +1511,161 @@ impl DaemonCore {
         let relationship_id = self.persist_relationship(observation)?;
         self.observations_ingested = self.observations_ingested.saturating_add(1);
 
-        let seeds_threat_knowledge = observation.kind == ObservationKind::Associated
-            && observation
-                .target
-                .as_ref()
-                .is_some_and(|target| target.kind == EntityKind::Threat);
+        let seeds_threat_knowledge = seeds_threat_knowledge(observation);
+        let mut threat_paths: Vec<(String, ThreatPath)> = Vec::new();
 
+        if !seeds_threat_knowledge {
+            let query = PathQuery {
+                max_depth,
+                direction: TraversalDirection::Any,
+                evaluation_time: Some(observation.observed_at),
+                max_relationships_per_node: Some(MAX_RELATIONSHIPS_PER_NODE_FOR_REASONING),
+                ..PathQuery::default()
+            };
+
+            if observation.source.kind != EntityKind::Threat {
+                let start = self.local_memory_node_id(&observation.source.id.0);
+                for finding in self.memory.threat_paths_from(&start, &query)? {
+                    threat_paths.push((observation.source.id.0.clone(), finding));
+                }
+            }
+
+            if threat_paths.is_empty()
+                && let Some(target) = &observation.target
+                && target.kind != EntityKind::Threat
+            {
+                let start = self.local_memory_node_id(&target.id.0);
+                for finding in self.memory.threat_paths_from(&start, &query)? {
+                    threat_paths.push((target.id.0.clone(), finding));
+                }
+            }
+        }
+
+        self.finish_ingestion(
+            observation,
+            relationship_id,
+            seeds_threat_knowledge,
+            threat_paths,
+        )
+    }
+
+    /// Processes a whole routine-lane batch in one pass: the memory-graph
+    /// persistence and threat-path search for every job in it run inside a
+    /// single transaction on the STM writer's own connection (see
+    /// `MemoryStore::run_stm_batch`), instead of each job paying its own
+    /// round trip to the writer actor. The rare "found a threat path" tail
+    /// (incident/evidence creation, reinforcement, knowledge correlation)
+    /// still runs per job afterward, unbatched, via `finish_ingestion` -
+    /// exactly the code the single-item path already uses. That tail is hit
+    /// on a near-zero fraction of routine traffic, so batching it too would
+    /// add real complexity (it touches the incidents and knowledge stores,
+    /// not just the memory graph) for a cost that isn't the one driving
+    /// routine-lane load.
+    pub fn ingest_routine_batch(
+        &mut self,
+        jobs: Vec<(Observation, usize)>,
+    ) -> Vec<Result<IngestionOutcome, DaemonError>> {
+        if jobs.is_empty() {
+            return Vec::new();
+        }
+
+        let instance_id = self.instance_id.clone();
+        let batch_input = jobs.clone();
+
+        let batch_result = self.memory.run_stm_batch(move |connection, reader| {
+            batch_input
+                .iter()
+                .map(|(observation, max_depth)| {
+                    run_batched_job(connection, &reader, &instance_id, observation, *max_depth)
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let per_job_results = match batch_result {
+            Ok(results) => results,
+            Err(_) => {
+                // The batch never ran at all - e.g. the STM writer thread is
+                // gone - so nothing was written or searched for any job in
+                // it. Routine ingestion is best-effort (the queue already
+                // drops on overflow), so this is reported per job rather
+                // than propagated as one fatal error for the whole daemon.
+                return jobs
+                    .into_iter()
+                    .map(|_| {
+                        Err(DaemonError::Debug(
+                            "routine ingestion batch failed - STM writer unavailable".into(),
+                        ))
+                    })
+                    .collect();
+            }
+        };
+
+        let mut outcomes = Vec::with_capacity(per_job_results.len());
+        for ((observation, _max_depth), job_result) in jobs.into_iter().zip(per_job_results) {
+            let outcome = (|| -> Result<IngestionOutcome, DaemonError> {
+                let batch_job = job_result?;
+                for deferred in batch_job.deferred_saves {
+                    match deferred {
+                        DeferredSave::Node(node) => self.memory.save_node(&node)?,
+                        DeferredSave::Relationship(relationship) => {
+                            self.memory.save_relationship(&relationship)?
+                        }
+                    }
+                }
+                self.record_object_correlations(&observation)?;
+                self.observations_ingested = self.observations_ingested.saturating_add(1);
+                self.finish_ingestion(
+                    &observation,
+                    batch_job.relationship_id,
+                    batch_job.seeds_threat_knowledge,
+                    batch_job.threat_paths,
+                )
+            })();
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    /// `dendrite-knowledge`'s correlation-key bookkeeping for one
+    /// observation's source (and target, if any). Split out of
+    /// `persist_object` so batched routine ingestion can call it once per
+    /// object after the batch, using only deterministic inputs (the local
+    /// node id is a pure function of instance id + object id; provenance
+    /// for a freshly observed local object is always `MemoryProvenance::local`)
+    /// rather than needing the batch's merged node state.
+    fn record_object_correlations(&self, observation: &Observation) -> Result<(), DaemonError> {
+        let source_id = self.local_memory_node_id(&observation.source.id.0);
+        self.knowledge.record_object_correlations(
+            &source_id.0,
+            &observation.source,
+            &self.instance_id,
+            observation.observed_at,
+        )?;
+        if let Some(target) = &observation.target {
+            let target_id = self.local_memory_node_id(&target.id.0);
+            self.knowledge.record_object_correlations(
+                &target_id.0,
+                target,
+                &self.instance_id,
+                observation.observed_at,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The shared tail of ingestion: given the relationship id and threat
+    /// paths already found (whether by the single-item path above or by a
+    /// batched job), decide whether a threat path is significant enough to
+    /// raise an incident/evidence and reinforce the graph. Node/relationship
+    /// persistence and the threat-path search itself happen before this is
+    /// called; this function's job starts once that data already exists.
+    fn finish_ingestion(
+        &mut self,
+        observation: &Observation,
+        relationship_id: Option<MemoryRelationshipId>,
+        seeds_threat_knowledge: bool,
+        mut threat_paths: Vec<(String, ThreatPath)>,
+    ) -> Result<IngestionOutcome, DaemonError> {
         if seeds_threat_knowledge {
             return Ok(IngestionOutcome {
                 relationship_id,
@@ -1429,31 +1673,6 @@ impl DaemonCore {
                 evidence: Vec::new(),
                 strongest_graph_score: None,
             });
-        }
-
-        let query = PathQuery {
-            max_depth: 6,
-            direction: TraversalDirection::Any,
-            evaluation_time: Some(observation.observed_at),
-            ..PathQuery::default()
-        };
-        let mut threat_paths: Vec<(String, ThreatPath)> = Vec::new();
-
-        if observation.source.kind != EntityKind::Threat {
-            let start = self.local_memory_node_id(&observation.source.id.0);
-            for finding in self.memory.threat_paths_from(&start, &query)? {
-                threat_paths.push((observation.source.id.0.clone(), finding));
-            }
-        }
-
-        if threat_paths.is_empty()
-            && let Some(target) = &observation.target
-            && target.kind != EntityKind::Threat
-        {
-            let start = self.local_memory_node_id(&target.id.0);
-            for finding in self.memory.threat_paths_from(&start, &query)? {
-                threat_paths.push((target.id.0.clone(), finding));
-            }
         }
 
         threat_paths.sort_by(|left, right| {
@@ -2017,6 +2236,254 @@ fn short_instance_id(instance_id: &str) -> &str {
     &instance_id[..end]
 }
 
+fn local_memory_node_id(instance_id: &str, local_id: &str) -> MemoryNodeId {
+    MemoryNodeId(format!("{instance_id}::{local_id}"))
+}
+
+fn seeds_threat_knowledge(observation: &Observation) -> bool {
+    observation.kind == ObservationKind::Associated
+        && observation
+            .target
+            .as_ref()
+            .is_some_and(|target| target.kind == EntityKind::Threat)
+}
+
+/// One routine job's outcome from inside a batch closure: whatever this
+/// batch's own connection could apply directly (STM-destined writes,
+/// already durable once the batch commits) plus whatever it could not
+/// (anything that resolved to LTM retention, which must go through the
+/// ordinary cross-tier-aware `save_node`/`save_relationship` afterward -
+/// see `DeferredSave`).
+struct BatchJobResult {
+    relationship_id: Option<MemoryRelationshipId>,
+    seeds_threat_knowledge: bool,
+    threat_paths: Vec<(String, ThreatPath)>,
+    deferred_saves: Vec<DeferredSave>,
+}
+
+/// A node or relationship whose merged retention turned out to be
+/// LongTerm/Persistent rather than ShortTerm. Batched routine ingestion
+/// only ever writes directly to the STM writer's own connection - writing
+/// an LTM-destined item there would leave it stranded in the wrong tier (or
+/// worse, diverging from an existing LTM copy this same connection can only
+/// read, never write, since it is attached `mode=ro`). Deferring it to the
+/// caller's normal `MemoryStore::save_node`/`save_relationship` after the
+/// batch reuses the exact destination-first promotion logic that already
+/// handles this outside of batching.
+enum DeferredSave {
+    Node(MemoryNode),
+    Relationship(MemoryRelationship),
+}
+
+/// The batched, connection-direct counterpart to
+/// `DaemonCore::persist_object` + `persist_relationship` + the threat-path
+/// search in `ingest_observation_with_max_depth`, run once per job inside
+/// `DaemonCore::ingest_routine_batch`'s single `run_stm_batch` closure. Its
+/// reads (`reader.load_node`, `reader.find_relationship_id`,
+/// `reader.threat_paths_from`) see every earlier job's writes in the same
+/// batch, because they share one connection - the correctness property
+/// that ruled out a read-once-upfront batching plan.
+///
+/// Kept deliberately separate from `persist_object`/`persist_relationship`
+/// rather than parameterising them over "how to read/write" - those two
+/// also drive `record_object_correlations` and reinforcement bookkeeping
+/// that this batched path intentionally defers to after the batch (see
+/// `ingest_routine_batch`'s doc comment), so unifying them would either
+/// drag those subsystems into the batch transaction too or leave the
+/// single-item path with unused generality. Retention/priority/expiry
+/// decisions themselves (`map_retention`, `object_expiry`, `stronger_retention`,
+/// ...) are the same pure functions both paths call.
+fn run_batched_job(
+    connection: &Connection,
+    reader: &GraphReader<'_>,
+    instance_id: &str,
+    observation: &Observation,
+    max_depth: usize,
+) -> Result<BatchJobResult, StorageError> {
+    let mut deferred_saves = Vec::new();
+
+    persist_object_batched(
+        connection,
+        reader,
+        instance_id,
+        &observation.source,
+        observation,
+        false,
+        &mut deferred_saves,
+    )?;
+    if let Some(target) = &observation.target {
+        persist_object_batched(
+            connection,
+            reader,
+            instance_id,
+            target,
+            observation,
+            true,
+            &mut deferred_saves,
+        )?;
+    }
+    let relationship_id = persist_relationship_batched(
+        connection,
+        reader,
+        instance_id,
+        observation,
+        &mut deferred_saves,
+    )?;
+
+    let seeds = seeds_threat_knowledge(observation);
+    let mut threat_paths: Vec<(String, ThreatPath)> = Vec::new();
+    if !seeds {
+        let query = PathQuery {
+            max_depth,
+            direction: TraversalDirection::Any,
+            evaluation_time: Some(observation.observed_at),
+            max_relationships_per_node: Some(MAX_RELATIONSHIPS_PER_NODE_FOR_REASONING),
+            ..PathQuery::default()
+        };
+        if observation.source.kind != EntityKind::Threat {
+            let start = local_memory_node_id(instance_id, &observation.source.id.0);
+            for finding in reader.threat_paths_from(&start, &query)? {
+                threat_paths.push((observation.source.id.0.clone(), finding));
+            }
+        }
+        if threat_paths.is_empty()
+            && let Some(target) = &observation.target
+            && target.kind != EntityKind::Threat
+        {
+            let start = local_memory_node_id(instance_id, &target.id.0);
+            for finding in reader.threat_paths_from(&start, &query)? {
+                threat_paths.push((target.id.0.clone(), finding));
+            }
+        }
+    }
+
+    Ok(BatchJobResult {
+        relationship_id,
+        seeds_threat_knowledge: seeds,
+        threat_paths,
+        deferred_saves,
+    })
+}
+
+fn persist_object_batched(
+    connection: &Connection,
+    reader: &GraphReader<'_>,
+    instance_id: &str,
+    object: &ObjectDescriptor,
+    observation: &Observation,
+    is_target: bool,
+    deferred_saves: &mut Vec<DeferredSave>,
+) -> Result<(), StorageError> {
+    let retention = map_retention(object, observation, is_target);
+    let mut node = MemoryNode {
+        id: local_memory_node_id(instance_id, &object.id.0),
+        kind: map_entity_kind(object.kind),
+        label: object.label.clone(),
+        created_at: observation.observed_at,
+        last_seen_at: observation.observed_at,
+        expires_at: object_expiry(object, observation, is_target, retention),
+        state: MemoryState::Observed,
+        priority: map_priority(observation.severity),
+        retention,
+        decay_policy: DecayPolicy::None,
+        provenance: MemoryProvenance::local(instance_id.to_owned()),
+    };
+    if let Some(existing) = reader.load_node(&node.id)? {
+        node.created_at = existing.created_at;
+        node.last_seen_at = existing.last_seen_at.max(observation.observed_at);
+        node.state = if existing.state.is_active_for_reasoning() {
+            existing.state
+        } else {
+            MemoryState::Observed
+        };
+        node.priority = existing.priority.max(node.priority);
+        node.retention = stronger_retention(existing.retention, node.retention);
+        node.expires_at = match (existing.expires_at, node.expires_at) {
+            (None, _) | (_, None) => None,
+            (Some(left), Some(right)) => Some(left.max(right)),
+        };
+    }
+
+    if node.retention == RetentionClass::ShortTerm {
+        let created_at = node.created_at;
+        execute_node_upsert(connection, &node, created_at).map_err(StorageError::Database)?;
+    } else {
+        deferred_saves.push(DeferredSave::Node(node));
+    }
+    Ok(())
+}
+
+fn persist_relationship_batched(
+    connection: &Connection,
+    reader: &GraphReader<'_>,
+    instance_id: &str,
+    observation: &Observation,
+    deferred_saves: &mut Vec<DeferredSave>,
+) -> Result<Option<MemoryRelationshipId>, StorageError> {
+    let Some(target) = &observation.target else {
+        return Ok(None);
+    };
+    let mut relationship = MemoryRelationship {
+        id: MemoryRelationshipId(format!("{instance_id}::obs:{}", observation.id.0)),
+        kind: map_relationship_kind(observation.kind),
+        source: local_memory_node_id(instance_id, &observation.source.id.0),
+        target: local_memory_node_id(instance_id, &target.id.0),
+        created_at: observation.observed_at,
+        last_seen_at: observation.observed_at,
+        observation_count: 1,
+        expires_at: observation.expires_at,
+        state: MemoryState::Observed,
+        priority: map_priority(observation.severity),
+        retention: map_relationship_retention(observation),
+        decay_policy: DecayPolicy::Linear {
+            rate: DecayRate::new(10).expect("10 must be a valid decay rate"),
+        },
+        strength: MemoryStrength::new(observation.confidence.value())
+            .expect("protocol confidence is constrained to 0..=100"),
+        confidence: MemoryConfidence::new(observation.confidence.value())
+            .expect("protocol confidence is constrained to 0..=100"),
+        reinforcement: None,
+        provenance: MemoryProvenance::local(instance_id.to_owned()),
+    };
+
+    // Mirrors `MemoryStore::observe_relationship`: consolidate onto an
+    // existing active edge of the same kind/source/target rather than
+    // always minting a new relationship id.
+    let id = if let Some(existing_id) = reader.find_relationship_id(
+        relationship.kind,
+        &relationship.source,
+        &relationship.target,
+    )? {
+        let Some(mut existing) = reader.load_relationship(&existing_id)? else {
+            return Ok(Some(existing_id));
+        };
+        existing.record_observation(relationship.last_seen_at);
+        existing.expires_at = match (existing.expires_at, relationship.expires_at) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, other) | (other, None) => other,
+        };
+        existing.priority = existing.priority.max(relationship.priority);
+        existing.strength = existing.strength.max(relationship.strength);
+        existing.confidence = existing.confidence.max(relationship.confidence);
+        if existing.state == MemoryState::Expired {
+            existing.state = MemoryState::Observed;
+        }
+        relationship = existing;
+        existing_id
+    } else {
+        relationship.id.clone()
+    };
+
+    if relationship.retention == RetentionClass::ShortTerm {
+        let created_at = relationship.created_at;
+        execute_relationship_upsert(connection, &relationship, created_at)
+            .map_err(StorageError::Database)?;
+    } else {
+        deferred_saves.push(DeferredSave::Relationship(relationship));
+    }
+    Ok(Some(id))
+}
+
 fn map_entity_kind(kind: EntityKind) -> MemoryNodeKind {
     match kind {
         EntityKind::Process => MemoryNodeKind::Process,
@@ -2173,6 +2640,93 @@ mod tests {
             .unwrap();
         assert_eq!(relationship.observation_count, 2);
         assert_eq!(relationship.confidence.value(), 90);
+    }
+
+    #[test]
+    fn routine_batch_consolidates_repeated_observations_within_one_batch() {
+        // Same scenario as `repeated_observations_consolidate_in_memory`,
+        // but both observations go through `ingest_routine_batch` in a
+        // single call - this is exactly the correctness property that
+        // ruled out a read-once-upfront batching plan: the second
+        // observation's read must see the first observation's write, even
+        // though both are in the same batch and neither has been through
+        // the ordinary per-item `save_relationship` path.
+        let mut core = DaemonCore::open(":memory:").unwrap();
+        let first = observation(
+            "one",
+            ObservationKind::NetworkConnection,
+            object("proc", EntityKind::Process),
+            object("endpoint", EntityKind::NetworkEndpoint),
+            70,
+        );
+        let second = Observation {
+            id: dendrite_protocol::ObservationId("two".into()),
+            observed_at: 200,
+            confidence: Confidence::new(90).unwrap(),
+            ..first.clone()
+        };
+
+        let mut outcomes = core.ingest_routine_batch(vec![(first, 6), (second, 6)]);
+        assert_eq!(outcomes.len(), 2);
+        let second_outcome = outcomes.pop().unwrap().unwrap();
+        let first_outcome = outcomes.pop().unwrap().unwrap();
+
+        assert_eq!(
+            first_outcome.relationship_id, second_outcome.relationship_id,
+            "both observations in the batch must consolidate onto the same relationship"
+        );
+        let relationship = core
+            .memory()
+            .load_relationship(first_outcome.relationship_id.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(relationship.observation_count, 2);
+        assert_eq!(relationship.confidence.value(), 90);
+    }
+
+    #[test]
+    fn routine_batch_results_line_up_one_to_one_with_input_jobs() {
+        let mut core = DaemonCore::open(":memory:").unwrap();
+        let jobs: Vec<(Observation, usize)> = (0..5)
+            .map(|index| {
+                let id = format!("obs-{index}");
+                (
+                    observation(
+                        &id,
+                        ObservationKind::NetworkConnection,
+                        object(&format!("proc-{index}"), EntityKind::Process),
+                        object(&format!("endpoint-{index}"), EntityKind::NetworkEndpoint),
+                        50,
+                    ),
+                    6,
+                )
+            })
+            .collect();
+        let expected_sources: Vec<String> = jobs
+            .iter()
+            .map(|(observation, _)| observation.source.id.0.clone())
+            .collect();
+
+        let outcomes = core.ingest_routine_batch(jobs);
+        assert_eq!(outcomes.len(), 5);
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            let outcome = outcome.unwrap();
+            let relationship_id = outcome.relationship_id.expect("relationship was created");
+            let relationship = core
+                .memory()
+                .load_relationship(&relationship_id)
+                .unwrap()
+                .unwrap();
+            let source_node = core
+                .memory()
+                .load_node(&relationship.source)
+                .unwrap()
+                .unwrap();
+            assert!(
+                source_node.id.0.ends_with(&expected_sources[index]),
+                "job {index}'s outcome must correspond to job {index}'s own observation"
+            );
+        }
     }
 
     #[test]
