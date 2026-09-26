@@ -15,7 +15,9 @@ mod self_store;
 mod telemetry;
 mod vulnerability;
 
-pub use actions::{ActionService, ActionStoreError};
+pub use actions::{
+    ActionService, ActionStoreError, DEFAULT_MAGI_SOCKET_PATH, MagiEvaluator, MagiIpcClient,
+};
 pub use analysis::{
     AnalysisError, AntiserumKnowledgeAcceptanceResult, AntiserumPackageDetail,
     AntiserumPackageOrigin, AntiserumPackageStore, AntiserumPackageSummary,

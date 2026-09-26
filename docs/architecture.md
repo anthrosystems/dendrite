@@ -346,7 +346,7 @@ VETO
 
 The default implementation requires two approvals, with deny/veto blocking. Longer term, quorum should be action-specific: observation can require little authority while isolation or destructive remediation requires stronger independent agreement.
 
-The evaluators should eventually reason from genuinely different evidence/perspectives rather than acting as three duplicate risk scores.
+The evaluators should eventually reason from genuinely different evidence/perspectives rather than acting as three duplicate risk scores. Evaluation itself now runs as its own process (`dendrite-magi`), reached from `dendrited` over a Unix socket rather than in-process — see `crates/dendrite-magi/README.md` and `docs/ROADMAP.md`'s Batch 7 notes for why, and for the fail-closed (abstain-on-unreachable) behaviour that follows from it. This is also the intended integration point for an MCP-connected evaluator per seat (a full replacement of that seat's internal vote, not an advisor alongside it) — designed for today, not yet built.
 
 ## 9. Guard and trust
 

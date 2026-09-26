@@ -9,6 +9,7 @@ members = [
     "crates/dendrite-protocol",
     "crates/dendrite-ebpf-common",
     "crates/dendrite-ui-server",
+    "crates/dendrite-magi",
 ]
 exclude = ["ebpf/dendrite-ebpf"]
 resolver = "2"

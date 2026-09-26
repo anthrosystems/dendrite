@@ -66,14 +66,20 @@ Two different things, don't conflate them (see `docs/ROADMAP.md`'s Batch 7):
   object, builds the UI (`ui/dist`, baked with an absolute `dendrited`
   origin — see `docs/CONFIGURATION.md`), then runs `cargo deb -p dendrited`.
   The resulting `.deb` installs a dedicated `dendrite` system user/group and
-  **two** independent systemd units: `dendrited.service` (the daemon) and
+  **three** independent systemd units: `dendrited.service` (the daemon),
   `dendrite-ui.service` (`dendrite-ui-server`, a minimal unprivileged
   static-file server for the UI — see `crates/dendrite-ui-server/README.md`
   for why it's a separate process/unit rather than something `dendrited`
-  serves itself). Config lives in `/etc/dendrite/dendrited.env` (a
-  conffile — survives upgrades/removal, only `purge` deletes it), state in
-  `/var/lib/dendrite` (via systemd's `StateDirectory=`, same survival
-  rules).
+  serves itself), and `dendrite-magi.service` (`dendrite-magi`, the MAGI
+  quorum-evaluation process `dendrited` reaches over a Unix socket — see
+  `crates/dendrite-magi/README.md`). Each unit can be enabled/disabled
+  independently (`systemctl disable --now dendrite-ui`/`dendrite-magi`);
+  `dendrited` treats an unreachable `dendrite-magi` as fail-closed (every
+  MAGI seat abstains, so nothing can complete) rather than hanging or
+  silently allowing. Config lives in `/etc/dendrite/dendrited.env`/
+  `dendrite-magi.env` (conffiles — survive upgrades/removal, only `purge`
+  deletes them), state in `/var/lib/dendrite` (via systemd's
+  `StateDirectory=`, same survival rules).
 
 ## Testing
 

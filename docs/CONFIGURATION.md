@@ -22,6 +22,7 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 | Variable | Default | Description |
 |---|---|---|
 | `DENDRITE_SOCKET` | `/tmp/dendrited.sock` | Unix socket path for `dendrite-cli` IPC |
+| `DENDRITE_MAGI_SOCKET` | `/tmp/dendrite-magi.sock` | Unix socket path `dendrited` connects to for MAGI quorum evaluation (see below) |
 | `DENDRITE_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket |
 | `DENDRITE_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
 | `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address — also serves the live-event WebSocket (see below) |
@@ -44,6 +45,20 @@ Because the UI's static assets and `dendrited`'s API/WebSocket now live on diffe
 | `VITE_DENDRITE_WS_URL` | same-origin `/ws`, derived from `window.location` | `ws://<dendrited-host>:8766/ws` |
 
 Local dev (`npm run dev`) leaves both unset — Vite's own dev-proxy (`ui/vite.config.ts`) forwards `/api`/`/ws` to `dendrited` on the same apparent origin, so no cross-origin call ever happens there. `scripts/build-deb.sh` sets both explicitly when building `ui/dist` for packaging (see `DENDRITE_PACKAGED_HTTP_ORIGIN` in that script if `dendrited`'s HTTP API will be reachable somewhere other than `127.0.0.1:8766` on the target host).
+
+### MAGI, and its own process
+
+MAGI quorum evaluation (the Host/User/Environment votes an action proposal needs before it can execute) runs in a separate process, `dendrite-magi`/`dendrite-magi.service`, reached over a Unix socket — the same process-separation reasoning as the UI split above, and the same one planned for `dendrite-guard`: action authority shouldn't be reachable in-process from wherever a compromise of `dendrited` itself might land. See `crates/dendrite-magi/README.md`.
+
+`dendrited` talks to it as a client (`MagiIpcClient`) and is deliberately **fail-closed**: if `dendrite-magi` is unreachable, times out, or isn't running at all, every seat comes back `abstain` rather than the request hanging or silently defaulting to approval. Under the default quorum policy (2 approvals required, an abstain counting toward neither approval nor denial) this means an action can never complete while `dendrite-magi` is down — it is denied, not silently allowed, and not stuck waiting. An operator can see this happening in the CLI's `MAGI:` section of `actions evaluate`/`actions <ID>` output, where each seat's reason string reads `dendrite-magi is unreachable: ...` instead of a real evaluation.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DENDRITE_MAGI_HOST_SOURCE` | `internal` | Which evaluator backs the Host seat |
+| `DENDRITE_MAGI_USER_SOURCE` | `internal` | Which evaluator backs the User seat |
+| `DENDRITE_MAGI_ENVIRONMENT_SOURCE` | `internal` | Which evaluator backs the Environment seat |
+
+`internal` (the only value implemented today) is `dendrite-magi`'s own built-in rule-based evaluator. These three variables exist now, ahead of that support actually existing, so that hooking an MCP-connected AI agent up to a seat — letting a company's own infrastructure-aware model act as that seat's MAGI vote, as a full replacement for the internal evaluator's authority over that seat, rather than merely advising it — is a configuration change later rather than a code change today. `dendrite-magi` refuses to start if any of these is set to anything other than `internal`, on purpose, rather than silently falling back to the internal evaluator for that seat. See `docs/ROADMAP.md` for the current status of the MCP-backed evaluator work itself (not yet built).
 
 ## Telemetry collectors
 

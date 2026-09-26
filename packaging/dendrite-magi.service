@@ -1,0 +1,66 @@
+[Unit]
+Description=Dendrite MAGI evaluation process (Host/User/Environment quorum voters)
+Documentation=https://github.com/anthrosystems/dendrite
+After=network.target local-fs.target
+Before=dendrited.service
+# dendrited is a client of this process's socket, not the other way round:
+# dendrited's own MagiIpcClient fails closed (every seat abstains) whenever
+# this unit isn't up, so there is no hard `Requires=` here in either
+# direction — an operator can stop/restart this unit independently, and
+# dendrited keeps running (just unable to authorise anything) rather than
+# going down with it. `Before=` only orders startup so a fresh boot doesn't
+# race dendrited's first action evaluation against this socket appearing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dendrite-magi
+Restart=on-failure
+RestartSec=2
+
+# --- Identity ---
+# Same dedicated non-root account as dendrited (created by the package's
+# postinst) — this process holds no telemetry or Memory Graph state of its
+# own, only the quorum-evaluation logic, but it still runs as a distinct OS
+# process/unit so a compromise of dendrited cannot reach it in-process (see
+# crates/dendrite-magi/README.md and docs/ROADMAP.md).
+User=dendrite
+Group=dendrite
+NoNewPrivileges=yes
+
+# --- Filesystem layout ---
+# Shares dendrited's /run/dendrite runtime directory so both processes agree
+# on the socket path without a second directory to keep in sync; this unit
+# only ever creates the one socket file in it.
+RuntimeDirectory=dendrite
+RuntimeDirectoryMode=0750
+
+Environment=DENDRITE_MAGI_SOCKET=/run/dendrite/dendrite-magi.sock
+# DENDRITE_MAGI_HOST_SOURCE / _USER_SOURCE / _ENVIRONMENT_SOURCE default to
+# "internal" (the built-in rule-based evaluator) when unset — see
+# docs/CONFIGURATION.md. Only set these via the EnvironmentFile below once an
+# MCP-backed evaluator actually exists for a seat; today this process refuses
+# to start if any of them are set to anything but "internal".
+EnvironmentFile=-/etc/dendrite/dendrite-magi.env
+
+# --- Sandboxing / hardening ---
+# Pure decision logic: no telemetry, no eBPF, no filesystem state beyond its
+# own socket, so this can be locked down harder than dendrited.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/dendrite
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+[Install]
+WantedBy=multi-user.target

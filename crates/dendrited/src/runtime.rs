@@ -47,6 +47,12 @@ pub struct RuntimeConfig {
     pub socket_mode: u32,
     pub socket_group: Option<String>,
     pub http_addr: SocketAddr,
+    /// Unix socket for the separate `dendrite-magi` process (see
+    /// `docs/CONFIGURATION.md`). Defaults to
+    /// `crate::DEFAULT_MAGI_SOCKET_PATH` — this field exists mainly so
+    /// `DENDRITE_MAGI_SOCKET` has somewhere to land before
+    /// `DaemonRuntime::open` wires it into `DaemonCore`.
+    pub magi_socket_path: PathBuf,
     pub watch_mounts: Vec<PathBuf>,
     pub watch_include_paths: Vec<PathBuf>,
     pub watch_exclude_paths: Vec<PathBuf>,
@@ -71,6 +77,7 @@ impl RuntimeConfig {
             http_addr: "127.0.0.1:8766"
                 .parse()
                 .expect("default HTTP address must be valid"),
+            magi_socket_path: PathBuf::from(crate::DEFAULT_MAGI_SOCKET_PATH),
             watch_mounts: Vec::new(),
             watch_include_paths: Vec::new(),
             watch_exclude_paths: Vec::new(),
@@ -338,6 +345,7 @@ impl DaemonRuntime {
         let guard = config.guard_path.to_string_lossy().into_owned();
         let mut core =
             DaemonCore::open_with_tiered_stores(&self_store, &stm, &ltm, &incidents, &guard)?;
+        core.set_magi_socket_path(config.magi_socket_path.clone());
         let mut vulnerability = VulnerabilityService::open(&incidents)?;
         let now = unix_now();
         if config.cve_snapshot_path.exists()

@@ -5,9 +5,10 @@ use crate::{
     AntiserumPayload, AntiserumVerificationKey, AttackChainRecord, BuiltPayloadSet,
     CreateAntiserumRequest, CveKnowledgeBundle, CveKnowledgeRecord, GuardService, GuardStoreError,
     IncidentService, IncidentStoreError, InstanceKeyRecord, KnowledgeError, KnowledgeService,
-    SelfStore, SelfStoreError, SignedAntiserumPackage, VulnerabilityCandidate, VulnerabilityError,
-    VulnerabilityService, automatic_attack_chain_request, build_payloads, build_signed_package,
-    enforce_automatic_export_ceiling, verification_key_from_package, verify_signed_package,
+    MagiIpcClient, SelfStore, SelfStoreError, SignedAntiserumPackage, VulnerabilityCandidate,
+    VulnerabilityError, VulnerabilityService, automatic_attack_chain_request, build_payloads,
+    build_signed_package, enforce_automatic_export_ceiling, verification_key_from_package,
+    verify_signed_package,
 };
 use dendrite_memory::model::{
     DecayPolicy, DecayRate, MemoryConfidence, MemoryNode, MemoryNodeId, MemoryNodeKind,
@@ -1255,6 +1256,15 @@ impl DaemonCore {
 
     pub fn set_observations_ingested(&mut self, value: u64) {
         self.observations_ingested = value;
+    }
+
+    /// Points MAGI evaluation at a real `dendrite-magi` process over its
+    /// Unix socket, overriding `ActionService::open`'s dev default
+    /// (`DEFAULT_MAGI_SOCKET_PATH`). `DaemonRuntime::open` calls this with
+    /// the configured `DENDRITE_MAGI_SOCKET` path.
+    pub fn set_magi_socket_path(&mut self, socket_path: std::path::PathBuf) {
+        self.actions
+            .set_magi_evaluator(Box::new(MagiIpcClient::new(socket_path)));
     }
 
     pub fn expire_memory(&self, now: u64) -> Result<(), DaemonError> {
@@ -2582,7 +2592,68 @@ fn object_expiry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dendrite_protocol::{ObjectDescriptor, ObservationId};
+    use crate::MagiEvaluator;
+    use dendrite_protocol::{
+        Evaluation, Evaluator, EvaluatorVerdict, ObjectDescriptor, ObservationId,
+    };
+
+    /// `DaemonCore::open` (unlike `DaemonRuntime::open`) never wires in a
+    /// `magi_socket_path`, so its `ActionService` defaults to a real
+    /// `MagiIpcClient` pointed at nothing — correctly fail-closed
+    /// (`not_authorised`) with no `dendrite-magi` process to answer it.
+    /// Tests here that exercise a full action evaluation swap in this
+    /// always-decides-in-process stand-in, the same way `actions.rs`'s own
+    /// tests do, rather than relying on a real socket being present.
+    struct TestRuleMagiEvaluator;
+
+    impl MagiEvaluator for TestRuleMagiEvaluator {
+        fn evaluate(
+            &self,
+            action: dendrite_protocol::ActionType,
+            user_authorised: bool,
+        ) -> Vec<(Evaluation, String)> {
+            let safe = action.is_safe_non_privileged();
+            let package_update = action == dendrite_protocol::ActionType::UpdatePackage;
+
+            vec![
+                (
+                    Evaluation {
+                        evaluator: Evaluator::Host,
+                        verdict: if safe || package_update {
+                            EvaluatorVerdict::Approve
+                        } else {
+                            EvaluatorVerdict::Abstain
+                        },
+                    },
+                    "BALTHASAR-2: test evaluator".into(),
+                ),
+                (
+                    Evaluation {
+                        evaluator: Evaluator::User,
+                        verdict: if package_update && user_authorised {
+                            EvaluatorVerdict::Approve
+                        } else if package_update {
+                            EvaluatorVerdict::Deny
+                        } else {
+                            EvaluatorVerdict::Abstain
+                        },
+                    },
+                    "CASPER-3: test evaluator".into(),
+                ),
+                (
+                    Evaluation {
+                        evaluator: Evaluator::Environment,
+                        verdict: if safe || package_update {
+                            EvaluatorVerdict::Approve
+                        } else {
+                            EvaluatorVerdict::Abstain
+                        },
+                    },
+                    "MELCHIOR-1: test evaluator".into(),
+                ),
+            ]
+        }
+    }
 
     fn object(id: &str, kind: EntityKind) -> ObjectDescriptor {
         ObjectDescriptor {
@@ -2820,6 +2891,8 @@ mod tests {
     #[test]
     fn graph_findings_correlate_into_one_persistent_incident() {
         let mut core = DaemonCore::open(":memory:").unwrap();
+        core.actions
+            .set_magi_evaluator(Box::new(TestRuleMagiEvaluator));
         let instance_id = core.instance_id().to_string();
         let threat_edge = observation(
             "threat-edge",

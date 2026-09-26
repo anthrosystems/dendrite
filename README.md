@@ -112,7 +112,8 @@ dendrite/
 │   ├── dendrite-updater/
 │   ├── dendrite-protocol/
 │   ├── dendrite-ebpf-common/
-│   └── dendrite-ui-server/
+│   ├── dendrite-ui-server/
+│   └── dendrite-magi/
 ├── ebpf/
 │   └── dendrite-ebpf/
 ├── antiserum/
@@ -139,6 +140,7 @@ The UI lives in the main repository as a first-class root component. Repository,
 - [`crates/dendrite-protocol`](crates/dendrite-protocol/README.md) — shared domain types
 - [`crates/dendrite-ebpf-common`](crates/dendrite-ebpf-common/README.md) — shared kernel/userspace ABI
 - [`crates/dendrite-ui-server`](crates/dendrite-ui-server/README.md) — the UI's own static-file-server process
+- [`crates/dendrite-magi`](crates/dendrite-magi/README.md) — the MAGI quorum-evaluation process
 - [`ebpf/`](ebpf/README.md) and [`ebpf/dendrite-ebpf`](ebpf/dendrite-ebpf/README.md) — the kernel eBPF telemetry program
 - [`ui/`](ui/README.md) — the web operator console
 - [`antiserum/`](antiserum/README.md) — the signed threat-intelligence package format

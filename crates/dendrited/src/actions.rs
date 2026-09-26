@@ -2,12 +2,122 @@ use dendrite_action::{ActionCoordinator, ActionExecutor, ExecutorError, SafeExec
 use dendrite_protocol::{
     ActionAuthorization, ActionDetailDto, ActionExecutionStatus, ActionProposal, ActionProposalId,
     ActionSummaryDto, ActionTransactionState, ActionType, Evaluation, EvaluationDto, Evaluator,
-    EvaluatorVerdict, GuardDecision, IncidentId, ObjectId, PolicyDecision, QuorumPolicy,
-    TransactionEventDto, TrustState, VulnerabilityExposureDto,
+    EvaluatorVerdict, GuardDecision, IncidentId, MagiRequest, MagiResponse, ObjectId,
+    PolicyDecision, QuorumPolicy, TransactionEventDto, TrustState, VulnerabilityExposureDto,
 };
 use dendrite_updater::{AptPackageManager, UpdatePlan, Updater};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
+
+/// Talks to the separate `dendrite-magi` process for MAGI evaluation. This
+/// is a real OS-process boundary, not an in-process call, for the same
+/// reason Guard is planned to become one (see `docs/ROADMAP.md`'s Batch 7
+/// process-separation note): action authority should not be reachable
+/// in-process from wherever a compromise might land.
+pub trait MagiEvaluator: Send {
+    fn evaluate(&self, action: ActionType, user_authorised: bool) -> Vec<(Evaluation, String)>;
+}
+
+/// Default `dendrite-magi` socket path for local dev — matches the
+/// `/tmp/dendrited.sock` convention used for the CLI socket. Packaged
+/// installs override this via `DENDRITE_MAGI_SOCKET`
+/// (`/run/dendrite/dendrite-magi.sock`, set in `packaging/dendrited.service`).
+pub const DEFAULT_MAGI_SOCKET_PATH: &str = "/tmp/dendrite-magi.sock";
+
+/// Short — this call sits on the request-handling path, and an unreachable
+/// `dendrite-magi` must not hang the whole daemon waiting for it.
+const MAGI_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub struct MagiIpcClient {
+    socket_path: PathBuf,
+}
+
+impl MagiIpcClient {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+
+    fn call(&self, request: &MagiRequest) -> Result<MagiResponse, String> {
+        let mut stream =
+            UnixStream::connect(&self.socket_path).map_err(|error| format!("{error}"))?;
+        stream
+            .set_read_timeout(Some(MAGI_CALL_TIMEOUT))
+            .map_err(|error| format!("{error}"))?;
+        stream
+            .set_write_timeout(Some(MAGI_CALL_TIMEOUT))
+            .map_err(|error| format!("{error}"))?;
+
+        let mut line = serde_json::to_string(request).map_err(|error| format!("{error}"))?;
+        line.push('\n');
+        stream
+            .write_all(line.as_bytes())
+            .map_err(|error| format!("{error}"))?;
+
+        let mut response_line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response_line)
+            .map_err(|error| format!("{error}"))?;
+        serde_json::from_str(response_line.trim()).map_err(|error| format!("{error}"))
+    }
+}
+
+/// An evaluator that abstains on every seat — the fail-closed fallback used
+/// whenever `dendrite-magi` can't be reached at all. Abstaining (rather than
+/// denying/vetoing) matches how the quorum policy already treats a silent
+/// evaluator: it can never by itself cause an approval (so an unreachable
+/// `dendrite-magi` can't create authority), but it also doesn't block an
+/// action the *remaining* reachable evaluators would still unanimously
+/// approve — unlike a hardcoded deny/veto, which would turn "the MAGI
+/// process happens to be restarting" into a denial-of-service against every
+/// containment/remediation action host-wide, including during a real
+/// incident where Dendrite most needs to still be able to act. See
+/// `docs/ROADMAP.md`'s MAGI/MCP process-separation notes for the full
+/// reasoning.
+fn abstain_all(reason: &str) -> Vec<(Evaluation, String)> {
+    [Evaluator::Host, Evaluator::User, Evaluator::Environment]
+        .into_iter()
+        .map(|evaluator| {
+            (
+                Evaluation {
+                    evaluator,
+                    verdict: EvaluatorVerdict::Abstain,
+                },
+                reason.to_owned(),
+            )
+        })
+        .collect()
+}
+
+impl MagiEvaluator for MagiIpcClient {
+    fn evaluate(&self, action: ActionType, user_authorised: bool) -> Vec<(Evaluation, String)> {
+        let request = MagiRequest::Evaluate {
+            action,
+            user_authorised,
+        };
+        match self.call(&request) {
+            Ok(MagiResponse::Evaluations { evaluations }) => evaluations
+                .into_iter()
+                .map(|evaluation| {
+                    (
+                        Evaluation {
+                            evaluator: evaluation.evaluator,
+                            verdict: evaluation.verdict,
+                        },
+                        evaluation.reason,
+                    )
+                })
+                .collect(),
+            Ok(MagiResponse::Error { message }) => {
+                abstain_all(&format!("dendrite-magi returned an error: {message}"))
+            }
+            Err(error) => abstain_all(&format!("dendrite-magi is unreachable: {error}")),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ActionStoreError {
@@ -25,6 +135,7 @@ impl From<rusqlite::Error> for ActionStoreError {
 pub struct ActionService {
     connection: Connection,
     next_proposal: u64,
+    magi: Box<dyn MagiEvaluator>,
 }
 
 impl ActionService {
@@ -33,10 +144,19 @@ impl ActionService {
         let mut service = Self {
             connection,
             next_proposal: 1,
+            magi: Box::new(MagiIpcClient::new(PathBuf::from(DEFAULT_MAGI_SOCKET_PATH))),
         };
         service.initialise()?;
         service.load_counter()?;
         Ok(service)
+    }
+
+    /// Overrides the default `dendrite-magi` socket path (see
+    /// `DEFAULT_MAGI_SOCKET_PATH`) — used by `DaemonRuntime::open` to wire in
+    /// the configured `DENDRITE_MAGI_SOCKET` path, and by tests to inject a
+    /// fake evaluator instead of talking to a real socket.
+    pub fn set_magi_evaluator(&mut self, magi: Box<dyn MagiEvaluator>) {
+        self.magi = magi;
     }
 
     fn initialise(&self) -> Result<(), ActionStoreError> {
@@ -257,7 +377,7 @@ impl ActionService {
             target: ObjectId(detail.proposal.target.clone()),
         };
 
-        let evaluations = evaluate_magi(action, user_authorised);
+        let evaluations = self.magi.evaluate(action, user_authorised);
         for (evaluation, reason) in &evaluations {
             self.connection.execute(
                 "INSERT INTO action_evaluations
@@ -383,70 +503,6 @@ fn action_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionSu
     })
 }
 
-fn evaluate_magi(action: ActionType, user_authorised: bool) -> Vec<(Evaluation, String)> {
-    let safe = action.is_safe_non_privileged();
-    let package_update = action == ActionType::UpdatePackage;
-
-    vec![
-        (
-            Evaluation {
-                evaluator: Evaluator::Host,
-                verdict: if safe || package_update {
-                    EvaluatorVerdict::Approve
-                } else {
-                    EvaluatorVerdict::Abstain
-                },
-            },
-            if safe {
-                "BALTHASAR-2: Action is non-privileged and does not mutate protected host state"
-            } else if package_update {
-                "BALTHASAR-2: Native package update is scoped to a verified vulnerability exposure"
-            } else {
-                "BALTHASAR-2: Privileged host mutation has no specialised executor policy"
-            }
-            .into(),
-        ),
-        (
-            Evaluation {
-                evaluator: Evaluator::User,
-                verdict: if package_update && user_authorised {
-                    EvaluatorVerdict::Approve
-                } else if package_update {
-                    EvaluatorVerdict::Deny
-                } else {
-                    EvaluatorVerdict::Abstain
-                },
-            },
-            if package_update && user_authorised {
-                "CASPER-3: Operator explicitly authorised this package update through Dendrite"
-            } else if package_update {
-                "CASPER-3: Package mutation requires explicit operator authority"
-            } else {
-                "CASPER-3: No interactive user authority applies to this action"
-            }
-            .into(),
-        ),
-        (
-            Evaluation {
-                evaluator: Evaluator::Environment,
-                verdict: if safe || package_update {
-                    EvaluatorVerdict::Approve
-                } else {
-                    EvaluatorVerdict::Abstain
-                },
-            },
-            if safe {
-                "MELCHIOR-1: Action is safe for the current environment"
-            } else if package_update {
-                "MELCHIOR-1: Remediation uses the native APT/dpkg package state and revalidation path"
-            } else {
-                "MELCHIOR-1: No environment-specific privileged executor is enabled"
-            }
-            .into(),
-        ),
-    ]
-}
-
 fn evaluate_policy(action: ActionType, user_authorised: bool) -> PolicyDecision {
     if action.is_safe_non_privileged() || (action == ActionType::UpdatePackage && user_authorised) {
         PolicyDecision::Allow
@@ -523,11 +579,65 @@ impl ActionExecutor for PackageUpdateExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reproduces `dendrite-magi`'s rule-based evaluator in-process, purely
+    /// so these tests don't need a real socket/process — production
+    /// `ActionService::open` always defaults to the real `MagiIpcClient`
+    /// instead. Keep this in sync with `dendrite-magi`'s own evaluator if
+    /// that logic changes.
+    struct TestRuleMagiEvaluator;
+
+    impl MagiEvaluator for TestRuleMagiEvaluator {
+        fn evaluate(&self, action: ActionType, user_authorised: bool) -> Vec<(Evaluation, String)> {
+            let safe = action.is_safe_non_privileged();
+            let package_update = action == ActionType::UpdatePackage;
+
+            vec![
+                (
+                    Evaluation {
+                        evaluator: Evaluator::Host,
+                        verdict: if safe || package_update {
+                            EvaluatorVerdict::Approve
+                        } else {
+                            EvaluatorVerdict::Abstain
+                        },
+                    },
+                    "BALTHASAR-2: test evaluator".into(),
+                ),
+                (
+                    Evaluation {
+                        evaluator: Evaluator::User,
+                        verdict: if package_update && user_authorised {
+                            EvaluatorVerdict::Approve
+                        } else if package_update {
+                            EvaluatorVerdict::Deny
+                        } else {
+                            EvaluatorVerdict::Abstain
+                        },
+                    },
+                    "CASPER-3: test evaluator".into(),
+                ),
+                (
+                    Evaluation {
+                        evaluator: Evaluator::Environment,
+                        verdict: if safe || package_update {
+                            EvaluatorVerdict::Approve
+                        } else {
+                            EvaluatorVerdict::Abstain
+                        },
+                    },
+                    "MELCHIOR-1: test evaluator".into(),
+                ),
+            ]
+        }
+    }
+
     fn service_with_incident() -> ActionService {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         let service = ActionService {
             connection,
             next_proposal: 1,
+            magi: Box::new(TestRuleMagiEvaluator),
         };
         service.initialise().unwrap();
         service
@@ -614,7 +724,8 @@ mod tests {
     }
     #[test]
     fn package_update_requires_explicit_user_authority() {
-        let denied = evaluate_magi(ActionType::UpdatePackage, false);
+        let evaluator = TestRuleMagiEvaluator;
+        let denied = evaluator.evaluate(ActionType::UpdatePackage, false);
         assert!(
             denied
                 .iter()
@@ -626,7 +737,7 @@ mod tests {
             PolicyDecision::Deny
         );
 
-        let approved = evaluate_magi(ActionType::UpdatePackage, true);
+        let approved = evaluator.evaluate(ActionType::UpdatePackage, true);
         assert!(
             approved
                 .iter()
@@ -636,6 +747,20 @@ mod tests {
         assert_eq!(
             evaluate_policy(ActionType::UpdatePackage, true),
             PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn magi_ipc_client_abstains_all_seats_when_dendrite_magi_is_unreachable() {
+        let client = MagiIpcClient::new(PathBuf::from(
+            "/tmp/dendrite-magi-test-socket-that-does-not-exist.sock",
+        ));
+        let evaluations = client.evaluate(ActionType::IsolateHost, false);
+        assert_eq!(evaluations.len(), 3);
+        assert!(
+            evaluations
+                .iter()
+                .all(|(evaluation, _)| evaluation.verdict == EvaluatorVerdict::Abstain)
         );
     }
 }

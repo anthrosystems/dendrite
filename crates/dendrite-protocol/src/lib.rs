@@ -4,6 +4,7 @@ pub mod action;
 pub mod detection;
 pub mod ids;
 pub mod ipc;
+pub mod magi_ipc;
 pub mod trust;
 
 pub use action::{
@@ -24,4 +25,5 @@ pub use ipc::{
     TelemetryPipelineLaneDto, TelemetrySourceDto, TelemetryStatusDto, TransactionEventDto,
     VulnerabilityExposureDto, VulnerabilityRemediationDto,
 };
+pub use magi_ipc::{MagiEvaluation, MagiRequest, MagiResponse};
 pub use trust::{GuardDecision, IntegrityFinding, IntegritySeverity, TrustState};

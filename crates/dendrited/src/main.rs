@@ -26,6 +26,9 @@ fn main() {
     if let Ok(value) = env::var("DENDRITE_SOCKET") {
         config.socket_path = PathBuf::from(value);
     }
+    if let Ok(value) = env::var("DENDRITE_MAGI_SOCKET") {
+        config.magi_socket_path = PathBuf::from(value);
+    }
     if let Ok(value) = env::var("DENDRITE_HTTP_ADDR")
         && let Ok(address) = value.parse()
     {

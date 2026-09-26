@@ -76,7 +76,44 @@ this is genuinely a separate process from `dendrited` — stopping
 `dendrite-ui-server` should leave `dendrited`'s API/CLI/telemetry entirely
 unaffected, and vice versa.
 
-## 4. Antiserum export pipeline
+## 4. MAGI, as its own process
+
+Confirms `dendrited` actually reaches a separate `dendrite-magi` process
+over its Unix socket for real evaluations, and correctly fails closed
+(every seat abstains) when it can't.
+
+```bash
+# terminal 1: the MAGI evaluation process
+/path/to/target/debug/dendrite-magi
+# "dendrite-magi: listening on /tmp/dendrite-magi.sock"
+
+# terminal 2: dendrited, pointed at it (defaults to the same path if unset)
+DENDRITE_SELF_DB=/tmp/dendrite-smoke/self.sqlite3 \
+DENDRITE_STM_DB=/tmp/dendrite-smoke/stm.sqlite3 \
+DENDRITE_LTM_DB=/tmp/dendrite-smoke/ltm.sqlite3 \
+DENDRITE_INCIDENT_DB=/tmp/dendrite-smoke/incidents.sqlite3 \
+DENDRITE_GUARD_DB=/tmp/dendrite-smoke/guard.sqlite3 \
+DENDRITE_MAGI_SOCKET=/tmp/dendrite-magi.sock \
+  /path/to/target/debug/dendrited
+
+# terminal 3: propose and evaluate a real action through the CLI
+dendrite debug seed-incident e2e-test
+dendrite actions propose <INCIDENT_ID> observe <PROCESS_OBJECT_ID>
+dendrite actions evaluate <PROPOSAL_ID>
+```
+
+A pass shows real, non-abstain evaluations in the `MAGI:` section (Host and
+Environment `approve`, User `abstain` for a bare `observe` — matching
+`dendrite-magi`'s rule-based evaluator) and `quorum: approved`/
+`[completed]`.
+
+Then kill the `dendrite-magi` process (terminal 1) and propose/evaluate a
+second action the same way. Confirm the fallback: every seat now reads
+`abstain` with a `dendrite-magi is unreachable: ...` reason, `quorum:
+denied`, and the proposal ends `[not_authorised]` — not a hang, and not a
+silent approval.
+
+## 5. Antiserum export pipeline
 
 ```bash
 cargo run -p dendrited --example antiserum_smoke -- /tmp/dendrite-smoke/antiserum-out
@@ -89,7 +126,7 @@ some real incidents/graph data in it for a non-trivial run. A pass prints
 rejection all succeeded. See `crates/dendrited/README.md`'s Testing section
 for what this covers and where it reads/writes.
 
-## 5. Second-instance Antiserum trust-boundary validation
+## 6. Second-instance Antiserum trust-boundary validation
 
 Exercises cross-host export/import without needing a second physical
 machine — see `docs/ROADMAP.md`'s "Second-instance Antiserum validation"
@@ -98,20 +135,22 @@ what each step should confirm. `scripts/launch_host_a.sh` and
 `scripts/launch_host_XYZ.sh [HOST_NAME]` automate standing up an isolated
 second instance on the same machine for this.
 
-## 6. Packaging (`.deb`)
+## 7. Packaging (`.deb`)
 
 ```bash
 ./scripts/build-deb.sh
 ```
 
 Then, in a disposable container or VM (not your main dev machine — this
-installs a system user and two systemd services):
+installs a system user and three systemd services):
 
 ```bash
 sudo dpkg -i target/debian/dendrite_*.deb
 systemctl status dendrited
 systemctl status dendrite-ui
-sudo systemctl disable --now dendrite-ui   # confirm dendrited is unaffected
+systemctl status dendrite-magi
+sudo systemctl disable --now dendrite-ui     # confirm dendrited is unaffected
+sudo systemctl disable --now dendrite-magi   # confirm dendrited fails closed (see step 4), not down
 sudo dpkg -r dendrite   # confirm /var/lib/dendrite and /etc/dendrite survive
 sudo dpkg -P dendrite   # confirm purge removes them
 ```

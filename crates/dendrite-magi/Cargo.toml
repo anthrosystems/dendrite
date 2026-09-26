@@ -1,0 +1,11 @@
+[package]
+name = "dendrite-magi"
+version = "0.1.0"
+edition = "2024"
+description = "Dendrite's MAGI evaluation process (Host/User/Environment quorum voters)"
+license = "Apache-2.0"
+repository = "https://github.com/anthrosystems/dendrite"
+
+[dependencies]
+dendrite-protocol = { path = "../dendrite-protocol" }
+serde_json = "1"
