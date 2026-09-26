@@ -33,3 +33,21 @@ See `docs/CONFIGURATION.md` for every environment variable, `docs/architecture.m
 cargo test -p dendrited
 cargo clippy -p dendrited --all-targets -- -D warnings
 ```
+
+`examples/antiserum_smoke.rs` is a live-data integration smoke test for the
+Antiserum export pipeline (build → sign → `.danti` round-trip → replay
+rejection → tamper rejection), run against whatever real `dendrited` data
+directory already exists rather than fixtures:
+
+```bash
+cargo run -p dendrited --example antiserum_smoke -- data/antiserum-smoke
+```
+
+Point `DENDRITE_SELF_DB`/`DENDRITE_STM_DB`/`DENDRITE_LTM_DB`/
+`DENDRITE_INCIDENT_DB`/`DENDRITE_GUARD_DB` at an existing host's data
+directory if not running from the repo root's default `data/` layout —
+e.g. one created by `scripts/launch_host_a.sh`/`scripts/launch_host_XYZ.sh`
+for local dev, or `/var/lib/dendrite/*.sqlite3` for a packaged `.deb`
+install (see `packaging/dendrited.service`; needs read access as the
+`dendrite` user/group, and an output directory writable by whoever runs
+it, since `/var/lib/dendrite` itself is `0750 dendrite:dendrite`).
