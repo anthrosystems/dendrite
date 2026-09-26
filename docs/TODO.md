@@ -51,9 +51,11 @@ indefinitely without a reason.
   A built `ui/dist` served by `dendrited` (`DENDRITE_UI_DIR`) is now
   available — this is otherwise unblocked.
 
-- [ ] Set a real `maintainer` contact in `crates/dendrited/Cargo.toml`'s
-  `[package.metadata.deb]` before actually distributing the `.deb` — it's
-  currently the placeholder `Anthrosystems <packaging@anthrosys.example>`.
+- [x] Set a real `maintainer` contact in `crates/dendrited/Cargo.toml`'s
+  `[package.metadata.deb]` before actually distributing the `.deb`.
+  **Done**: set to a personal GitHub noreply address
+  (`users.noreply.github.com`) rather than a placeholder domain or a
+  real personal inbox — private, but still a real, deliverable address.
 
 - [ ] Run `scripts/build-deb.sh` somewhere with a real `bpf-linker`/nightly
   toolchain and confirm the resulting `.deb` installs and starts correctly

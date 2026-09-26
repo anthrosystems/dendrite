@@ -41,9 +41,7 @@ uuid = { version = "1", features = ["v4"] }
 # source prefix), but the eBPF object and the built UI use toolchains
 # outside plain `cargo build` and must be produced first.
 [package.metadata.deb]
-# TODO: replace with a real maintainer contact before this is actually
-# published/distributed.
-maintainer = "Anthrosystems <packaging@anthrosys.example>"
+maintainer = "Gr1MB <75539121+C7YPT0N1C@users.noreply.github.com>"
 copyright = "2026, Anthrosystems"
 extended-description = """\
 Dendrite is a Linux-native endpoint security daemon: eBPF/fanotify \
