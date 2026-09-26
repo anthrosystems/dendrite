@@ -24,5 +24,5 @@ echo "=== Building UI (ui/dist) ==="
         npm run build
 )
 
-echo "=== Building .deb (cargo-deb builds dendrited + dendrite-cli + dendrite-ui-server + dendrite-magi itself) ==="
+echo "=== Building .deb (cargo-deb builds dendrited + dendrite-cli + dendrite-ui-server + dendrite-magi + dendrite-guard itself) ==="
 cargo deb -p dendrited "$@"

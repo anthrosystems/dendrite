@@ -3,12 +3,12 @@ use crate::{
     AntiserumAttestation, AntiserumError, AntiserumKnowledgeAcceptanceResult,
     AntiserumPackageDetail, AntiserumPackageOrigin, AntiserumPackageStore, AntiserumPackageSummary,
     AntiserumPayload, AntiserumVerificationKey, AttackChainRecord, BuiltPayloadSet,
-    CreateAntiserumRequest, CveKnowledgeBundle, CveKnowledgeRecord, GuardService, GuardStoreError,
-    IncidentService, IncidentStoreError, InstanceKeyRecord, KnowledgeError, KnowledgeService,
-    MagiIpcClient, SelfStore, SelfStoreError, SignedAntiserumPackage, VulnerabilityCandidate,
-    VulnerabilityError, VulnerabilityService, automatic_attack_chain_request, build_payloads,
-    build_signed_package, enforce_automatic_export_ceiling, verification_key_from_package,
-    verify_signed_package,
+    CreateAntiserumRequest, CveKnowledgeBundle, CveKnowledgeRecord, GuardIpcClient, GuardService,
+    GuardStoreError, IncidentService, IncidentStoreError, InstanceKeyRecord, KnowledgeError,
+    KnowledgeService, MagiIpcClient, SelfStore, SelfStoreError, SignedAntiserumPackage,
+    VulnerabilityCandidate, VulnerabilityError, VulnerabilityService,
+    automatic_attack_chain_request, build_payloads, build_signed_package,
+    enforce_automatic_export_ceiling, verification_key_from_package, verify_signed_package,
 };
 use dendrite_memory::model::{
     DecayPolicy, DecayRate, MemoryConfidence, MemoryNode, MemoryNodeId, MemoryNodeKind,
@@ -219,29 +219,22 @@ pub struct DaemonCore {
 
 impl DaemonCore {
     pub fn open(memory_path: &str) -> Result<Self, DaemonError> {
-        Self::open_with_stores(":memory:", memory_path, ":memory:", ":memory:")
+        Self::open_with_stores(":memory:", memory_path, ":memory:")
     }
 
     pub fn open_with_incidents(
         memory_path: &str,
         incident_path: &str,
     ) -> Result<Self, DaemonError> {
-        Self::open_with_stores(":memory:", memory_path, incident_path, ":memory:")
+        Self::open_with_stores(":memory:", memory_path, incident_path)
     }
 
     pub fn open_with_stores(
         self_path: &str,
         memory_path: &str,
         incident_path: &str,
-        guard_path: &str,
     ) -> Result<Self, DaemonError> {
-        Self::open_with_tiered_stores(
-            self_path,
-            memory_path,
-            ":memory:",
-            incident_path,
-            guard_path,
-        )
+        Self::open_with_tiered_stores(self_path, memory_path, ":memory:", incident_path)
     }
 
     pub fn open_with_tiered_stores(
@@ -249,11 +242,10 @@ impl DaemonCore {
         stm_path: &str,
         ltm_path: &str,
         incident_path: &str,
-        guard_path: &str,
     ) -> Result<Self, DaemonError> {
         let memory = MemoryStore::open_tiered(stm_path, ltm_path)?;
         memory.initialise()?;
-        Self::open_with_memory_store(self_path, memory, incident_path, guard_path, true)
+        Self::open_with_memory_store(self_path, memory, incident_path, true)
     }
 
     /// Opens another core around an existing tiered MemoryStore reader. The
@@ -264,16 +256,14 @@ impl DaemonCore {
         self_path: &str,
         memory: MemoryStore,
         incident_path: &str,
-        guard_path: &str,
     ) -> Result<Self, DaemonError> {
-        Self::open_with_memory_store(self_path, memory, incident_path, guard_path, false)
+        Self::open_with_memory_store(self_path, memory, incident_path, false)
     }
 
     fn open_with_memory_store(
         self_path: &str,
         memory: MemoryStore,
         incident_path: &str,
-        guard_path: &str,
         run_memory_startup_maintenance: bool,
     ) -> Result<Self, DaemonError> {
         let mut self_store = SelfStore::open(self_path)?;
@@ -296,7 +286,7 @@ impl DaemonCore {
             knowledge: KnowledgeService::open(incident_path)?,
             incidents: IncidentService::open(incident_path)?,
             actions: ActionService::open(incident_path)?,
-            guard: GuardService::open(guard_path)?,
+            guard: GuardService::new(),
             observations_ingested: 0,
             telemetry_recent: VecDeque::with_capacity(512),
             telemetry_sources: Vec::new(),
@@ -1265,6 +1255,15 @@ impl DaemonCore {
     pub fn set_magi_socket_path(&mut self, socket_path: std::path::PathBuf) {
         self.actions
             .set_magi_evaluator(Box::new(MagiIpcClient::new(socket_path)));
+    }
+
+    /// Points Guard evaluation at a real `dendrite-guard` process over its
+    /// Unix socket, overriding `GuardService::new`'s dev default
+    /// (`DEFAULT_GUARD_SOCKET_PATH`). `DaemonRuntime::open` calls this with
+    /// the configured `DENDRITE_GUARD_SOCKET` path.
+    pub fn set_guard_socket_path(&mut self, socket_path: std::path::PathBuf) {
+        self.guard
+            .set_guard_evaluator(Box::new(GuardIpcClient::new(socket_path)));
     }
 
     pub fn expire_memory(&self, now: u64) -> Result<(), DaemonError> {
@@ -2592,9 +2591,10 @@ fn object_expiry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MagiEvaluator;
+    use crate::{GuardEvaluator, GuardStoreError, MagiEvaluator};
     use dendrite_protocol::{
-        Evaluation, Evaluator, EvaluatorVerdict, ObjectDescriptor, ObservationId,
+        ActionProposal, Evaluation, Evaluator, EvaluatorVerdict, GuardDecision, GuardStatusDto,
+        IntegrityFindingDto, ObjectDescriptor, ObservationId, TrustState,
     };
 
     /// `DaemonCore::open` (unlike `DaemonRuntime::open`) never wires in a
@@ -2652,6 +2652,51 @@ mod tests {
                     "MELCHIOR-1: test evaluator".into(),
                 ),
             ]
+        }
+    }
+
+    /// `DaemonCore::open` also never wires in a `guard_socket_path`, so its
+    /// `GuardService` defaults to a real `GuardIpcClient` pointed at
+    /// nothing too — correctly fail-closed (`Compromised`/`Deny`) with no
+    /// `dendrite-guard` process to answer it. Tests here that need a
+    /// working (trusted) Guard swap this in instead, the same way
+    /// `TestRuleMagiEvaluator` stands in for MAGI above.
+    struct TrustedGuardEvaluator;
+
+    impl GuardEvaluator for TrustedGuardEvaluator {
+        fn trust_state(&self) -> TrustState {
+            TrustState::Trusted
+        }
+
+        fn evaluate_authority(&self, _proposal: &ActionProposal) -> GuardDecision {
+            GuardDecision::Allow
+        }
+
+        fn status(&self) -> Result<GuardStatusDto, GuardStoreError> {
+            Ok(GuardStatusDto {
+                trust_state: TrustState::Trusted.as_str().into(),
+                authority: "available".into(),
+                findings_count: 0,
+            })
+        }
+
+        fn findings(&self) -> Result<Vec<IntegrityFindingDto>, GuardStoreError> {
+            Ok(Vec::new())
+        }
+
+        #[cfg(debug_assertions)]
+        fn debug_set_state(&self, _state: &str) -> Result<(), GuardStoreError> {
+            Ok(())
+        }
+
+        #[cfg(debug_assertions)]
+        fn debug_record_finding(
+            &self,
+            _target: &str,
+            _severity: &str,
+            _description: &str,
+        ) -> Result<(), GuardStoreError> {
+            Ok(())
         }
     }
 
@@ -2893,6 +2938,8 @@ mod tests {
         let mut core = DaemonCore::open(":memory:").unwrap();
         core.actions
             .set_magi_evaluator(Box::new(TestRuleMagiEvaluator));
+        core.guard
+            .set_guard_evaluator(Box::new(TrustedGuardEvaluator));
         let instance_id = core.instance_id().to_string();
         let threat_edge = observation(
             "threat-edge",
@@ -3051,6 +3098,8 @@ mod tests {
     #[test]
     fn reinforcing_the_same_chain_does_not_create_a_second_automatic_export() {
         let mut core = DaemonCore::open(":memory:").unwrap();
+        core.guard
+            .set_guard_evaluator(Box::new(TrustedGuardEvaluator));
 
         let threat_edge = observation(
             "threat-edge",
@@ -3101,7 +3150,9 @@ mod tests {
 
     #[test]
     fn health_check_reports_ok_when_every_store_responds() {
-        let core = DaemonCore::open(":memory:").unwrap();
+        let mut core = DaemonCore::open(":memory:").unwrap();
+        core.guard
+            .set_guard_evaluator(Box::new(TrustedGuardEvaluator));
         let health = core.health_check().unwrap();
         assert_eq!(health.daemon, "ok");
         assert_eq!(health.memory, "ok");

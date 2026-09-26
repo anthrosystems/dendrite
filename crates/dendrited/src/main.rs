@@ -17,9 +17,6 @@ fn main() {
     if let Ok(value) = env::var("DENDRITE_INCIDENT_DB") {
         config.incident_path = PathBuf::from(value);
     }
-    if let Ok(value) = env::var("DENDRITE_GUARD_DB") {
-        config.guard_path = PathBuf::from(value);
-    }
     if let Ok(value) = env::var("DENDRITE_CVE_SNAPSHOT") {
         config.cve_snapshot_path = PathBuf::from(value);
     }
@@ -28,6 +25,9 @@ fn main() {
     }
     if let Ok(value) = env::var("DENDRITE_MAGI_SOCKET") {
         config.magi_socket_path = PathBuf::from(value);
+    }
+    if let Ok(value) = env::var("DENDRITE_GUARD_SOCKET") {
+        config.guard_socket_path = PathBuf::from(value);
     }
     if let Ok(value) = env::var("DENDRITE_HTTP_ADDR")
         && let Ok(address) = value.parse()

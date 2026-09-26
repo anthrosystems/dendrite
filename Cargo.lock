@@ -238,6 +238,8 @@ name = "dendrite-guard"
 version = "0.1.0"
 dependencies = [
  "dendrite-protocol",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

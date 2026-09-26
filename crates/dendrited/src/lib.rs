@@ -37,7 +37,9 @@ pub use antiserum::{
 };
 pub use core::{DaemonCore, DaemonError, IngestionOutcome};
 pub use culture::{CultureCampaign, CultureError, CultureManager, CultureSources};
-pub use guard::{GuardService, GuardStoreError};
+pub use guard::{
+    DEFAULT_GUARD_SOCKET_PATH, GuardEvaluator, GuardIpcClient, GuardService, GuardStoreError,
+};
 pub use incidents::{IncidentService, IncidentStoreError};
 pub use knowledge::{
     AttackChainClassification, BehaviourDefinition, CorrelationKeyRecord, KnowledgeError,

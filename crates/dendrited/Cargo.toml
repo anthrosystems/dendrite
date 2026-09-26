@@ -57,18 +57,20 @@ assets = [
     ["target/release/dendrite-cli", "usr/bin/dendrite-cli", "755"],
     ["target/release/dendrite-ui-server", "usr/bin/dendrite-ui-server", "755"],
     ["target/release/dendrite-magi", "usr/bin/dendrite-magi", "755"],
+    ["target/release/dendrite-guard", "usr/bin/dendrite-guard", "755"],
     ["../../ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf", "usr/lib/dendrite/dendrite-ebpf", "644"],
     ["../../ui/dist/**/*", "usr/share/dendrite/ui/", "644"],
     ["../../packaging/dendrited.env.example", "etc/dendrite/dendrited.env", "644"],
     ["../../packaging/dendrite-magi.env.example", "etc/dendrite/dendrite-magi.env", "644"],
 ]
 
-# Three independent systemd units, one package: dendrited (the security
+# Four independent systemd units, one package: dendrited (the security
 # daemon itself), dendrite-ui (the UI's static file server — see
-# packaging/dendrite-ui.service) and dendrite-magi (MAGI quorum evaluation —
-# see packaging/dendrite-magi.service). `unit-name` disambiguates which
-# `packaging/*.service` file each block installs/enables, since
-# `maintainer-scripts` now holds three.
+# packaging/dendrite-ui.service), dendrite-magi (MAGI quorum evaluation —
+# see packaging/dendrite-magi.service) and dendrite-guard (trust/integrity
+# state — see packaging/dendrite-guard.service). `unit-name` disambiguates
+# which `packaging/*.service` file each block installs/enables, since
+# `maintainer-scripts` now holds four.
 [[package.metadata.deb.systemd-units]]
 unit-name = "dendrited"
 enable = true
@@ -81,5 +83,10 @@ start = true
 
 [[package.metadata.deb.systemd-units]]
 unit-name = "dendrite-magi"
+enable = true
+start = true
+
+[[package.metadata.deb.systemd-units]]
+unit-name = "dendrite-guard"
 enable = true
 start = true

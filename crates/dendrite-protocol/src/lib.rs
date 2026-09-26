@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod detection;
+pub mod guard_ipc;
 pub mod ids;
 pub mod ipc;
 pub mod magi_ipc;
@@ -15,6 +16,7 @@ pub use detection::{
     Confidence, EntityKind, Evidence, EvidenceCandidate, EvidenceObjectRef, EvidenceSource,
     Incident, ObjectDescriptor, Observation, ObservationKind, Severity,
 };
+pub use guard_ipc::{GuardRequest, GuardResponse};
 pub use ids::{ActionProposalId, EvidenceId, IncidentId, ObjectId, ObservationId};
 pub use ipc::{
     ActionDetailDto, ActionSummaryDto, CreateActionDto, CveKnowledgeStatusDto, DaemonStatusDto,

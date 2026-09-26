@@ -27,9 +27,11 @@ surfaces respond:
 
 ```bash
 mkdir -p /tmp/dendrite-smoke && cd /tmp/dendrite-smoke
+/path/to/target/debug/dendrite-guard &
+# "dendrite-guard: listening on /tmp/dendrite-guard.sock (data/guard.sqlite3)"
+
 DENDRITE_SELF_DB=self.sqlite3 DENDRITE_STM_DB=stm.sqlite3 \
 DENDRITE_LTM_DB=ltm.sqlite3 DENDRITE_INCIDENT_DB=incidents.sqlite3 \
-DENDRITE_GUARD_DB=guard.sqlite3 \
   /path/to/target/debug/dendrited &
 
 /path/to/target/debug/dendrite-cli status
@@ -92,9 +94,11 @@ DENDRITE_SELF_DB=/tmp/dendrite-smoke/self.sqlite3 \
 DENDRITE_STM_DB=/tmp/dendrite-smoke/stm.sqlite3 \
 DENDRITE_LTM_DB=/tmp/dendrite-smoke/ltm.sqlite3 \
 DENDRITE_INCIDENT_DB=/tmp/dendrite-smoke/incidents.sqlite3 \
-DENDRITE_GUARD_DB=/tmp/dendrite-smoke/guard.sqlite3 \
 DENDRITE_MAGI_SOCKET=/tmp/dendrite-magi.sock \
   /path/to/target/debug/dendrited
+# also start terminal 0: /path/to/target/debug/dendrite-guard, or every
+# proposal below will read guard: deny/not_authorised regardless of MAGI —
+# see step 5 for exercising Guard on its own
 
 # terminal 3: propose and evaluate a real action through the CLI
 dendrite debug seed-incident e2e-test
@@ -113,7 +117,55 @@ second action the same way. Confirm the fallback: every seat now reads
 denied`, and the proposal ends `[not_authorised]` — not a hang, and not a
 silent approval.
 
-## 5. Antiserum export pipeline
+## 5. Guard, as its own process
+
+Confirms `dendrited` actually reaches a separate `dendrite-guard` process
+over its Unix socket for trust-state/authority checks, that changes made
+through `dendrite-guard`'s own persistent state are visible to `dendrited`,
+and that an unreachable `dendrite-guard` correctly fails closed to
+`Compromised`/`Deny` (not MAGI's abstain — Guard has only one voice on
+trust, so there's no quorum for "unreachable" to defer to).
+
+```bash
+# terminal 1: the Guard process (owns guard.sqlite3 itself now, not dendrited)
+/path/to/target/debug/dendrite-guard
+# "dendrite-guard: listening on /tmp/dendrite-guard.sock (data/guard.sqlite3)"
+
+# terminal 2: dendrited, pointed at it (defaults to the same path if unset)
+DENDRITE_SELF_DB=/tmp/dendrite-smoke/self.sqlite3 \
+DENDRITE_STM_DB=/tmp/dendrite-smoke/stm.sqlite3 \
+DENDRITE_LTM_DB=/tmp/dendrite-smoke/ltm.sqlite3 \
+DENDRITE_INCIDENT_DB=/tmp/dendrite-smoke/incidents.sqlite3 \
+DENDRITE_GUARD_SOCKET=/tmp/dendrite-guard.sock \
+  /path/to/target/debug/dendrited
+
+# terminal 3: read trust state and propose/evaluate a real action
+dendrite guard
+dendrite debug seed-incident e2e-test
+dendrite actions propose <INCIDENT_ID> observe <PROCESS_OBJECT_ID>
+dendrite actions evaluate <PROPOSAL_ID>
+```
+
+A pass shows `trust_state: trusted` from `dendrite guard`, and the proposal
+completes (`guard: allow`, `[completed]`, assuming MAGI also approves).
+
+Now exercise the persistent-state path: `dendrite debug guard-state
+compromised` (a debug-only surface, refused outright in a release build —
+see `crates/dendrite-guard/README.md`), then `dendrite guard` again from
+the same or a fresh terminal. Confirm it now reads `trust_state:
+compromised` — this is `dendrite-guard`'s own SQLite state persisting the
+change, not something `dendrited` computed. Propose/evaluate a new action
+and confirm it's denied (`guard: deny`, `[not_authorised]`).
+
+Reset with `dendrite debug guard-state trusted`, confirm a fresh proposal
+completes again, then kill the `dendrite-guard` process (terminal 1) and
+propose/evaluate one more action. Confirm the fallback: `guard: deny`,
+`[not_authorised]` — and, separately, that `dendrite guard` itself now
+*errors* (rather than printing a fabricated status) because `status()`/
+`findings()` are kept genuinely fallible, not defaulted, since they feed
+signed Antiserum attestations (step 6).
+
+## 6. Antiserum export pipeline
 
 ```bash
 cargo run -p dendrited --example antiserum_smoke -- /tmp/dendrite-smoke/antiserum-out
@@ -126,7 +178,7 @@ some real incidents/graph data in it for a non-trivial run. A pass prints
 rejection all succeeded. See `crates/dendrited/README.md`'s Testing section
 for what this covers and where it reads/writes.
 
-## 6. Second-instance Antiserum trust-boundary validation
+## 7. Second-instance Antiserum trust-boundary validation
 
 Exercises cross-host export/import without needing a second physical
 machine — see `docs/ROADMAP.md`'s "Second-instance Antiserum validation"
@@ -135,29 +187,33 @@ what each step should confirm. `scripts/launch_host_a.sh` and
 `scripts/launch_host_XYZ.sh [HOST_NAME]` automate standing up an isolated
 second instance on the same machine for this.
 
-## 7. Packaging (`.deb`)
+## 8. Packaging (`.deb`)
 
 ```bash
 ./scripts/build-deb.sh
 ```
 
 Then, in a disposable container or VM (not your main dev machine — this
-installs a system user and three systemd services):
+installs a system user and four systemd services):
 
 ```bash
 sudo dpkg -i target/debian/dendrite_*.deb
 systemctl status dendrited
 systemctl status dendrite-ui
 systemctl status dendrite-magi
+systemctl status dendrite-guard
 sudo systemctl disable --now dendrite-ui     # confirm dendrited is unaffected
 sudo systemctl disable --now dendrite-magi   # confirm dendrited fails closed (see step 4), not down
+sudo systemctl disable --now dendrite-guard  # confirm dendrited fails closed (see step 5), not down
 sudo dpkg -r dendrite   # confirm /var/lib/dendrite and /etc/dendrite survive
 sudo dpkg -P dendrite   # confirm purge removes them
 ```
 
-Confirm both services start (two independent systemd units, one package —
-see `crates/dendrite-ui-server/README.md` for why the UI is split out), that
-disabling `dendrite-ui` doesn't affect `dendrited` or vice versa, the
+Confirm all four services start (four independent systemd units, one
+package — see `crates/dendrite-ui-server/README.md` for why the UI is
+split out, and `crates/dendrite-magi/README.md`/`crates/dendrite-guard/README.md`
+for MAGI/Guard), that disabling `dendrite-ui`/`dendrite-magi`/
+`dendrite-guard` doesn't affect `dendrited` or vice versa, the
 user/group exist, `/etc/dendrite/dendrited.env` is preserved across a plain
 removal and only deleted on purge, and (if your
 test environment has a real `bpf-linker`/nightly toolchain, unlike a sandbox

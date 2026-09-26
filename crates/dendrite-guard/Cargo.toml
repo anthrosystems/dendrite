@@ -3,5 +3,11 @@ name = "dendrite-guard"
 version = "0.1.0"
 edition = "2024"
 
+description = "Dendrite's trust/integrity/recovery boundary (Guard) — its own process, reached by dendrited over a Unix socket"
+license = "Apache-2.0"
+repository = "https://github.com/anthrosystems/dendrite"
+
 [dependencies]
 dendrite-protocol = { path = "../dendrite-protocol" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1"

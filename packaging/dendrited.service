@@ -38,10 +38,10 @@ Environment=DENDRITE_SELF_DB=/var/lib/dendrite/self.sqlite3
 Environment=DENDRITE_STM_DB=/var/lib/dendrite/stm.sqlite3
 Environment=DENDRITE_LTM_DB=/var/lib/dendrite/ltm.sqlite3
 Environment=DENDRITE_INCIDENT_DB=/var/lib/dendrite/incidents.sqlite3
-Environment=DENDRITE_GUARD_DB=/var/lib/dendrite/guard.sqlite3
 Environment=DENDRITE_CVE_SNAPSHOT=/etc/dendrite/cve-snapshot.json
 Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
 Environment=DENDRITE_MAGI_SOCKET=/run/dendrite/dendrite-magi.sock
+Environment=DENDRITE_GUARD_SOCKET=/run/dendrite/dendrite-guard.sock
 Environment=DENDRITE_SOCKET_GROUP=dendrite
 Environment=DENDRITE_SOCKET_MODE=0660
 Environment=DENDRITE_HTTP_ADDR=127.0.0.1:8766

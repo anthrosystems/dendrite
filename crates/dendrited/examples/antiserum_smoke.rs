@@ -34,16 +34,14 @@ fn run() -> Result<(), String> {
     let ltm_db = env::var("DENDRITE_LTM_DB").unwrap_or_else(|_| "data/ltm.sqlite3".into());
     let incidents_db =
         env::var("DENDRITE_INCIDENT_DB").unwrap_or_else(|_| "data/incidents.sqlite3".into());
-    let guard_db = env::var("DENDRITE_GUARD_DB").unwrap_or_else(|_| "data/guard.sqlite3".into());
     let output_dir = env::args()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("data/antiserum-smoke"));
     let now = unix_now()?;
 
-    let mut core =
-        DaemonCore::open_with_tiered_stores(&self_db, &stm_db, &ltm_db, &incidents_db, &guard_db)
-            .map_err(debug_error)?;
+    let mut core = DaemonCore::open_with_tiered_stores(&self_db, &stm_db, &ltm_db, &incidents_db)
+        .map_err(debug_error)?;
     let instance_id = core.instance_id().to_owned();
     let signing_key = core.signing_key_status();
 
@@ -136,8 +134,7 @@ fn run() -> Result<(), String> {
     // Replay protection is exercised against an isolated receiver so the smoke
     // package itself remains importable through the real Analysis UI afterwards.
     let mut replay_receiver =
-        DaemonCore::open_with_stores(":memory:", ":memory:", ":memory:", ":memory:")
-            .map_err(debug_error)?;
+        DaemonCore::open_with_stores(":memory:", ":memory:", ":memory:").map_err(debug_error)?;
     replay_receiver
         .verify_and_record_antiserum_sequence(&package, &verifier, now)
         .map_err(debug_error)?;

@@ -363,6 +363,8 @@ RECOVERING
 
 Guard sits in the executable authorisation path. Even if quorum approves and policy allows, Guard can remove authority.
 
+Guard's trust state and integrity findings now live in their own process (`dendrite-guard`), reached from `dendrited` over a Unix socket rather than in-process — see `crates/dendrite-guard/README.md` and `docs/ROADMAP.md`'s Batch 7 notes for why, and for the fail-closed behaviour that follows from it. Unlike MAGI's abstain-on-unreachable choice, an unreachable `dendrite-guard` reports trust as `COMPROMISED` and every authority check as `DENY`: Guard is a single voice on trust rather than a quorum, so there is no "abstain" for the other seats to outvote — collapsing straight to the same denial a real detected compromise produces is the only fail-closed answer available. `dendrite-guard` also owns the persistent `guard.sqlite3` store itself now; `dendrited` holds none of Guard's state directly.
+
 ```text
 quorum: APPROVED
 policy: ALLOW

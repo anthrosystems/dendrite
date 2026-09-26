@@ -1,0 +1,67 @@
+[Unit]
+Description=Dendrite trust/integrity/recovery boundary (Guard)
+Documentation=https://github.com/anthrosystems/dendrite
+After=network.target local-fs.target
+Before=dendrited.service
+# dendrited is a client of this process's socket, not the other way round —
+# see packaging/dendrite-magi.service for the same reasoning. dendrited's
+# own MagiIpcClient-style client (GuardIpcClient) fails closed (denies
+# authority, reports trust state as compromised) whenever this unit isn't
+# up, so there is no hard `Requires=` in either direction: an operator can
+# stop/restart this unit independently, and dendrited keeps running (just
+# unable to authorise anything privileged) rather than going down with it.
+# `Before=` only orders startup so a fresh boot doesn't race dendrited's
+# first authority check against this socket appearing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dendrite-guard
+Restart=on-failure
+RestartSec=2
+
+# --- Identity ---
+# Same dedicated non-root account as dendrited (created by the package's
+# postinst). This process holds real security state (trust state, integrity
+# findings) but needs none of dendrited's telemetry capabilities — it runs
+# as its own process specifically so a compromise of dendrited itself
+# cannot reach that state directly (see crates/dendrite-guard/README.md and
+# docs/ROADMAP.md).
+User=dendrite
+Group=dendrite
+NoNewPrivileges=yes
+
+# --- Filesystem layout ---
+# Shares dendrited's /var/lib/dendrite state directory for its own
+# guard.sqlite3 (a distinct file, not shared access to dendrited's other
+# databases) and its /run/dendrite runtime directory for the socket, so
+# both processes agree on paths without a second directory to keep in sync.
+StateDirectory=dendrite
+StateDirectoryMode=0750
+RuntimeDirectory=dendrite
+RuntimeDirectoryMode=0750
+
+Environment=DENDRITE_GUARD_DB=/var/lib/dendrite/guard.sqlite3
+Environment=DENDRITE_GUARD_SOCKET=/run/dendrite/dendrite-guard.sock
+
+# --- Sandboxing / hardening ---
+# No telemetry, no eBPF, no network beyond its own socket — lock this down
+# harder than dendrited can be today.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dendrite /run/dendrite
+PrivateTmp=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+
+[Install]
+WantedBy=multi-user.target

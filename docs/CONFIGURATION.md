@@ -12,7 +12,6 @@ This is development-time plumbing. Batch 7 packaging should replace ad-hoc envir
 | `DENDRITE_STM_DB` | `data/stm.sqlite3` | Short Term Memory Graph database |
 | `DENDRITE_LTM_DB` | `data/ltm.sqlite3` | Long Term Memory Graph database |
 | `DENDRITE_INCIDENT_DB` | `data/incidents.sqlite3` | Incidents/evidence database — also backs the vulnerability, CVE, and behaviour-knowledge tables (`VulnerabilityService`/`KnowledgeService` both open this same file; there is no separate vulnerability/knowledge DB path) |
-| `DENDRITE_GUARD_DB` | `data/guard.sqlite3` | Guard trust state / integrity findings database |
 | `DENDRITE_CVE_SNAPSHOT` | `knowledge/cve-snapshot.json` | Bundled CVE/behaviour knowledge, auto-imported once at startup |
 
 If this file exists, it's imported via the same path (and validation) as `vulnerability import` — including the strict `"kind": "graph-relation"` behaviour-condition check documented in `CLI.md`. If it's absent, startup continues normally with no CVE knowledge preloaded. If it exists but fails validation, the failure is logged to stderr rather than aborting startup — a deliberately softer failure mode than the CLI's hard rejection, since this runs unattended rather than as an explicit user action. There is currently no bundled default snapshot shipped in the repo; this is the intended integration point for one once packaging (Batch 7) ships real CVE/behaviour data.
@@ -23,6 +22,7 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 |---|---|---|
 | `DENDRITE_SOCKET` | `/tmp/dendrited.sock` | Unix socket path for `dendrite-cli` IPC |
 | `DENDRITE_MAGI_SOCKET` | `/tmp/dendrite-magi.sock` | Unix socket path `dendrited` connects to for MAGI quorum evaluation (see below) |
+| `DENDRITE_GUARD_SOCKET` | `/tmp/dendrite-guard.sock` | Unix socket path `dendrited` connects to for Guard trust/authority checks (see below) |
 | `DENDRITE_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket |
 | `DENDRITE_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
 | `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address — also serves the live-event WebSocket (see below) |
@@ -48,7 +48,7 @@ Local dev (`npm run dev`) leaves both unset — Vite's own dev-proxy (`ui/vite.c
 
 ### MAGI, and its own process
 
-MAGI quorum evaluation (the Host/User/Environment votes an action proposal needs before it can execute) runs in a separate process, `dendrite-magi`/`dendrite-magi.service`, reached over a Unix socket — the same process-separation reasoning as the UI split above, and the same one planned for `dendrite-guard`: action authority shouldn't be reachable in-process from wherever a compromise of `dendrited` itself might land. See `crates/dendrite-magi/README.md`.
+MAGI quorum evaluation (the Host/User/Environment votes an action proposal needs before it can execute) runs in a separate process, `dendrite-magi`/`dendrite-magi.service`, reached over a Unix socket — the same process-separation reasoning as the UI split above, and the same one behind the Guard split just below: action authority shouldn't be reachable in-process from wherever a compromise of `dendrited` itself might land. See `crates/dendrite-magi/README.md`.
 
 `dendrited` talks to it as a client (`MagiIpcClient`) and is deliberately **fail-closed**: if `dendrite-magi` is unreachable, times out, or isn't running at all, every seat comes back `abstain` rather than the request hanging or silently defaulting to approval. Under the default quorum policy (2 approvals required, an abstain counting toward neither approval nor denial) this means an action can never complete while `dendrite-magi` is down — it is denied, not silently allowed, and not stuck waiting. An operator can see this happening in the CLI's `MAGI:` section of `actions evaluate`/`actions <ID>` output, where each seat's reason string reads `dendrite-magi is unreachable: ...` instead of a real evaluation.
 
@@ -59,6 +59,14 @@ MAGI quorum evaluation (the Host/User/Environment votes an action proposal needs
 | `DENDRITE_MAGI_ENVIRONMENT_SOURCE` | `internal` | Which evaluator backs the Environment seat |
 
 `internal` (the only value implemented today) is `dendrite-magi`'s own built-in rule-based evaluator. These three variables exist now, ahead of that support actually existing, so that hooking an MCP-connected AI agent up to a seat — letting a company's own infrastructure-aware model act as that seat's MAGI vote, as a full replacement for the internal evaluator's authority over that seat, rather than merely advising it — is a configuration change later rather than a code change today. `dendrite-magi` refuses to start if any of these is set to anything other than `internal`, on purpose, rather than silently falling back to the internal evaluator for that seat. See `docs/ROADMAP.md` for the current status of the MCP-backed evaluator work itself (not yet built).
+
+### Guard, and its own process
+
+Guard (the trust state / integrity findings that decide whether `dendrited` currently has authority to act at all) runs in a separate process, `dendrite-guard`/`dendrite-guard.service`, reached over a Unix socket — the same process-separation reasoning as MAGI just above, applied to the one subsystem it matters most for: a compromise of `dendrited` itself must not be able to reach the thing that decides whether `dendrited` still has authority. See `crates/dendrite-guard/README.md`.
+
+Unlike MAGI (a stateless per-request vote), Guard owns real persistent state — `guard.sqlite3` now lives with `dendrite-guard`, not `dendrited` (there is no more `DENDRITE_GUARD_DB` on `dendrited`'s side; see `crates/dendrite-guard/README.md` for that variable, which now belongs to `dendrite-guard` itself).
+
+`dendrited` talks to it as a client (`GuardIpcClient`) and is deliberately **fail-closed**, but differently from MAGI: if `dendrite-guard` is unreachable, times out, or isn't running, the trust state reads as **`Compromised`** and every authority check as **`Deny`** — not abstain, and not a hang. Guard has exactly one voice on trust rather than MAGI's three-way vote, so there's no quorum for "unreachable" to defer to; collapsing straight to the same denial a real detected compromise produces is the only fail-closed answer available. Reading Guard's status or findings (`dendrite guard`) behaves differently again — it fails the request outright rather than reporting a synthetic status, because those calls also feed signed Antiserum attestations, and a fabricated "unreachable" status could misrepresent host integrity in an exported package. `DENDRITE_GUARD_SOCKET` is listed under "IPC and network" above.
 
 ## Telemetry collectors
 

@@ -41,7 +41,6 @@ pub struct RuntimeConfig {
     pub stm_path: PathBuf,
     pub ltm_path: PathBuf,
     pub incident_path: PathBuf,
-    pub guard_path: PathBuf,
     pub cve_snapshot_path: PathBuf,
     pub socket_path: PathBuf,
     pub socket_mode: u32,
@@ -53,6 +52,14 @@ pub struct RuntimeConfig {
     /// `DENDRITE_MAGI_SOCKET` has somewhere to land before
     /// `DaemonRuntime::open` wires it into `DaemonCore`.
     pub magi_socket_path: PathBuf,
+    /// Unix socket for the separate `dendrite-guard` process (see
+    /// `docs/CONFIGURATION.md`). Defaults to
+    /// `crate::DEFAULT_GUARD_SOCKET_PATH` — this field exists mainly so
+    /// `DENDRITE_GUARD_SOCKET` has somewhere to land before
+    /// `DaemonRuntime::open` wires it into `DaemonCore`. `dendrite-guard`
+    /// itself owns `guard.sqlite3` now (via its own `DENDRITE_GUARD_DB`),
+    /// so `dendrited` no longer opens a guard database path at all.
+    pub guard_socket_path: PathBuf,
     pub watch_mounts: Vec<PathBuf>,
     pub watch_include_paths: Vec<PathBuf>,
     pub watch_exclude_paths: Vec<PathBuf>,
@@ -69,7 +76,6 @@ impl RuntimeConfig {
             stm_path: PathBuf::from("data/stm.sqlite3"),
             ltm_path: PathBuf::from("data/ltm.sqlite3"),
             incident_path: PathBuf::from("data/incidents.sqlite3"),
-            guard_path: PathBuf::from("data/guard.sqlite3"),
             cve_snapshot_path: PathBuf::from("knowledge/cve-snapshot.json"),
             socket_path: PathBuf::from("/tmp/dendrited.sock"),
             socket_mode: 0o660,
@@ -78,6 +84,7 @@ impl RuntimeConfig {
                 .parse()
                 .expect("default HTTP address must be valid"),
             magi_socket_path: PathBuf::from(crate::DEFAULT_MAGI_SOCKET_PATH),
+            guard_socket_path: PathBuf::from(crate::DEFAULT_GUARD_SOCKET_PATH),
             watch_mounts: Vec::new(),
             watch_include_paths: Vec::new(),
             watch_exclude_paths: Vec::new(),
@@ -314,7 +321,6 @@ impl DaemonRuntime {
         ensure_parent(&config.stm_path)?;
         ensure_parent(&config.ltm_path)?;
         ensure_parent(&config.incident_path)?;
-        ensure_parent(&config.guard_path)?;
         ensure_parent(&config.socket_path)?;
         if config.socket_path.exists() {
             if UnixStream::connect(&config.socket_path).is_ok() {
@@ -342,10 +348,9 @@ impl DaemonRuntime {
         let stm = config.stm_path.to_string_lossy().into_owned();
         let ltm = config.ltm_path.to_string_lossy().into_owned();
         let incidents = config.incident_path.to_string_lossy().into_owned();
-        let guard = config.guard_path.to_string_lossy().into_owned();
-        let mut core =
-            DaemonCore::open_with_tiered_stores(&self_store, &stm, &ltm, &incidents, &guard)?;
+        let mut core = DaemonCore::open_with_tiered_stores(&self_store, &stm, &ltm, &incidents)?;
         core.set_magi_socket_path(config.magi_socket_path.clone());
+        core.set_guard_socket_path(config.guard_socket_path.clone());
         let mut vulnerability = VulnerabilityService::open(&incidents)?;
         let now = unix_now();
         if config.cve_snapshot_path.exists()
@@ -384,13 +389,11 @@ impl DaemonRuntime {
             self_path: self_store.clone(),
             memory: priority_memory,
             incident_path: incidents.clone(),
-            guard_path: guard.clone(),
         };
         let routine_stores = IngestionWorkerStores {
             self_path: self_store,
             memory: routine_memory,
             incident_path: incidents,
-            guard_path: guard,
         };
         spawn_priority_worker(
             priority_rx,
@@ -1002,7 +1005,6 @@ struct IngestionWorkerStores {
     self_path: String,
     memory: MemoryStore,
     incident_path: String,
-    guard_path: String,
 }
 
 const ROUTINE_BATCH_SIZE: usize = 200;
@@ -1036,20 +1038,15 @@ fn spawn_priority_worker(
                 self_path,
                 memory,
                 incident_path,
-                guard_path,
             } = stores;
-            let mut core = match DaemonCore::open_with_shared_memory(
-                &self_path,
-                memory,
-                &incident_path,
-                &guard_path,
-            ) {
-                Ok(core) => core,
-                Err(error) => {
-                    eprintln!("priority ingestion worker failed to open stores: {error:?}");
-                    return;
-                }
-            };
+            let mut core =
+                match DaemonCore::open_with_shared_memory(&self_path, memory, &incident_path) {
+                    Ok(core) => core,
+                    Err(error) => {
+                        eprintln!("priority ingestion worker failed to open stores: {error:?}");
+                        return;
+                    }
+                };
 
             while let Ok(job) = priority_rx.recv() {
                 let lane = IngestionLane::Priority;
@@ -1092,20 +1089,15 @@ fn spawn_routine_worker(
                 self_path,
                 memory,
                 incident_path,
-                guard_path,
             } = stores;
-            let mut core = match DaemonCore::open_with_shared_memory(
-                &self_path,
-                memory,
-                &incident_path,
-                &guard_path,
-            ) {
-                Ok(core) => core,
-                Err(error) => {
-                    eprintln!("routine ingestion worker failed to open stores: {error:?}");
-                    return;
-                }
-            };
+            let mut core =
+                match DaemonCore::open_with_shared_memory(&self_path, memory, &incident_path) {
+                    Ok(core) => core,
+                    Err(error) => {
+                        eprintln!("routine ingestion worker failed to open stores: {error:?}");
+                        return;
+                    }
+                };
 
             let mut last_lifecycle_sweep = Instant::now();
             loop {
