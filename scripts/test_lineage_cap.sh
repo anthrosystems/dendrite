@@ -11,7 +11,7 @@ Usage: $0 [--hops N] [--keep-running] [--cleanup]
 Exercises the provenance lineage cap (MemoryProvenance::MAX_PROVENANCE_LINEAGE,
 currently 10 — see crates/dendrite-memory/src/model.rs) end-to-end: spins up a
 chain of N fully independent Dendrite instances (outside the repository, see
-launch_host_b.sh for the same underlying approach), seeds one object on the
+launch_host_XYZ.sh for the same underlying approach), seeds one object on the
 first, and relays it hop by hop — export -> download -> import -> accept ->
 re-export from the new host -> ... — confirming the final host's lineage
 array is capped at 10 entries (oldest dropped) rather than growing

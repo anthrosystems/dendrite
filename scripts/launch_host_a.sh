@@ -31,7 +31,7 @@ Flags:
   -h, --help   Show this help.
 
 There is no option to remove Host A's own folder — that is the repository
-checkout itself. For disposable additional hosts, use launch_host_b.sh
+checkout itself. For disposable additional hosts, use launch_host_XYZ.sh
 (which supports --remove-host) instead.
 USAGE
 }
