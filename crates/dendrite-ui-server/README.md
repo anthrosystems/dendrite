@@ -10,7 +10,7 @@ It serves real files under `DENDRITE_UI_DIR` as-is, and falls back to `index.htm
 |---|---|---|
 | `DENDRITE_UI_DIR` | required, no default | Directory containing the built UI (`ui/dist`). The process refuses to start if this isn't set or doesn't exist |
 | `DENDRITE_UI_ADDR` | `127.0.0.1:8767` | Bind address for the static file server |
-| `DENDRITE_UI_API_ORIGIN` | unset (same-origin) | Where `dendrited`'s HTTP/WebSocket API lives, from the browser's point of view. Served to the UI at runtime as `/dendrite-config.json` (`{"apiOrigin": ...}`) rather than baked into the JS bundle — see below |
+| `DENDRITE_UI_API_ORIGIN` | unset (same-origin) at the binary level; the `.deb`'s shipped conffile (`packaging/dendrite-ui.env.example`) sets it to `http://127.0.0.1:8766` | Where `dendrited`'s HTTP/WebSocket API lives, from the browser's point of view. Served to the UI at runtime as `/dendrite-config.json` (`{"apiOrigin": ...}`) rather than baked into the JS bundle — see below |
 
 ## Why a separate process from `dendrited`
 

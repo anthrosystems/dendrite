@@ -30,7 +30,11 @@ Environment=DENDRITE_UI_DIR=/usr/share/dendrite/ui
 Environment=DENDRITE_UI_ADDR=127.0.0.1:8767
 # DENDRITE_UI_API_ORIGIN (where the UI's JS should reach dendrited) is
 # deployment-specific; set via EnvironmentFile below rather than hardcoded
-# here — unset means "same origin as the UI itself", the common case.
+# here. The shipped conffile (packaging/dendrite-ui.env.example) defaults
+# it to http://127.0.0.1:8766, matching this package's own dendrited.service
+# — the stock install is two same-host processes on two fixed ports, not
+# one origin behind a reverse proxy, so unset ("same origin as the UI
+# itself") is not actually the common case here; see that file's comment.
 EnvironmentFile=-/etc/dendrite/dendrite-ui.env
 
 # --- Sandboxing / hardening ---

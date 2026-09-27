@@ -59,10 +59,13 @@ fn main() {
     let addr = env::var("DENDRITE_UI_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
     // `dendrited`'s HTTP/WebSocket origin, e.g. "http://192.168.1.50:8766",
     // when it's reachable somewhere other than this same origin. Unset
-    // (the packaged default) means the UI assumes same-origin `/api`/`/ws`
-    // — only true if something else (a reverse proxy) puts both behind one
-    // address; the out-of-the-box packaged layout is cross-origin, so a
-    // real deployment normally does set this.
+    // means the UI assumes same-origin `/api`/`/ws` — only true if
+    // something else (a reverse proxy) puts both behind one address. The
+    // out-of-the-box packaged layout is cross-origin (two same-host
+    // processes on two fixed ports), so the shipped conffile
+    // (`packaging/dendrite-ui.env.example`) sets this by default rather
+    // than leaving it unset; only a reverse-proxied deployment should
+    // clear it back to same-origin.
     let api_origin = env::var("DENDRITE_UI_API_ORIGIN")
         .ok()
         .map(|value| value.trim().to_owned())
