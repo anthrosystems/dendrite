@@ -184,8 +184,7 @@ The daemon HTTP API defaults to `127.0.0.1:8766`. The development Unix socket de
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — canonical technical architecture
-- [`docs/SYSTEM_MAP.md`](docs/SYSTEM_MAP.md) — end-to-end system diagrams and boundaries
+- [`docs/architecture.md`](docs/architecture.md) — canonical technical architecture, including the end-to-end system diagrams and boundaries
 - [`crates/dendrited/API.md`](crates/dendrited/API.md) — local HTTP API and Analysis endpoints
 - [`crates/dendrite-cli/CLI.md`](crates/dendrite-cli/CLI.md) — current local CLI surface
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — daemon environment variables and startup configuration

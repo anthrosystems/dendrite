@@ -8,9 +8,9 @@ Official CVE source material and Dendrite-derived enrichment remain distinct.
 
 ## Behaviour-aware classification
 
-A CVE knowledge import may define reusable behaviour patterns and associate them with one or more CVEs/packages. Live attack chains can derive behaviour fingerprints and match behaviour definitions. A successful match can enrich the existing chain/incident presentation, for example changing an unknown display name to a known vulnerability/attack name while preserving canonical IDs and the historical action timeline.
+A CVE knowledge import may define reusable behaviour patterns and associate them with one or more CVEs/packages. Live attack chains can derive behaviour fingerprints and match behaviour definitions. A successful match can enrich the existing chain/incident presentation — for example, changing an unknown display name to a known vulnerability/attack name.
 
-This is classification evidence, not privileged authority.
+This is classification evidence, not privileged authority. See [`IDENTITY_AND_PROVENANCE.md`](IDENTITY_AND_PROVENANCE.md)'s "Attack-chain enrichment" section for why a match like this never changes the chain's canonical ID or its historical action timeline.
 
 ## Dendrite Vulnerability Candidates
 

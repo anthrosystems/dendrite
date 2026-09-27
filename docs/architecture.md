@@ -19,6 +19,20 @@ Dendrite is built around a small set of non-negotiable rules:
 7. **Prefer reduced capability over unsafe autonomous action.**
 8. **The daemon owns security state.** CLI, UI, MCP, and external tools are clients; they do not own memory, authority, or detection truth.
 
+Invariant 3, visually:
+
+```text
+Threat evidence
+     │
+     └── may increase confidence / create proposal
+
+Threat evidence
+     X
+     └── may NOT create action authority
+
+Authority = quorum + policy + Guard + successful revalidation
+```
+
 ## 2. Runtime architecture
 
 ```text
@@ -171,23 +185,64 @@ ESTABLISHED SELF
 
 Frequent malicious behaviour remains malicious behaviour. Persistence is not legitimacy.
 
+### 3.5 Bootstrap flow on an unknown host
+
+Putting 3.2–3.4 together, end to end, on a freshly installed host:
+
+```text
+Dendrite installed
+       │
+       ├── Self maturity: BOOTSTRAPPING
+       └── Host trust: UNKNOWN
+              │
+              ▼
+      innate protection active
+              │
+      ┌───────┼─────────┬──────────────┐
+      ▼       ▼         ▼              ▼
+ threat   integrity   CVE/package   behaviour/
+ cells     checks     exposure       attack chains
+      └───────┼─────────┴──────────────┘
+              ▼
+      provisional observations
+              │
+              ▼
+      contamination checks
+              │
+              ▼
+       promote / reject Self
+```
+
+The host is not assumed clean just because Dendrite has only just been installed.
+
 ## 4. Memory Graph
 
 The Dendrite Memory Graph is a temporal, provenance-aware, confidence-aware, decaying knowledge graph backed initially by SQLite.
 
-It represents entities and relationships such as processes, files, hosts, users, services, network endpoints, incidents, and threats.
-
-Current memory states are:
+It represents entities and relationships such as processes, files, hosts, users, services, network endpoints, incidents, and threats. End to end, from raw telemetry to a stable state:
 
 ```text
-OBSERVED
-CORRELATED
-SUPPORTED
-ESTABLISHED
-CONTRADICTED
-SUPERSEDED
-EXPIRED
-REVOKED
+raw telemetry
+    ↓
+short-lived operational events
+    ↓
+observations
+    ↓
+consolidation
+    ↓
+semantic relationships
+    ↓
+reinforcement / contradiction / decay
+    ↓
+ESTABLISHED / EXPIRED / REVOKED / ...
+```
+
+Current memory states, and the transitions between them:
+
+```text
+OBSERVED → CORRELATED → SUPPORTED → ESTABLISHED
+     │          │             │
+     └──────────┴─────────────┴──→ CONTRADICTED / SUPERSEDED / EXPIRED / REVOKED
 ```
 
 Current retention classes include short-term, long-term, and persistent memory.
@@ -466,6 +521,24 @@ Threat knowledge maturity follows:
 CANDIDATE → LOCAL → VALIDATED → TRUSTED → GLOBAL
 ```
 
+Spelled out end to end:
+
+```text
+new local finding
+      ↓
+CANDIDATE
+      ↓
+LOCAL
+      ↓ validation / provenance / corroboration
+VALIDATED
+      ↓ trusted signing / review policy
+TRUSTED
+      ↓
+GLOBAL
+      ↓
+other Dendrite hosts receive signed threat knowledge
+```
+
 A local discovery cannot automatically become globally trusted or gain destructive authority. Packages must be signed, provenance-aware, revocable, and independently verifiable.
 
 Benign/negative knowledge is much more host-specific than malicious knowledge and therefore requires stricter sharing rules.
@@ -627,7 +700,20 @@ If those distinctions are not observable, the architecture is complexity without
 
 ## 17. Correlation, behaviour knowledge and attack-chain classification
 
-Canonical Memory/evidence object IDs are host-scoped observation identities. Cross-host correlation is a separate knowledge layer built from normalised fingerprints/correlation keys and reusable behaviour definitions. This prevents independent observations from being collapsed while still allowing Host A and Host B to recognise semantically equivalent artifacts/activity.
+Canonical Memory/evidence object IDs are host-scoped observation identities. Cross-host correlation is a separate knowledge layer built from normalised fingerprints/correlation keys and reusable behaviour definitions. This prevents independent observations from being collapsed while still allowing Host A and Host B to recognise semantically equivalent artifacts/activity:
+
+```text
+Host A observation (A::object)
+          │
+          ├── fingerprint / correlation key ──┐
+          └── behaviour binding ───────────────┤
+                                               ├── shared semantic knowledge
+Host B observation (B::object)                 │
+          ├── fingerprint / correlation key ──┤
+          └── behaviour binding ───────────────┘
+```
+
+Object identity and provenance stay host-scoped. Correlation is represented rather than identity being rewritten.
 
 Reusable behaviours are declarative detection/classification knowledge, not executable counter logic. They may describe graph relationships/conditions and can be associated with CVEs, attack chains and Antiserum packages. Live chains derive stable behaviour fingerprints and can later be enriched/classified without changing canonical chain/incident identity.
 
@@ -639,7 +725,22 @@ Dendrite stores first-class research vulnerability candidates separately from au
 
 ## 19. Analysis and Antiserum package management
 
-Analysis owns Antiserum package creation/import/review. Server-side review sessions are plural and persistent; the browser only chooses which review to display. The Review graph uses the same renderer implementation as Memory Graph but has its own package-derived graph data source.
+Analysis owns Antiserum package creation/import/review. Server-side review sessions are plural and persistent; the browser only chooses which review to display. The Review graph uses the same renderer implementation as Memory Graph but has its own package-derived graph data source:
+
+```text
+.danti package ── verify/store ──► on-device Antiserum store
+                                      │
+                       ┌──────────────┴──────────────┐
+                       ▼                             ▼
+                server-side Review             Accept Knowledge
+                (no authority)                 (explicit operator action)
+                       │                             │
+                       ▼                             ▼
+             shared Graph renderer       supported semantic stores
+             (Analysis page only)         Memory / behaviour / CVE / candidates
+```
+
+The normal Memory Graph page continues to use the live Memory Graph data source.
 
 Antiserum creation selects semantic knowledge classes while provenance is mandatory. The physical v1 `.danti` package always contains all nine standard payload files, including schema-valid authenticated empty payloads.
 
@@ -649,6 +750,18 @@ Imported Antiserum remains evidence. Immediate-exporter authentication, replay p
 
 ## 20. Culture isolation foundation
 
-Culture (working name; formerly "Adaptive Malware Analysis"/AMA) must never experiment against active Dendrite databases. A campaign snapshots the active Self, STM, LTM, Incidents, and Guard stores into a restricted temporary campaign workspace, and all experimental state changes occur against those copies. The current implementation is only this snapshot/lifecycle skeleton.
+Culture (working name; formerly "Adaptive Malware Analysis"/AMA) must never experiment against active Dendrite databases. A campaign snapshots the active Self, STM, LTM, Incidents, and Guard stores into a restricted temporary campaign workspace, and all experimental state changes occur against those copies:
+
+```text
+ACTIVE DBs                         CAMPAIGN WORKSPACE
+self.sqlite3      ── snapshot ──► self.sqlite3
+stm.sqlite3       ── snapshot ──► stm.sqlite3
+ltm.sqlite3       ── snapshot ──► ltm.sqlite3
+incidents.sqlite3 ── snapshot ──► incidents.sqlite3
+guard.sqlite3     ── snapshot ──► guard.sqlite3
+                                  artifacts/
+```
+
+There is no reverse automatic database merge. Future promotion/export is explicit and goes through normal knowledge/trust boundaries. The current implementation is only this snapshot/lifecycle skeleton.
 
 Future sample execution must occur in an explicitly contained environment. Proposed counters still use the ordinary MAGI → policy → Guard → transaction pipeline in the contained campaign world. Promotion/export of resulting knowledge is explicit and provenance-preserving; campaigns do not silently mutate production knowledge.

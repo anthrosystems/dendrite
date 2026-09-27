@@ -56,4 +56,4 @@ Imported knowledge can become the receiver's accepted evidence without rewriting
 
 ## Attack-chain enrichment
 
-Attack chains keep a stable canonical chain ID. Classification may later enrich that same identity with a display name, matched CVEs, reusable behaviours and classification confidence. Existing action proposals/transactions remain linked to their original incident/chain identity, preserving the timeline of what Dendrite knew when an action occurred.
+Attack chains keep a stable canonical chain ID. Classification may later enrich that same identity with a display name, matched CVEs, reusable behaviours and classification confidence — see [`VULNERABILITIES_AND_UPDATES.md`](VULNERABILITIES_AND_UPDATES.md)'s "Behaviour-aware classification" section for how that matching itself works. Existing action proposals/transactions remain linked to their original incident/chain identity, preserving the timeline of what Dendrite knew when an action occurred.

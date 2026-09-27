@@ -23,9 +23,9 @@ action proposal
 ## Interfaces
 
 - Unix socket: local IPC for `dendrite-cli` (see `CLI.md`, next to `dendrite-cli`'s own crate).
-- HTTP + WebSocket, one port (`DENDRITE_HTTP_ADDR`, default `127.0.0.1:8766`): the REST API (`API.md`, in this crate) and the live event stream at `/ws`, used by the operator UI (`../../ui/UI.md`). Also serves the built UI itself as static files when `DENDRITE_UI_DIR` is set (packaged installs).
+- HTTP + WebSocket, one port (`DENDRITE_HTTP_ADDR`, default `127.0.0.1:8766`): the REST API (`API.md`, in this crate) and the live event stream at `/ws`, used by the operator UI (`../../ui/UI.md`). `dendrited` itself never serves the UI's static files — that's `dendrite-ui-server`'s own process (`../dendrite-ui-server/README.md`).
 
-See `docs/CONFIGURATION.md` for every environment variable, `docs/architecture.md` for the full design, and `docs/SYSTEM_MAP.md` for end-to-end diagrams.
+See `docs/CONFIGURATION.md` for every environment variable and `docs/architecture.md` for the full design, including end-to-end system diagrams.
 
 ## Testing
 
