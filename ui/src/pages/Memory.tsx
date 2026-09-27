@@ -4,7 +4,6 @@ import type { MemoryNode } from '../api/types'
 import { ForceGraph, type GraphSettings } from '../components/ForceGraph'
 import { ForceGraph3D } from '../components/ForceGraph3D'
 import { Icons } from '../components/Icons'
-import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
 import { usePolling } from '../hooks/usePolling'
 import { KIND_COLOURS_HEX, KIND_ORDER } from '../utils/nodeColours'
@@ -395,55 +394,63 @@ export function Memory() {
   }
 
   return (
-    <section className="page-stack memory-page memory-page--obsidian">
-      <PageHeader
-        eyebrow="Adaptive memory"
-        title="Memory Graph"
-        description="Interactive projection of Dendrite's real STM/LTM graph, with Obsidian-style exploration controls over real memory state."
-        onRefresh={() => void graph.refresh()}
-      />
-
-      {graph.error && <div className="error-banner">{graph.error}</div>}
-      {graph.data && graphStats && (
-        <div className="memory-graph-summary memory-graph-summary--stats">
-          <div className="memory-graph-stat">
-            <span>Nodes</span>
-            <strong>{graph.data.total_nodes.toLocaleString()}</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Relationships</span>
-            <strong>{graph.data.total_relationships.toLocaleString()}</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Visible</span>
-            <strong>{graphStats.visibleNodes.toLocaleString()} nodes · {graphStats.visibleRelationships.toLocaleString()} links</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Avg strength</span>
-            <strong>{graphStats.averageStrength.toFixed(0)}%</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Avg confidence</span>
-            <strong>{graphStats.averageConfidence.toFixed(0)}%</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Strongest link</span>
-            <strong>{graphStats.strongestRelationship.toFixed(0)}%</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Avg degree</span>
-            <strong>{graphStats.averageDegree.toFixed(2)}</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>Connected / isolated</span>
-            <strong>{graphStats.connectedNodes.toLocaleString()} / {graphStats.isolatedNodes.toLocaleString()}</strong>
-          </div>
-          <div className="memory-graph-stat">
-            <span>STM near expiry</span>
-            <strong>{graphStats.shortTermExpiringSoon.toLocaleString()}</strong>
-          </div>
+    <section className="page-stack memory-page memory-page--obsidian memory-page--fullbleed">
+      {/* The whole page is the canvas (Obsidian/Zoraxy-style graph view) — title,
+          stats and refresh float over it in a HUD bar instead of pushing the
+          canvas down inside a normal padded page-stack layout. */}
+      <div className="memory-hud-top">
+        <div className="memory-hud-title">
+          <span className="eyebrow">Adaptive memory</span>
+          <h1>Memory Graph</h1>
         </div>
-      )}
+
+        {graph.data && graphStats && (
+          <div className="memory-graph-summary memory-graph-summary--stats">
+            <div className="memory-graph-stat">
+              <span>Nodes</span>
+              <strong>{graph.data.total_nodes.toLocaleString()}</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Relationships</span>
+              <strong>{graph.data.total_relationships.toLocaleString()}</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Visible</span>
+              <strong>{graphStats.visibleNodes.toLocaleString()} nodes · {graphStats.visibleRelationships.toLocaleString()} links</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Avg strength</span>
+              <strong>{graphStats.averageStrength.toFixed(0)}%</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Avg confidence</span>
+              <strong>{graphStats.averageConfidence.toFixed(0)}%</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Strongest link</span>
+              <strong>{graphStats.strongestRelationship.toFixed(0)}%</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Avg degree</span>
+              <strong>{graphStats.averageDegree.toFixed(2)}</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>Connected / isolated</span>
+              <strong>{graphStats.connectedNodes.toLocaleString()} / {graphStats.isolatedNodes.toLocaleString()}</strong>
+            </div>
+            <div className="memory-graph-stat">
+              <span>STM near expiry</span>
+              <strong>{graphStats.shortTermExpiringSoon.toLocaleString()}</strong>
+            </div>
+          </div>
+        )}
+
+        {graph.error && <span className="memory-hud-error-chip">{graph.error}</span>}
+
+        <button className="icon-button memory-hud-refresh" onClick={() => void graph.refresh()} title="Refresh">
+          <Icons.refresh />
+        </button>
+      </div>
 
       <div className="memory-graph-layout memory-graph-layout--obsidian">
         <article className="memory-graph-stage memory-graph-stage--obsidian">
