@@ -131,8 +131,8 @@ The UI lives in the main repository as a first-class root component. Repository,
 
 ### Crates and components
 
-- [`crates/dendrited`](crates/dendrited/README.md) — the core daemon
-- [`crates/dendrite-cli`](crates/dendrite-cli/README.md) — the command-line client
+- [`crates/dendrited`](crates/dendrited/README.md) — the core daemon (also see [`API.md`](crates/dendrited/API.md), [`TELEMETRY.md`](crates/dendrited/TELEMETRY.md))
+- [`crates/dendrite-cli`](crates/dendrite-cli/README.md) — the command-line client (also see [`CLI.md`](crates/dendrite-cli/CLI.md))
 - [`crates/dendrite-memory`](crates/dendrite-memory/README.md) — the Memory Graph
 - [`crates/dendrite-action`](crates/dendrite-action/README.md) — the privileged-action boundary
 - [`crates/dendrite-guard`](crates/dendrite-guard/README.md) — trust, integrity and recovery
@@ -142,7 +142,7 @@ The UI lives in the main repository as a first-class root component. Repository,
 - [`crates/dendrite-ui-server`](crates/dendrite-ui-server/README.md) — the UI's own static-file-server process
 - [`crates/dendrite-magi`](crates/dendrite-magi/README.md) — the MAGI quorum-evaluation process
 - [`ebpf/`](ebpf/README.md) and [`ebpf/dendrite-ebpf`](ebpf/dendrite-ebpf/README.md) — the kernel eBPF telemetry program
-- [`ui/`](ui/README.md) — the web operator console
+- [`ui/`](ui/README.md) — the web operator console (also see [`UI.md`](ui/UI.md))
 - [`antiserum/`](antiserum/README.md) — the signed threat-intelligence package format
 
 ## Development
@@ -179,19 +179,20 @@ The daemon HTTP API defaults to `127.0.0.1:8766`. The development Unix socket de
 - TOCTOU-sensitive targets are revalidated immediately before commit.
 - Raw telemetry is short-lived; semantic memory is selective and decays.
 - ML is advisory and bounded, never a direct privileged actuator.
+- [Dovetail](https://github.com/anthrosystems/dovetail) ([PyPI](https://pypi.org/project/pydovetail/)) may be used for non-security-critical Python workflows, but it must not become part of Dendrite's privileged authority chain.
 - The UI is a client and must not invent security state.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — canonical technical architecture
 - [`docs/SYSTEM_MAP.md`](docs/SYSTEM_MAP.md) — end-to-end system diagrams and boundaries
-- [`docs/API.md`](docs/API.md) — local HTTP API and Analysis endpoints
-- [`docs/CLI.md`](docs/CLI.md) — current local CLI surface
+- [`crates/dendrited/API.md`](crates/dendrited/API.md) — local HTTP API and Analysis endpoints
+- [`crates/dendrite-cli/CLI.md`](crates/dendrite-cli/CLI.md) — current local CLI surface
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — daemon environment variables and startup configuration
-- [`docs/TELEMETRY.md`](docs/TELEMETRY.md) — eBPF/fanotify/fallback collector model
+- [`crates/dendrited/TELEMETRY.md`](crates/dendrited/TELEMETRY.md) — eBPF/fanotify/fallback collector model
 - [`docs/IDENTITY_AND_PROVENANCE.md`](docs/IDENTITY_AND_PROVENANCE.md) — instance identity, host-scoped objects, correlation and provenance
 - [`docs/VULNERABILITIES_AND_UPDATES.md`](docs/VULNERABILITIES_AND_UPDATES.md) — CVEs, candidates, remediation and updater boundary
-- [`docs/UI.md`](docs/UI.md) — operator UI, Memory Graph and Analysis workflows
+- [`ui/UI.md`](ui/UI.md) — operator UI, Memory Graph and Analysis workflows
 - [`docs/TESTS.md`](docs/TESTS.md) — canonical Checkpoint A validation plan
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — current batches/checkpoints and future work
 - [`antiserum/FORMAT.md`](antiserum/FORMAT.md) — canonical Antiserum package format

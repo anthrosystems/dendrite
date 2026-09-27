@@ -43,4 +43,4 @@ This is temporary development plumbing. Batch 7 must move capabilities into the 
 - telemetry provenance is local today; a future multi-system/federated event stream will need explicit host origin on events rather than inferring it from graph state;
 - observations are evidence, not action authority.
 
-Functional and fallback tests live in [`TESTS.md`](TESTS.md).
+Functional and fallback tests live in [`docs/TESTS.md`](../../docs/TESTS.md).

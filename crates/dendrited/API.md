@@ -19,9 +19,9 @@ The API is currently development-oriented. Packaging must preserve localhost/pro
 
 - `memory`: `"ok"` or `"error"`, from a direct ping of the Memory Graph database.
 - `guard`: the real current Guard trust state (`trusted`, `degraded`, `suspected`, `quarantined`, `compromised`, `recovering`).
-- `daemon`: a timed liveness probe of the self-store and incidents databases (the latter also backs the vulnerability/CVE/behaviour-knowledge tables — see `CONFIGURATION.md`). `"ok"` if both respond within the timeout, `"degraded"` if they respond but too slowly, `"error"` if either query fails outright.
+- `daemon`: a timed liveness probe of the self-store and incidents databases (the latter also backs the vulnerability/CVE/behaviour-knowledge tables — see `docs/CONFIGURATION.md`). `"ok"` if both respond within the timeout, `"degraded"` if they respond but too slowly, `"error"` if either query fails outright.
 
-The `daemon` timeout is currently a placeholder (`DaemonCore::HEALTH_CHECK_TIMEOUT`, 200ms) and has not been benchmarked against representative load — see `docs/TODO.md` and the "Benchmarking" item in `ROADMAP.md`. Don't treat `"degraded"` as calibrated yet; treat `"error"` as meaningful (it means a query genuinely failed).
+The `daemon` timeout is currently a placeholder (`DaemonCore::HEALTH_CHECK_TIMEOUT`, 200ms) and has not been benchmarked against representative load — see `docs/TODO.md` and the "Benchmarking" item in `docs/ROADMAP.md`. Don't treat `"degraded"` as calibrated yet; treat `"error"` as meaningful (it means a query genuinely failed).
 
 ## Memory Graph
 
@@ -123,4 +123,4 @@ Best Path and Reachable Graph support a finite maximum depth or Unlimited.
 
 ## Validation
 
-Use [`TESTS.md`](TESTS.md) as the canonical API validation plan rather than duplicating curl examples here.
+Use [`docs/TESTS.md`](../../docs/TESTS.md) as the canonical API validation plan rather than duplicating curl examples here.

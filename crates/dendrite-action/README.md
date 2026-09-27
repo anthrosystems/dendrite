@@ -14,7 +14,7 @@ Revalidation runs immediately before commit to reduce TOCTOU risk. Executors exp
 
 > Compromise can remove authority, but cannot create authority.
 
-**Production destructive executors are not yet implemented** — see `docs/ROADMAP.md` for where this sits relative to the `dendrite-guard` process-isolation work it's deliberately sequenced behind. See `docs/architecture.md` for the full authorisation-pipeline design and `docs/API.md` for the action-proposal and MAGI-verdict shapes.
+**Production destructive executors are not yet implemented** — see `docs/ROADMAP.md` for where this sits relative to the `dendrite-guard` process-isolation work it's deliberately sequenced behind. See `docs/architecture.md` for the full authorisation-pipeline design and `crates/dendrited/API.md` for the action-proposal and MAGI-verdict shapes.
 
 ## Testing
 

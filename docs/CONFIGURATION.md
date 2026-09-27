@@ -14,7 +14,7 @@ This is development-time plumbing. Batch 7 packaging should replace ad-hoc envir
 | `DENDRITE_INCIDENT_DB` | `data/incidents.sqlite3` | Incidents/evidence database — also backs the vulnerability, CVE, and behaviour-knowledge tables (`VulnerabilityService`/`KnowledgeService` both open this same file; there is no separate vulnerability/knowledge DB path) |
 | `DENDRITE_CVE_SNAPSHOT` | `knowledge/cve-snapshot.json` | Bundled CVE/behaviour knowledge, auto-imported once at startup |
 
-If this file exists, it's imported via the same path (and validation) as `vulnerability import` — including the strict `"kind": "graph-relation"` behaviour-condition check documented in `CLI.md`. If it's absent, startup continues normally with no CVE knowledge preloaded. If it exists but fails validation, the failure is logged to stderr rather than aborting startup — a deliberately softer failure mode than the CLI's hard rejection, since this runs unattended rather than as an explicit user action. There is currently no bundled default snapshot shipped in the repo; this is the intended integration point for one once packaging (Batch 7) ships real CVE/behaviour data.
+If this file exists, it's imported via the same path (and validation) as `vulnerability import` — including the strict `"kind": "graph-relation"` behaviour-condition check documented in `crates/dendrite-cli/CLI.md`. If it's absent, startup continues normally with no CVE knowledge preloaded. If it exists but fails validation, the failure is logged to stderr rather than aborting startup — a deliberately softer failure mode than the CLI's hard rejection, since this runs unattended rather than as an explicit user action. There is currently no bundled default snapshot shipped in the repo; this is the intended integration point for one once packaging (Batch 7) ships real CVE/behaviour data.
 
 ## IPC and network
 
@@ -80,7 +80,7 @@ Unlike MAGI (a stateless per-request vote), Guard owns real persistent state —
 | `DENDRITE_WATCH_EXCLUDE_PATHS` | unset (empty) | Colon-separated list of path prefixes to exclude from fanotify events, applied by path component (so `/etc` excludes `/etc/passwd` but not `/etc-backup/passwd`) |
 | `DENDRITE_TELEMETRY_INTERVAL_SECONDS` | `5` | Polling interval for fallback collectors, in seconds (minimum enforced value is `1`). Also the cadence for fanotify's periodic mount rescan — see below |
 
-eBPF and fanotify are both opt-out now, not opt-in — a fresh `dendrited` with no environment overrides watches every real mount and collects process/network telemetry via eBPF by default, falling back gracefully (to `/proc` polling, or filesystem polling respectively) wherever either one can't actually load. See [`TELEMETRY.md`](TELEMETRY.md) for collector precedence and fallback behaviour, and the required capability set (`CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`) for enabling eBPF/fanotify.
+eBPF and fanotify are both opt-out now, not opt-in — a fresh `dendrited` with no environment overrides watches every real mount and collects process/network telemetry via eBPF by default, falling back gracefully (to `/proc` polling, or filesystem polling respectively) wherever either one can't actually load. See [`TELEMETRY.md`](../crates/dendrited/TELEMETRY.md) for collector precedence and fallback behaviour, and the required capability set (`CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_ADMIN`, `CAP_DAC_READ_SEARCH`) for enabling eBPF/fanotify.
 
 ### How fanotify decides what to watch
 

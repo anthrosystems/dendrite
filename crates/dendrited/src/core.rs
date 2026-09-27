@@ -340,7 +340,14 @@ impl DaemonCore {
             } else {
                 "error".into()
             },
-            guard: self.guard_status()?.trust_state,
+            // Deliberately `trust_state()` (infallible, safe-value fallback),
+            // not `guard_status()` (genuinely fallible — see its own doc
+            // comment). A health check's whole job is to stay informative
+            // when something is unhealthy; if `dendrite-guard` is
+            // unreachable, `trust_state()` already reports `Compromised`,
+            // and that's exactly what this field should show, not a hard
+            // error that makes `health`/`GET /api/v1/health` itself fail.
+            guard: self.guard.trust_state().as_str().to_string(),
         })
     }
 
@@ -3157,6 +3164,25 @@ mod tests {
         assert_eq!(health.daemon, "ok");
         assert_eq!(health.memory, "ok");
         assert_eq!(health.guard, "trusted");
+    }
+
+    /// Regression test: `health_check()` must read `guard.trust_state()`
+    /// (infallible, safe-value fallback), not `guard_status()` (genuinely
+    /// fallible, since it also feeds signed Antiserum attestations). A
+    /// health check exists specifically to stay informative when something
+    /// is unhealthy — it must not itself error out just because
+    /// `dendrite-guard` is unreachable, the same way `daemon`/`memory`
+    /// report `"error"` rather than failing the whole call.
+    #[test]
+    fn health_check_reports_compromised_rather_than_erroring_when_guard_is_unreachable() {
+        // `DaemonCore::open`'s default guard is a real `GuardIpcClient`
+        // pointed at nothing in this test environment — exactly the
+        // "dendrite-guard isn't running" case this test targets.
+        let core = DaemonCore::open(":memory:").unwrap();
+        let health = core.health_check().unwrap();
+        assert_eq!(health.daemon, "ok");
+        assert_eq!(health.memory, "ok");
+        assert_eq!(health.guard, "compromised");
     }
 
     #[test]

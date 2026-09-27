@@ -8,13 +8,19 @@ cd "$PROJECT_ROOT"
 MODE="${1:-smoke}"
 WATCH_DIR="${DENDRITE_TEST_WATCH_DIR:-/tmp/dendrite-watch}"
 SOCKET="${DENDRITE_SOCKET_PATH:-/tmp/dendrited.sock}"
+GUARD_SOCKET="${DENDRITE_GUARD_SOCKET:-/tmp/dendrite-guard.sock}"
+MAGI_SOCKET="${DENDRITE_MAGI_SOCKET:-/tmp/dendrite-magi.sock}"
 HTTP_BASE="${DENDRITE_HTTP_BASE:-http://127.0.0.1:8766/api/v1}"
 LOG_FILE="${DENDRITE_TEST_LOG:-/tmp/dendrited-test.log}"
+GUARD_LOG_FILE="${DENDRITE_GUARD_TEST_LOG:-/tmp/dendrite-guard-test.log}"
+MAGI_LOG_FILE="${DENDRITE_MAGI_TEST_LOG:-/tmp/dendrite-magi-test.log}"
 STRESS_EVENTS="${DENDRITE_STRESS_EVENTS:-5000}"
 STRESS_WORKERS="${DENDRITE_STRESS_WORKERS:-8}"
 GRAPH_EVENTS="${DENDRITE_GRAPH_EVENTS:-3000}"
 REQUEST_TIMEOUT="${DENDRITE_TEST_REQUEST_TIMEOUT:-5}"
 STARTED_DAEMON=0
+STARTED_GUARD=0
+STARTED_MAGI=0
 
 usage() {
     cat <<USAGE
@@ -28,8 +34,12 @@ Environment:
   DENDRITE_HTTP_BASE=URL      HTTP API base (default: http://127.0.0.1:8766/api/v1)
   DENDRITE_TEST_REQUEST_TIMEOUT=N  CLI/API timeout in seconds (default: 5)
 
-The script reuses a running daemon when available. If none is running it starts
-./target/debug/dendrited, so build it and reapply its required capabilities first.
+The script reuses running processes when available. If dendrite-guard/
+dendrite-magi aren't already listening on their sockets, this script starts
+them too (in addition to dendrited) so `guard`/`full` mode exercises real
+Guard/MAGI behaviour rather than the fail-closed deny/abstain path that
+results whenever either is unreachable. Build all three first:
+cargo build -p dendrited -p dendrite-cli -p dendrite-guard -p dendrite-magi.
 USAGE
 }
 
@@ -54,10 +64,46 @@ cleanup() {
         kill "$DAEMON_PID" 2>/dev/null || true
         wait "$DAEMON_PID" 2>/dev/null || true
     fi
+    if [[ "$STARTED_GUARD" == 1 ]] && [[ -n "${GUARD_PID:-}" ]] && kill -0 "$GUARD_PID" 2>/dev/null; then
+        echo "Stopping dendrite-guard (PID $GUARD_PID)..."
+        kill "$GUARD_PID" 2>/dev/null || true
+        wait "$GUARD_PID" 2>/dev/null || true
+    fi
+    if [[ "$STARTED_MAGI" == 1 ]] && [[ -n "${MAGI_PID:-}" ]] && kill -0 "$MAGI_PID" 2>/dev/null; then
+        echo "Stopping dendrite-magi (PID $MAGI_PID)..."
+        kill "$MAGI_PID" 2>/dev/null || true
+        wait "$MAGI_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
 mkdir -p "$WATCH_DIR"
+
+if [[ ! -S "$GUARD_SOCKET" ]] && [[ -x target/debug/dendrite-guard ]]; then
+    echo "Starting dendrite-guard for test..."
+    target/debug/dendrite-guard >"$GUARD_LOG_FILE" 2>&1 &
+    GUARD_PID=$!
+    STARTED_GUARD=1
+elif [[ ! -S "$GUARD_SOCKET" ]]; then
+    echo "target/debug/dendrite-guard is missing — continuing without it (Guard checks will fail closed: deny/compromised)." >&2
+fi
+
+if [[ ! -S "$MAGI_SOCKET" ]] && [[ -x target/debug/dendrite-magi ]]; then
+    echo "Starting dendrite-magi for test..."
+    target/debug/dendrite-magi >"$MAGI_LOG_FILE" 2>&1 &
+    MAGI_PID=$!
+    STARTED_MAGI=1
+elif [[ ! -S "$MAGI_SOCKET" ]]; then
+    echo "target/debug/dendrite-magi is missing — continuing without it (MAGI seats will abstain, quorum will deny)." >&2
+fi
+
+for _ in {1..100}; do
+    ok=1
+    [[ "$STARTED_GUARD" == 1 ]] && [[ ! -S "$GUARD_SOCKET" ]] && ok=0
+    [[ "$STARTED_MAGI" == 1 ]] && [[ ! -S "$MAGI_SOCKET" ]] && ok=0
+    [[ "$ok" == 1 ]] && break
+    sleep 0.1
+done
 
 if [[ ! -S "$SOCKET" ]]; then
     if [[ ! -x target/debug/dendrited ]]; then

@@ -13,15 +13,24 @@ If `dendrite-magi` is unreachable, times out, or isn't running, `dendrited`'s cl
 | Variable | Default | Description |
 |---|---|---|
 | `DENDRITE_MAGI_SOCKET` | `/tmp/dendrite-magi.sock` | Unix socket path this process listens on |
-| `DENDRITE_MAGI_HOST_SOURCE` | `internal` | Which evaluator backs the Host seat |
-| `DENDRITE_MAGI_USER_SOURCE` | `internal` | Which evaluator backs the User seat |
-| `DENDRITE_MAGI_ENVIRONMENT_SOURCE` | `internal` | Which evaluator backs the Environment seat |
+| `DENDRITE_MAGI_HOST_SOURCE` | `internal` | Which evaluator backs the Host seat: `internal` or `mcp` |
+| `DENDRITE_MAGI_USER_SOURCE` | `internal` | Which evaluator backs the User seat: `internal` or `mcp` |
+| `DENDRITE_MAGI_ENVIRONMENT_SOURCE` | `internal` | Which evaluator backs the Environment seat: `internal` or `mcp` |
+| `DENDRITE_MAGI_<SEAT>_MCP_COMMAND` | *(none)* | Required when `<SEAT>_SOURCE=mcp`: the command to spawn as that seat's MCP server |
+| `DENDRITE_MAGI_<SEAT>_MCP_ARGS` | *(empty)* | Optional, whitespace-split arguments to the command above (no quoting support — use a wrapper script for an argument that needs an embedded space) |
+| `DENDRITE_MAGI_<SEAT>_MCP_TOOL` | `evaluate_action` | Optional: the MCP tool name to call on that server |
 
-`internal` (the built-in rule-based evaluator, the only thing implemented today) is the only value these three `_SOURCE` variables currently accept — `dendrite-magi` refuses to start, on purpose, if any of them is set to anything else, rather than silently falling back to the internal evaluator for that seat.
+`dendrite-magi` refuses to start, on purpose, if a `_SOURCE` variable is set to anything other than `internal`/`mcp`, or if `mcp` is set without a matching `_MCP_COMMAND` — rather than silently falling back to the internal evaluator for that seat.
 
-## MCP-backed seats: designed for, not built
+## MCP-backed seats
 
-The `_SOURCE` variables and the `SeatSource` enum they're read into exist now so that connecting an external MCP-connected AI agent to a seat — letting a company hook up an AI that actually understands their own infrastructure to act as that seat's MAGI vote — is a configuration change later, not a code change today. Per the confirmed design, an MCP-backed evaluator is meant to be a **full replacement** for a seat's internal evaluator, not an advisor running alongside it: the seat's vote would come entirely from the external agent. None of the actual MCP client/server plumbing exists yet. `SeatSource::Unimplemented` is a real, deliberate placeholder, not a stub pretending to work — it fails loudly at startup rather than quietly doing the wrong thing.
+Connecting an external MCP-connected AI agent to a seat — letting a company hook up an AI that actually understands their own infrastructure to act as that seat's MAGI vote — is a per-seat configuration change: set `DENDRITE_MAGI_<SEAT>_SOURCE=mcp` plus the `_MCP_COMMAND`/`_MCP_ARGS`/`_MCP_TOOL` variables above. Per the confirmed design, an MCP-backed evaluator is a **full replacement** for that seat's internal evaluator, not an advisor running alongside it: the seat's vote comes entirely from the external agent.
+
+The server is spawned as a local child process and talked to over stdio (via `rmcp`'s `TokioChildProcess` transport) — no network reachability or auth story is needed for a process `dendrite-magi` itself spawns and owns the lifetime of. Per evaluation, `dendrite-magi` calls the configured tool with `{"seat": "host"|"user"|"environment", "action": <action name>, "user_authorised": bool}` and expects back either structured tool content or JSON-in-text content shaped like `{"verdict": "approve"|"deny"|"abstain", "reason": "..."}` (`reason` is optional).
+
+If the process won't spawn, the MCP handshake fails, the tool call errors, or the response can't be parsed, that seat resolves to **abstain** with a reason describing what went wrong — the same fail-closed philosophy as a wholly-unreachable `dendrite-magi` process: an unreachable evaluator must not manufacture an approval.
+
+This is the MAGI-side half of Dendrite's MCP integration — `dendrite-magi` only ever acts as an MCP *client*, connecting out to a seat's external agent. A separate, inbound MCP *server* exposing Dendrite's own capabilities to external agents is a different, additive privileged surface, and lives in its own crate (`dendrite-mcp`, currently a stub) rather than here — see that crate's README and `docs/ROADMAP.md`'s MCP scope note for why the two are kept apart.
 
 ## Testing
 

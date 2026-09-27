@@ -12,7 +12,6 @@ repository = "https://github.com/anthrosystems/dendrite"
 aya = "0.13.1"
 dendrite-action = { path = "../dendrite-action" }
 dendrite-ebpf-common = { path = "../dendrite-ebpf-common" }
-dendrite-guard = { path = "../dendrite-guard" }
 dendrite-memory = { path = "../dendrite-memory" }
 dendrite-protocol = { path = "../dendrite-protocol" }
 dendrite-updater = { path = "../dendrite-updater" }

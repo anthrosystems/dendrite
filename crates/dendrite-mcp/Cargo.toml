@@ -1,0 +1,11 @@
+[package]
+name = "dendrite-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "Stub for Dendrite's inbound MCP server (exposing Dendrite's own capabilities to external agents) — see the crate README before building this out"
+license = "Apache-2.0"
+repository = "https://github.com/anthrosystems/dendrite"
+
+[dependencies]
+rmcp = { version = "3.4.1", features = ["server", "transport-io"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }
