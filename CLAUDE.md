@@ -37,9 +37,11 @@ crates/dendrite-magi      - MAGI quorum evaluation, its own process/systemd unit
                              (internal rule-based evaluators, or an MCP client
                              per seat — see its own README)
 crates/dendrite-guard     - trust/integrity boundary, its own process/systemd
-                             unit; the decision logic itself (integrity
-                             manifests, anti-tamper, attestation) is still a
-                             stub, see ROADMAP.md's Batch 7 findings
+                             unit; decision logic (privilege separation,
+                             signed integrity manifest, automatic + on-demand
+                             verification, severity-based trust escalation,
+                             host-authenticated recovery) is done, see
+                             ROADMAP.md's Batch 7 findings
 crates/dendrite-action    - response action execution
 crates/dendrite-updater   - self-update foundations
 crates/dendrite-ebpf-common - shared types for the eBPF collector

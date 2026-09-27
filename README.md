@@ -66,7 +66,7 @@ The repository currently includes:
 - bounded operational telemetry history separate from semantic memory;
 - MAGI-style Host/User/Environment evaluation, quorum, and policy decisions;
 - action proposals and transactional action state;
-- Guard trust state, integrity findings, and authority removal;
+- Guard trust state, a signed integrity manifest with automatic and on-demand verification, severity-based trust escalation, authority removal, and an explicit host-authenticated recovery path back to trusted;
 - safe non-privileged `observe` and `warn` execution paths;
 - web operator UI with Overview, Activity, Incidents, Threats, Attack Chains, Memory Graph, Relationships, MAGI & Response, Self & Trust, and System Health views.
 
@@ -92,7 +92,6 @@ Major planned work includes:
 - signed threat-knowledge packages (internally, a **Antiserum** concept);
 - updater/remediation backends with verification and rollback;
 - privileged containment executors;
-- stronger anti-tamper and recovery isolation;
 - ML as a bounded evidence source;
 - containers/Kubernetes awareness;
 - optional MCP integration and later federation.
