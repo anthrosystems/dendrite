@@ -20,7 +20,7 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 
 | Variable | Default | Description |
 |---|---|---|
-| `DENDRITE_SOCKET` | `/tmp/dendrited.sock` | Unix socket path for `dendrite-cli` IPC |
+| `DENDRITE_SOCKET` | `/tmp/dendrited.sock` | Unix socket path `dendrited` listens on |
 | `DENDRITE_MAGI_SOCKET` | `/tmp/dendrite-magi.sock` | Unix socket path `dendrited` connects to for MAGI quorum evaluation (see below) |
 | `DENDRITE_GUARD_SOCKET` | `/tmp/dendrite-guard.sock` | Unix socket path `dendrited` connects to for Guard trust/authority checks (see below) |
 | `DENDRITE_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket |
@@ -28,6 +28,10 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 | `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address — also serves the live-event WebSocket (see below) |
 
 `DENDRITE_HTTP_ADDR` is silently ignored if it fails to parse as a socket address — the default is kept in that case with no warning printed. `DENDRITE_SOCKET_MODE` is stricter: an unparseable value logs an error and exits with status `2`.
+
+`DENDRITE_SOCKET` is a *systemd-unit-scoped* environment variable on a packaged install (`packaging/dendrited.service` sets it to `/run/dendrite/dendrited.sock`) — it's invisible to an interactive shell, which `dendrite-cli` also reads this same variable from when set. Real Checkpoint-B validation on a packaged `.deb` install confirmed this is exactly the trap it sounds like: `dendrite-cli` with `DENDRITE_SOCKET` unset previously always fell back to the dev default (`/tmp/dendrited.sock`), which never matches a packaged `dendrited`. `dendrite-cli` now checks for `/run/dendrite/dendrited.sock` first (falling back to the dev default only if that's not there — see `crates/dendrite-cli/src/main.rs`), so an operator's `dendrite-cli status`/`health` works against a packaged install with no environment variable to set by hand. The remaining requirement — being in the `dendrite` group, since the socket is `0660`/group-owned (see `DENDRITE_SOCKET_GROUP`/`DENDRITE_SOCKET_MODE` above) — is handled by `packaging/postinst`, which best-effort adds the invoking `sudo` user to that group on install (effective after the next login).
+
+On a packaged install, `/run/dendrite` (holding `dendrited`'s, `dendrite-magi`'s, and `dendrite-guard`'s sockets) is provisioned by a tmpfiles.d snippet (`packaging/dendrite.tmpfiles`, applied via `postinst`) rather than any one unit's own `RuntimeDirectory=`. This was a real bug found during Checkpoint B validation: systemd deletes a `RuntimeDirectory=` entirely when the *first* unit referencing it stops, even while sibling units sharing that name are still running ([systemd/systemd#5394](https://github.com/systemd/systemd/issues/5394)) — so `systemctl restart dendrite-guard` alone used to unlink `dendrited`'s and `dendrite-magi`'s still-listening sockets out from under them. See the three `packaging/*.service` files' own comments for the same reasoning.
 
 The live event stream is a WebSocket upgrade of a normal request to `/ws` on this same address/port — there is no separate `DENDRITE_WS_ADDR` any more (removed as part of Batch 7's "one address, just works" distribution-packaging goal). `dendrited` detects the upgrade (`Connection: Upgrade`, `Upgrade: websocket`, `Sec-WebSocket-Key` headers on a `GET /ws` request) itself on its ordinary HTTP accept loop and performs the handshake by hand rather than via a second listener.
 

@@ -1,6 +1,6 @@
 # Dendrite CLI
 
-`dendrite-cli` is the local Unix-socket client for `dendrited`. The development socket defaults to `/tmp/dendrited.sock`.
+`dendrite-cli` is the local Unix-socket client for `dendrited`. `DENDRITE_SOCKET` always overrides the default when set; otherwise it checks `/run/dendrite/dendrited.sock` (a packaged install's socket) first, falling back to the local-dev default `/tmp/dendrited.sock` if that's not there — see `crates/dendrite-cli/README.md`.
 
 The CLI is an operator/debugging client; privileged response still requires the daemon's normal MAGI, policy, Guard and transaction checks.
 
@@ -148,6 +148,6 @@ DENDRITE_SOCKET_MODE=0660 \
 target/debug/dendrited
 ```
 
-The invoking shell must actually have membership in the `dendrite` group. Batch 7 packaging replaces the ad-hoc development setup with a dedicated service account/group and systemd-managed permissions.
+The invoking shell must actually have membership in the `dendrite` group. A packaged install now does this for you (`packaging/postinst` best-effort adds the invoking `sudo` user to the `dendrite` group on install — effective after the next login/`newgrp dendrite`); `scripts/bootstrap.sh` does the equivalent for local dev.
 
 See [`docs/TESTS.md`](../../docs/TESTS.md) for the current CLI smoke/regression sequence.
