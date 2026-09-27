@@ -6,10 +6,16 @@ use crate::{
 };
 use dendrite_memory::storage::MemoryStore;
 use dendrite_protocol::{
-    Confidence, DaemonStatusDto, EntityKind, IntegritySeverity, IpcRequest, IpcResponse,
-    MemoryPathDto, ObjectDescriptor, ObjectId, Observation, ObservationId, ObservationKind,
-    Severity, TelemetryEventDto, TelemetryPipelineDto, TelemetryPipelineLaneDto, TrustState,
-    VulnerabilityRemediationDto,
+    DaemonStatusDto, IpcRequest, IpcResponse, MemoryPathDto, Observation, ObservationKind,
+    TelemetryEventDto, TelemetryPipelineDto, TelemetryPipelineLaneDto, VulnerabilityRemediationDto,
+};
+// Only reachable from the `#[cfg(debug_assertions)]` `IpcRequest::Debug*` handlers below
+// (release builds refuse those requests instead) — gated the same way so a release build
+// doesn't warn about them as unused, rather than papering over that with `#[allow]`.
+#[cfg(debug_assertions)]
+use dendrite_protocol::{
+    Confidence, EntityKind, IntegritySeverity, ObjectDescriptor, ObjectId, ObservationId, Severity,
+    TrustState,
 };
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -20,6 +26,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
 use std::str::FromStr;
 use std::sync::{
     Arc,
