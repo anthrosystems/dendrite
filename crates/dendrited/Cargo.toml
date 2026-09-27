@@ -27,6 +27,12 @@ signal-hook = "0.4.4"
 tungstenite = "0.30.0"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 uuid = { version = "1", features = ["v4"] }
+# Herd's peer-push client (crates/dendrited/src/herd.rs). Deliberately the
+# small, synchronous option rather than reqwest/hyper: the rest of this
+# daemon (http.rs, the IPC socket loop) is hand-rolled, blocking, and has
+# no async runtime anywhere, so pulling in tokio for one outbound POST
+# would be a much bigger footprint than the feature needs.
+ureq = "2"
 
 # Distribution packaging (docs/ROADMAP.md Batch 7). Built with:
 #
@@ -63,6 +69,7 @@ assets = [
     ["../../packaging/dendrite-magi.env.example", "etc/dendrite/dendrite-magi.env", "644"],
     ["../../packaging/dendrite-ui.env.example", "etc/dendrite/dendrite-ui.env", "644"],
     ["../../packaging/dendrite.tmpfiles", "usr/lib/tmpfiles.d/dendrite.conf", "644"],
+    ["../../packaging/herd.json.example", "etc/dendrite/herd.json", "644"],
     ["../../packaging/completions/dendrite-cli.bash", "usr/share/bash-completion/completions/dendrite-cli", "644"],
     ["../../packaging/completions/_dendrite-cli", "usr/share/zsh/vendor-completions/_dendrite-cli", "644"],
 ]

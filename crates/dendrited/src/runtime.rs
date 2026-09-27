@@ -1,5 +1,6 @@
 use crate::{
-    DaemonCore, DaemonError, TelemetryManager, VulnerabilityError, VulnerabilityService,
+    CultureSources, DaemonCore, DaemonError, TelemetryManager, VulnerabilityError,
+    VulnerabilityService,
     http::handle_http_stream,
     live::LiveBroadcaster,
     sysmem,
@@ -85,6 +86,18 @@ pub struct RuntimeConfig {
     pub ebpf_enabled: bool,
     pub ebpf_object: PathBuf,
     pub telemetry_interval: Duration,
+    /// Root directory for Culture campaign workspaces (see
+    /// `crate::culture`). Created on startup if missing.
+    pub culture_root: PathBuf,
+    /// Where Herd's own per-peer push-status database lives (see
+    /// `crate::herd`) — not the exchanged Antiserum data itself, which
+    /// lands in the ordinary Antiserum package store.
+    pub herd_db_path: PathBuf,
+    /// Path to Herd's peer-list config file (`packaging/herd.json.example`).
+    /// A missing file means Herd is disabled — see `herd::load_peers`.
+    pub herd_config_path: PathBuf,
+    /// How often to push a fresh export to every configured Herd peer.
+    pub herd_push_interval: Duration,
 }
 
 impl RuntimeConfig {
@@ -114,6 +127,10 @@ impl RuntimeConfig {
                 "ebpf/dendrite-ebpf/target/bpfel-unknown-none/release/dendrite-ebpf",
             ),
             telemetry_interval: Duration::from_secs(5),
+            culture_root: PathBuf::from("data/culture"),
+            herd_db_path: PathBuf::from("data/herd.sqlite3"),
+            herd_config_path: PathBuf::from("data/herd.json"),
+            herd_push_interval: Duration::from_secs(120),
         }
     }
 }
@@ -326,6 +343,7 @@ pub struct DaemonRuntime {
     vulnerability: VulnerabilityService,
     socket_path: PathBuf,
     telemetry_interval: Duration,
+    herd_push_interval: Duration,
     priority_tx: SyncSender<IngestionJob>,
     routine_tx: SyncSender<IngestionJob>,
     completed_rx: Receiver<TelemetryEventDto>,
@@ -370,6 +388,22 @@ impl DaemonRuntime {
         let mut core = DaemonCore::open_with_tiered_stores(&self_store, &stm, &ltm, &incidents)?;
         core.set_magi_socket_path(config.magi_socket_path.clone());
         core.set_guard_socket_path(config.guard_socket_path.clone());
+        core.configure_culture(
+            config.culture_root.clone(),
+            CultureSources {
+                self_db: config.self_path.clone(),
+                stm_db: config.stm_path.clone(),
+                ltm_db: config.ltm_path.clone(),
+                incidents_db: config.incident_path.clone(),
+                // See CultureSources::guard_db's doc comment: dendrited
+                // cannot read dendrite-guard's privilege-separated database.
+                guard_db: None,
+            },
+        )?;
+        core.set_herd_store_path(&config.herd_db_path.to_string_lossy())?;
+        core.set_herd_peers(
+            crate::load_peers(&config.herd_config_path).map_err(DaemonError::from)?,
+        );
         write_http_token_file(
             &config.http_token_path,
             core.http_api_token(),
@@ -443,6 +477,7 @@ impl DaemonRuntime {
             vulnerability,
             socket_path: config.socket_path,
             telemetry_interval: config.telemetry_interval,
+            herd_push_interval: config.herd_push_interval,
             priority_tx,
             routine_tx,
             completed_rx,
@@ -460,6 +495,7 @@ impl DaemonRuntime {
         let mut next_telemetry = Instant::now();
         let mut next_vulnerability_refresh = Instant::now() + Duration::from_secs(60);
         let mut next_pipeline_push = Instant::now();
+        let mut next_herd_push = Instant::now() + self.herd_push_interval;
         while !shutdown_requested.load(Ordering::Relaxed) {
             let mut handled_work = false;
 
@@ -519,6 +555,14 @@ impl DaemonRuntime {
                     Err(error) => eprintln!("vulnerability refresh failed: {error:?}"),
                 }
                 next_vulnerability_refresh = Instant::now() + Duration::from_secs(60);
+                handled_work = true;
+            }
+
+            if Instant::now() >= next_herd_push {
+                if let Err(error) = self.core.herd_push_tick(&self.vulnerability, unix_now()) {
+                    eprintln!("Herd push tick failed: {error:?}");
+                }
+                next_herd_push = Instant::now() + self.herd_push_interval;
                 handled_work = true;
             }
 
@@ -1020,6 +1064,21 @@ impl DaemonRuntime {
             IpcRequest::Health => Ok(IpcResponse::Health(self.core.health_check()?)),
             IpcRequest::HttpToken => Ok(IpcResponse::HttpToken {
                 token: self.core.http_api_token().to_owned(),
+            }),
+            IpcRequest::CultureList => Ok(IpcResponse::CultureCampaigns {
+                campaigns: self.core.culture_list_campaigns()?,
+            }),
+            IpcRequest::CultureCreate { label } => Ok(IpcResponse::CultureCampaigns {
+                campaigns: vec![
+                    self.core
+                        .culture_create_campaign(label.as_deref(), unix_now())?,
+                ],
+            }),
+            IpcRequest::CultureDiscard { campaign_id } => Ok(IpcResponse::CultureDiscarded {
+                discarded: self.core.culture_discard_campaign(&campaign_id)?,
+            }),
+            IpcRequest::HerdStatus => Ok(IpcResponse::HerdStatus {
+                peers: self.core.herd_status()?,
             }),
         }
     }

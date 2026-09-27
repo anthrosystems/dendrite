@@ -66,6 +66,14 @@ pub enum Command {
     VulnerabilityDelete(String),
     Health,
     HttpToken,
+    CultureList,
+    CultureCreate {
+        label: Option<String>,
+    },
+    CultureDiscard {
+        campaign_id: String,
+    },
+    HerdStatus,
     Version,
     Help(HelpTopic),
     /// Prints `command_paths()`, one per line, and exits — no daemon socket
@@ -96,6 +104,7 @@ pub enum HelpTopic {
     Vulnerability,
     Telemetry,
     Debug,
+    Culture,
 }
 
 impl HelpTopic {
@@ -109,6 +118,7 @@ impl HelpTopic {
             "vulnerability" => Some(Self::Vulnerability),
             "telemetry" => Some(Self::Telemetry),
             "debug" => Some(Self::Debug),
+            "culture" => Some(Self::Culture),
             _ => None,
         }
     }
@@ -339,6 +349,28 @@ impl Command {
             [command, subcommand, id] if command == "actions" && subcommand == "evaluate" => {
                 Self::EvaluateAction(id.clone())
             }
+            [command] if command == "culture" => Self::CultureList,
+            [command, subcommand] if command == "culture" && subcommand == "list" => {
+                Self::CultureList
+            }
+            [command, subcommand] if command == "culture" && subcommand == "create" => {
+                Self::CultureCreate { label: None }
+            }
+            [command, subcommand, label] if command == "culture" && subcommand == "create" => {
+                Self::CultureCreate {
+                    label: Some(label.clone()),
+                }
+            }
+            [command, subcommand, campaign_id]
+                if command == "culture" && subcommand == "discard" =>
+            {
+                Self::CultureDiscard {
+                    campaign_id: campaign_id.clone(),
+                }
+            }
+            [command, subcommand] if command == "herd" && subcommand == "status" => {
+                Self::HerdStatus
+            }
             [command] if command == "health" => Self::Health,
             [command] if command == "http-token" => Self::HttpToken,
             [command] if command == "version" || command == "--version" || command == "-V" => {
@@ -405,6 +437,11 @@ impl Command {
             "debug inject-priority",
             "debug guard-state",
             "debug guard-finding",
+            "culture",
+            "culture list",
+            "culture create",
+            "culture discard",
+            "herd status",
             "health",
             "http-token",
             "version",
@@ -492,6 +529,14 @@ impl Command {
             }
             Self::Health => Some(IpcRequest::Health),
             Self::HttpToken => Some(IpcRequest::HttpToken),
+            Self::CultureList => Some(IpcRequest::CultureList),
+            Self::CultureCreate { label } => Some(IpcRequest::CultureCreate {
+                label: label.clone(),
+            }),
+            Self::CultureDiscard { campaign_id } => Some(IpcRequest::CultureDiscard {
+                campaign_id: campaign_id.clone(),
+            }),
+            Self::HerdStatus => Some(IpcRequest::HerdStatus),
             Self::Version | Self::Help(_) | Self::ListCommands => None,
         }
     }
@@ -909,6 +954,54 @@ fn render_response(response: &IpcResponse) -> String {
                 "priority channel was already full — synthetic observation dropped, same as real priority traffic would be under saturation".to_string()
             }
         }
+        IpcResponse::CultureCampaigns { campaigns } => {
+            if campaigns.is_empty() {
+                return "No Culture campaigns.".into();
+            }
+            campaigns
+                .iter()
+                .map(|campaign| {
+                    format!(
+                        "{}  {:<10} runs={}  {}  {}",
+                        campaign.campaign_id,
+                        campaign.state,
+                        campaign.run_count,
+                        campaign.label.as_deref().unwrap_or("-"),
+                        campaign.workspace,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        IpcResponse::CultureDiscarded { discarded } => {
+            if *discarded {
+                "campaign discarded".to_string()
+            } else {
+                "no such campaign".to_string()
+            }
+        }
+        IpcResponse::HerdStatus { peers } => {
+            if peers.is_empty() {
+                return "No Herd peers configured.".into();
+            }
+            peers
+                .iter()
+                .map(|peer| {
+                    format!(
+                        "{:<16} {:<28} pushed={}  last_attempt={}  last_success={}  {}",
+                        peer.label,
+                        peer.base_url,
+                        peer.packages_pushed,
+                        peer.last_attempt_at
+                            .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                        peer.last_success_at
+                            .map_or_else(|| "-".to_string(), |value| value.to_string()),
+                        peer.last_error.as_deref().unwrap_or("ok"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
         IpcResponse::Error { message } => format!("Error: {message}"),
     }
 }
@@ -1008,12 +1101,13 @@ fn help(topic: HelpTopic) -> String {
         HelpTopic::Vulnerability => help_vulnerability(),
         HelpTopic::Telemetry => help_telemetry(),
         HelpTopic::Debug => help_debug(),
+        HelpTopic::Culture => help_culture(),
     }
 }
 
 fn help_general() -> String {
     format!(
-        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  health                                      Show subsystem health\n  guard                                       Guard trust state, findings, and integrity manifest (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  incidents                                   List incidents / show details (see: incidents --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  http-token                                  Print the HTTP API bearer token\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
+        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  health                                      Show subsystem health\n  guard                                       Guard trust state, findings, and integrity manifest (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  incidents                                   List incidents / show details (see: incidents --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  culture <SUBCOMMAND>                        Isolated campaign snapshot workspaces (see: culture --help)\n  herd status                                 Per-peer Herd push status\n  http-token                                  Print the HTTP API bearer token\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -1051,6 +1145,10 @@ fn help_telemetry() -> String {
 
 fn help_debug() -> String {
     "Development-only surfaces. Not a production operator API; disabled in release builds.\n\nUsage:\n  dendrite debug seed-incident [LABEL]\n  dendrite debug inject-priority [LABEL]\n  dendrite debug guard-state <STATE>\n  dendrite debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>\n\n  debug seed-incident [LABEL]                            Seed a synthetic incident/graph for local testing\n  debug inject-priority [LABEL]                          Push a synthetic Critical-severity observation through the real priority ingestion channel, for testing priority-lane behaviour under load — seed-incident does NOT exercise this, it bypasses the ingestion queue entirely\n  debug guard-state <STATE>                              Force Guard trust state\n  debug guard-finding <TARGET> <SEVERITY> <DESCRIPTION>   Record a synthetic integrity finding\n\nTrust states (for guard-state):\n  trusted, degraded, suspected, quarantined, compromised, recovering\n\nSeverities (for guard-finding):\n  informational, warning, high, critical".into()
+}
+
+fn help_culture() -> String {
+    "Culture: isolated snapshot workspaces of the active databases, for future adaptive\nmalware analysis. Snapshotting only — there is no sandboxed execution here yet (see\ncrates/dendrited/src/containment.rs).\n\nUsage:\n  dendrite culture\n  dendrite culture list\n  dendrite culture create [LABEL]\n  dendrite culture discard <CAMPAIGN_ID>\n\n  culture / culture list          List campaigns (workspace snapshots)\n  culture create [LABEL]          Snapshot the active databases into a new campaign\n  culture discard <CAMPAIGN_ID>   Delete a campaign workspace and its snapshots".into()
 }
 
 #[cfg(test)]
@@ -1391,6 +1489,39 @@ mod tests {
         assert_eq!(
             Command::parse(&args(&["--list-commands"])),
             Command::ListCommands
+        );
+    }
+
+    #[test]
+    fn parses_culture_commands() {
+        assert_eq!(Command::parse(&args(&["culture"])), Command::CultureList);
+        assert_eq!(
+            Command::parse(&args(&["culture", "list"])),
+            Command::CultureList
+        );
+        assert_eq!(
+            Command::parse(&args(&["culture", "create"])),
+            Command::CultureCreate { label: None }
+        );
+        assert_eq!(
+            Command::parse(&args(&["culture", "create", "sample-run"])),
+            Command::CultureCreate {
+                label: Some("sample-run".into())
+            }
+        );
+        assert_eq!(
+            Command::parse(&args(&["culture", "discard", "ama-1234"])),
+            Command::CultureDiscard {
+                campaign_id: "ama-1234".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_herd_status() {
+        assert_eq!(
+            Command::parse(&args(&["herd", "status"])),
+            Command::HerdStatus
         );
     }
 

@@ -47,6 +47,9 @@ Environment=DENDRITE_SELF_DB=/var/lib/dendrite/self.sqlite3
 Environment=DENDRITE_STM_DB=/var/lib/dendrite/stm.sqlite3
 Environment=DENDRITE_LTM_DB=/var/lib/dendrite/ltm.sqlite3
 Environment=DENDRITE_INCIDENT_DB=/var/lib/dendrite/incidents.sqlite3
+Environment=DENDRITE_CULTURE_ROOT=/var/lib/dendrite/culture
+Environment=DENDRITE_HERD_DB=/var/lib/dendrite/herd.sqlite3
+Environment=DENDRITE_HERD_CONFIG=/etc/dendrite/herd.json
 Environment=DENDRITE_CVE_SNAPSHOT=/etc/dendrite/cve-snapshot.json
 Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
 Environment=DENDRITE_MAGI_SOCKET=/run/dendrite/dendrite-magi.sock

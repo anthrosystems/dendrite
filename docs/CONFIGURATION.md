@@ -13,6 +13,9 @@ This is development-time plumbing. Batch 7 packaging should replace ad-hoc envir
 | `DENDRITE_LTM_DB` | `data/ltm.sqlite3` | Long Term Memory Graph database |
 | `DENDRITE_INCIDENT_DB` | `data/incidents.sqlite3` | Incidents/evidence database — also backs the vulnerability, CVE, and behaviour-knowledge tables (`VulnerabilityService`/`KnowledgeService` both open this same file; there is no separate vulnerability/knowledge DB path) |
 | `DENDRITE_CVE_SNAPSHOT` | `knowledge/cve-snapshot.json` | Bundled CVE/behaviour knowledge, auto-imported once at startup |
+| `DENDRITE_CULTURE_ROOT` | `data/culture` | Root directory for Culture campaign workspaces (see below) |
+| `DENDRITE_HERD_DB` | `data/herd.sqlite3` | Herd's own per-peer push-status database (see below) — not the exchanged Antiserum data itself |
+| `DENDRITE_HERD_CONFIG` | `data/herd.json` | Herd's peer-list config file (see below). Missing/empty means Herd is disabled |
 
 If this file exists, it's imported via the same path (and validation) as `vulnerability import` — including the strict `"kind": "graph-relation"` behaviour-condition check documented in `crates/dendrite-cli/CLI.md`. If it's absent, startup continues normally with no CVE knowledge preloaded. If it exists but fails validation, the failure is logged to stderr rather than aborting startup — a deliberately softer failure mode than the CLI's hard rejection, since this runs unattended rather than as an explicit user action. There is currently no bundled default snapshot shipped in the repo; this is the intended integration point for one once packaging (Batch 7) ships real CVE/behaviour data.
 
@@ -91,6 +94,38 @@ Unlike MAGI (a stateless per-request vote), Guard owns real persistent state —
 Verification is not only triggered manually: `dendrite-guard` also runs it automatically, in a background thread that verifies once at startup and then every `DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS` (default `300`) — same env-var-configuration pattern as everything else here. A detected mismatch now has real consequences rather than just being reported: it's recorded as an `IntegrityFinding` (deduplicated, so a persistent unresolved mismatch produces one finding, not one per tick) and escalates trust state, via a monotonic rule that never automatically moves trust back toward `Trusted`. See `crates/dendrite-guard/README.md`'s "Integrity manifest" section for the severity heuristic and escalation rules.
 
 Getting back to `Trusted` is its own explicit, two-step operation: `dendrite guard recover begin` writes a one-time token into Guard's own privilege-separated state directory (never returned over the wire, since a compromised `dendrited` relays every response) and `dendrite guard recover complete <TOKEN>` — with the token read directly off the host, not through `dendrited` — verifies it, re-baselines against current content, and restores `Trusted`. See `crates/dendrite-guard/README.md`'s "Recovery" section for why this needs authentication beyond ordinary socket reachability.
+
+## Culture
+
+Culture (`crates/dendrited/src/culture.rs`, `dendrite culture`) snapshots the active `self`/`stm`/`ltm`/`incidents` databases (via SQLite's `VACUUM INTO`) into an isolated, 0700-permissioned campaign workspace under `DENDRITE_CULTURE_ROOT`, for future adaptive malware analysis. `dendrite-guard`'s own database is never included in the snapshot — since the Guard split (see above), `dendrited` has no read access to it at all — so a campaign carries Guard's live trust state as of creation time (via the same Antiserum attestation path a manual export uses), not a raw file copy.
+
+This is a workspace-management skeleton only: there is no sandboxed execution here yet. `crates/dendrited/src/containment.rs` defines the two real gaps this depends on before Culture can safely run anything it captures — an `ActionExecutor` (the missing link between an *approved* `ActionType` like `TerminateProcess`/`QuarantineObject` and it actually happening on the host) and a `CampaignSandbox` (VM/container/namespace isolation for whatever a campaign executes) — both currently stubbed with logging-only, `NotImplemented`-returning defaults.
+
+| Command | Effect |
+|---|---|
+| `dendrite culture` / `dendrite culture list` | List campaigns |
+| `dendrite culture create [LABEL]` | Snapshot the active databases into a new campaign |
+| `dendrite culture discard <CAMPAIGN_ID>` | Delete a campaign workspace and its snapshots |
+
+## Herd
+
+Herd (`crates/dendrited/src/herd.rs`, `dendrite herd status`) automates Antiserum exchange between operator-named peer hosts on a timer (`DENDRITE_HERD_PUSH_INTERVAL_SECONDS`, default `120`), rather than requiring a manual export/copy/import for every exchange. There is no leader and no election: every peer relationship is configured explicitly and symmetrically (a full mesh, if every host lists every other host as a peer — the same way a Proxmox cluster's config is fully replicated to every node rather than funnelled through one), and pushing reuses the exact same signed-envelope verify/dedup/store pipeline a manual `.danti` import already uses (`POST /api/v1/analysis/import` on the receiving peer).
+
+Two things this deliberately does not do:
+- **No auto-accept.** A pushed package is verified, deduplicated, and stored on the receiving peer — it is not merged into that peer's live memory graph or vulnerability data. That merge (`dendrite guard`-gated `accept_antiserum_knowledge`) stays an explicit operator action on every peer, matching Antiserum's existing trust model. A per-peer `auto_accept` field exists in `herd.json` for a future opt-in; nothing acts on it yet.
+- **Push only, not pull.** An unreachable peer simply fails that tick (recorded, visible in `dendrite herd status`) and is retried next interval.
+
+`DENDRITE_HERD_CONFIG` (default `data/herd.json`, packaged `/etc/dendrite/herd.json`) is a JSON array of peers — see `packaging/herd.json.example` for the shape. A missing or empty file means Herd is disabled; there is nothing to configure for a normal single-node install.
+
+```json
+[
+  { "label": "host-b", "base_url": "http://10.20.0.5:8766", "token": "<host-b's own HTTP API token>", "auto_accept": false }
+]
+```
+
+`token` is the peer's own ordinary HTTP API bearer token (`dendrite http-token` run on that peer). Message authenticity/integrity comes from the Antiserum envelope's own Ed25519 signature, verified on the receiving end exactly as a manual import is — the transport itself carries no additional trust, so an operator who wants encryption in transit (e.g. across an untrusted network segment) should put a TLS-terminating reverse proxy in front of each peer's API, the same way they would for the UI.
+
+`dendrite herd status` reports, per configured peer: last push attempt/success time, the last error (if any), and how many packages have been successfully pushed — the same shape as `docker node ls`/`pvecm status`.
 
 ## Telemetry collectors
 

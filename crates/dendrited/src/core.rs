@@ -3,12 +3,14 @@ use crate::{
     AntiserumAttestation, AntiserumError, AntiserumKnowledgeAcceptanceResult,
     AntiserumPackageDetail, AntiserumPackageOrigin, AntiserumPackageStore, AntiserumPackageSummary,
     AntiserumPayload, AntiserumVerificationKey, AttackChainRecord, BuiltPayloadSet,
-    CreateAntiserumRequest, CveKnowledgeBundle, CveKnowledgeRecord, GuardIpcClient, GuardService,
-    GuardStoreError, IncidentService, IncidentStoreError, InstanceKeyRecord, KnowledgeError,
-    KnowledgeService, MagiIpcClient, SelfStore, SelfStoreError, SignedAntiserumPackage,
-    VulnerabilityCandidate, VulnerabilityError, VulnerabilityService,
+    CreateAntiserumRequest, CultureCampaign, CultureError, CultureManager, CultureSources,
+    CveKnowledgeBundle, CveKnowledgeRecord, GuardIpcClient, GuardService, GuardStoreError,
+    HerdError, HerdPeerConfig, HerdStore, IncidentService, IncidentStoreError, InstanceKeyRecord,
+    KnowledgeError, KnowledgeService, MagiIpcClient, SelfStore, SelfStoreError,
+    SignedAntiserumPackage, VulnerabilityCandidate, VulnerabilityError, VulnerabilityService,
     automatic_attack_chain_request, build_payloads, build_signed_package,
-    enforce_automatic_export_ceiling, verification_key_from_package, verify_signed_package,
+    enforce_automatic_export_ceiling, push_to_peer, verification_key_from_package,
+    verify_signed_package,
 };
 use dendrite_memory::model::{
     DecayPolicy, DecayRate, MemoryConfidence, MemoryNode, MemoryNodeId, MemoryNodeKind,
@@ -20,13 +22,13 @@ use dendrite_memory::storage::{
     execute_node_upsert, execute_relationship_upsert,
 };
 use dendrite_protocol::{
-    ActionDetailDto, ActionSummaryDto, Confidence, EntityKind, EvidenceCandidate, EvidenceId,
-    EvidenceObjectRef, EvidenceSource, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentId,
-    IncidentSummaryDto, InstanceSigningKeyDto, IntegrityFindingDto, IntegrityManifestStatusDto,
-    IntegrityVerificationDto, MemoryGraphDto, MemoryNodeDto, MemoryRelationshipDto,
-    ObjectDescriptor, ObjectId, Observation, ObservationKind, RecoveryBeginDto,
-    RecoveryCompleteDto, Severity, TelemetryEventDto, TelemetryPipelineDto, TelemetrySourceDto,
-    TelemetryStatusDto, VulnerabilityExposureDto,
+    ActionDetailDto, ActionSummaryDto, Confidence, CultureCampaignDto, EntityKind,
+    EvidenceCandidate, EvidenceId, EvidenceObjectRef, EvidenceSource, GuardStatusDto, HealthDto,
+    HerdPeerStatusDto, IncidentDetailDto, IncidentId, IncidentSummaryDto, InstanceSigningKeyDto,
+    IntegrityFindingDto, IntegrityManifestStatusDto, IntegrityVerificationDto, MemoryGraphDto,
+    MemoryNodeDto, MemoryRelationshipDto, ObjectDescriptor, ObjectId, Observation, ObservationKind,
+    RecoveryBeginDto, RecoveryCompleteDto, Severity, TelemetryEventDto, TelemetryPipelineDto,
+    TelemetrySourceDto, TelemetryStatusDto, VulnerabilityExposureDto,
 };
 use rusqlite::Connection;
 use std::collections::{BTreeMap, VecDeque};
@@ -132,6 +134,8 @@ pub enum DaemonError {
     Antiserum(AntiserumError),
     Analysis(AnalysisError),
     Knowledge(KnowledgeError),
+    Culture(CultureError),
+    Herd(HerdError),
     Debug(String),
 }
 
@@ -194,6 +198,18 @@ impl From<KnowledgeError> for DaemonError {
     }
 }
 
+impl From<CultureError> for DaemonError {
+    fn from(error: CultureError) -> Self {
+        Self::Culture(error)
+    }
+}
+
+impl From<HerdError> for DaemonError {
+    fn from(error: HerdError) -> Self {
+        Self::Herd(error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestionOutcome {
     pub relationship_id: Option<MemoryRelationshipId>,
@@ -217,6 +233,21 @@ pub struct DaemonCore {
     telemetry_recent: VecDeque<TelemetryEventDto>,
     telemetry_sources: Vec<TelemetrySourceDto>,
     telemetry_pipeline: TelemetryPipelineDto,
+    /// `None` until `configure_culture` is called (`DaemonRuntime::open`
+    /// does this with the same paths it opened `self`/`stm`/`ltm`/
+    /// `incidents` from) — every existing `DaemonCore::open*` test helper
+    /// leaves Culture unconfigured, which is the correct default: creating
+    /// campaign directories on disk is not something opening a core for a
+    /// unit test should ever do as a side effect.
+    culture: Option<CultureManager>,
+    culture_sources: Option<CultureSources>,
+    /// `None` until `set_herd_store_path` is called. Herd peers
+    /// (`herd_peers`) can be non-empty while this is `None` only
+    /// transiently during startup ordering; `herd_status`/`herd_push_tick`
+    /// both treat a missing store as "nothing to report yet" rather than
+    /// erroring.
+    herd_store: Option<HerdStore>,
+    herd_peers: Vec<HerdPeerConfig>,
 }
 
 impl DaemonCore {
@@ -295,7 +326,139 @@ impl DaemonCore {
             telemetry_recent: VecDeque::with_capacity(512),
             telemetry_sources: Vec::new(),
             telemetry_pipeline: TelemetryPipelineDto::default(),
+            culture: None,
+            culture_sources: None,
+            herd_store: None,
+            herd_peers: Vec::new(),
         })
+    }
+
+    /// Opens (creating if needed) a Culture campaign-workspace root and
+    /// records the live database paths a new campaign snapshots from.
+    /// `DaemonRuntime::open` calls this with `RuntimeConfig`'s own
+    /// `culture_root`/`self_path`/`stm_path`/`ltm_path`/`incident_path` —
+    /// nothing calls it in any existing test helper, so Culture stays
+    /// unconfigured (and inert) unless a runtime explicitly wires it up.
+    pub fn configure_culture(
+        &mut self,
+        root: std::path::PathBuf,
+        sources: CultureSources,
+    ) -> Result<(), DaemonError> {
+        self.culture = Some(CultureManager::open(root)?);
+        self.culture_sources = Some(sources);
+        Ok(())
+    }
+
+    fn culture_manager(&self) -> Result<&CultureManager, DaemonError> {
+        self.culture
+            .as_ref()
+            .ok_or_else(|| DaemonError::Debug("Culture is not configured on this host".into()))
+    }
+
+    pub fn culture_list_campaigns(&self) -> Result<Vec<CultureCampaignDto>, DaemonError> {
+        Ok(self
+            .culture_manager()?
+            .list_campaigns()?
+            .into_iter()
+            .map(culture_campaign_to_dto)
+            .collect())
+    }
+
+    pub fn culture_create_campaign(
+        &mut self,
+        label: Option<&str>,
+        now: u64,
+    ) -> Result<CultureCampaignDto, DaemonError> {
+        let manager = self.culture_manager()?;
+        let sources = self
+            .culture_sources
+            .as_ref()
+            .ok_or_else(|| DaemonError::Debug("Culture is not configured on this host".into()))?;
+        let campaign = manager.create_campaign(sources, label, now)?;
+        Ok(culture_campaign_to_dto(campaign))
+    }
+
+    pub fn culture_discard_campaign(&self, campaign_id: &str) -> Result<bool, DaemonError> {
+        Ok(self.culture_manager()?.discard_campaign(campaign_id)?)
+    }
+
+    /// Opens (creating if needed) the local Herd push-status database. See
+    /// `crate::herd` — the actual exchanged data lives in the ordinary
+    /// `AntiserumPackageStore` on whichever side received it, this only
+    /// tracks "did our last push to a given peer succeed, and when".
+    pub fn set_herd_store_path(&mut self, path: &str) -> Result<(), DaemonError> {
+        self.herd_store = Some(HerdStore::open(path)?);
+        Ok(())
+    }
+
+    pub fn set_herd_peers(&mut self, peers: Vec<HerdPeerConfig>) {
+        self.herd_peers = peers;
+    }
+
+    pub fn herd_status(&self) -> Result<Vec<HerdPeerStatusDto>, DaemonError> {
+        let Some(store) = self.herd_store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut statuses = Vec::with_capacity(self.herd_peers.len());
+        for peer in &self.herd_peers {
+            let status = store.status(&peer.label)?;
+            statuses.push(match status {
+                Some(status) => HerdPeerStatusDto {
+                    label: status.label,
+                    base_url: status.base_url,
+                    last_attempt_at: status.last_attempt_at,
+                    last_success_at: status.last_success_at,
+                    last_error: status.last_error,
+                    packages_pushed: status.packages_pushed,
+                },
+                None => HerdPeerStatusDto {
+                    label: peer.label.clone(),
+                    base_url: peer.base_url.clone(),
+                    last_attempt_at: None,
+                    last_success_at: None,
+                    last_error: None,
+                    packages_pushed: 0,
+                },
+            });
+        }
+        Ok(statuses)
+    }
+
+    /// One push cycle: for every configured peer, build a fresh Antiserum
+    /// export of everything currently exportable (`CreateAntiserumRequest`'s
+    /// default scope — same as a manual "export everything" would use) and
+    /// POST it to that peer's `/api/v1/analysis/import`. A per-peer failure
+    /// (unreachable host, rejected by Guard's export-safety gate, etc.) is
+    /// recorded and does not stop the remaining peers. See `crate::herd`'s
+    /// module doc comment for what this deliberately does not do yet
+    /// (auto-accept, pull-based reconciliation).
+    pub fn herd_push_tick(
+        &mut self,
+        vulnerability: &VulnerabilityService,
+        now: u64,
+    ) -> Result<(), DaemonError> {
+        if self.herd_peers.is_empty() || self.herd_store.is_none() {
+            return Ok(());
+        }
+        let peers = self.herd_peers.clone();
+        for peer in &peers {
+            if let Some(store) = self.herd_store.as_ref() {
+                store.record_attempt(&peer.label, &peer.base_url, now)?;
+            }
+            let outcome = self
+                .create_antiserum_export(vulnerability, &CreateAntiserumRequest::default(), now)
+                .and_then(|summary| self.analysis_package_bytes(&summary.antiserum_id))
+                .map(|bytes| push_to_peer(&bytes, peer));
+            let Some(store) = self.herd_store.as_ref() else {
+                continue;
+            };
+            match outcome {
+                Ok(Ok(())) => store.record_success(&peer.label, now)?,
+                Ok(Err(error)) => store.record_error(&peer.label, &format!("{error:?}"))?,
+                Err(error) => store.record_error(&peer.label, &format!("{error:?}"))?,
+            }
+        }
+        Ok(())
     }
 
     pub fn memory(&self) -> &MemoryStore {
@@ -2270,6 +2433,18 @@ fn reinforced_expiry(created_at: u64, now: u64, qualified_links: usize) -> u64 {
         .min(REINFORCED_STM_MAX_TTL_SECONDS);
     now.saturating_add(ttl)
         .min(created_at.saturating_add(REINFORCED_STM_HARD_LIFETIME_SECONDS))
+}
+
+fn culture_campaign_to_dto(campaign: CultureCampaign) -> CultureCampaignDto {
+    CultureCampaignDto {
+        campaign_id: campaign.campaign_id,
+        label: campaign.label,
+        state: campaign.state,
+        created_at: campaign.created_at,
+        workspace: campaign.workspace.to_string_lossy().into_owned(),
+        run_count: campaign.run_count,
+        notes: campaign.notes,
+    }
 }
 
 fn short_instance_id(instance_id: &str) -> &str {

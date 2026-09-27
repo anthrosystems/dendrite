@@ -6,7 +6,7 @@ This file is the canonical implementation roadmap. Historical patch/batch notes 
 
 The deterministic/pre-ML Dendrite foundation now includes the Memory Graph, incident/evidence correlation, MAGI/policy/Guard action gating, eBPF/fanotify telemetry with fallbacks, package/CVE exposure knowledge, authorised package remediation, signed self-update foundations, instance signing identity, Antiserum packages and Analysis review tooling, cross-host correlation keys, reusable behaviour knowledge, attack-chain classification/enrichment, and Dendrite Vulnerability Candidates.
 
-A low-level **Culture** (working name, formerly "Adaptive Malware Analysis"/AMA) skeleton also exists. It can create isolated campaign workspaces by snapshotting the active Self, Memory, Incidents, and Guard SQLite databases into campaign-local copies. It is deliberately not yet a malware-execution or automatic-counter system and never mutates the active databases. Full campaign orchestration belongs after the deterministic baseline is proven stable.
+A low-level **Culture** (working name, formerly "Adaptive Malware Analysis"/AMA) skeleton also exists, now with `dendrite culture` CLI/IPC surfacing (Batch 9). It can create isolated campaign workspaces by snapshotting the active Self/Memory/Incidents SQLite databases into campaign-local copies — Guard's own database is no longer included in that snapshot, since the Guard privilege-separation split means `dendrited` can't read it any more (see Batch 9 below). It is deliberately not yet a malware-execution or automatic-counter system and never mutates the active databases. Full campaign orchestration belongs after the deterministic baseline is proven stable.
 
 ## Batch 7: Packaging
 
@@ -150,7 +150,9 @@ Repeat the relevant Checkpoint B safety/performance/false-positive validation wi
 
 Started ahead of Batch 8 (ML), by explicit operator choice, directly on `dev`.
 
-- richer fleet/multi-system views without weakening host-local trust boundaries — not started;
+**"Herd" (renamed from "fleet") — skeleton done.** No leader and no election anywhere — nothing in the codebase does host-to-host consensus, and a real one (Raft/corosync-style) is a separate, much larger undertaking than a first skeleton warrants. Instead `crates/dendrited/src/herd.rs` automates the *existing, already-validated* Antiserum export/import/verify pipeline on a timer (`DENDRITE_HERD_PUSH_INTERVAL_SECONDS`, default 120s) between a statically configured, full-mesh peer list (`DENDRITE_HERD_CONFIG` → `packaging/herd.json.example`) — the same way a Proxmox cluster's config is fully replicated to every node rather than funnelled through one. Deliberately does **not** auto-accept: a pushed package is verified/deduplicated/stored on the receiving peer exactly as a manual `.danti` import is, but merging into that peer's live graph/vulnerability data stays an explicit operator action (`accept_antiserum_knowledge`), matching Antiserum's existing trust model — a per-peer `auto_accept` config field exists for a future opt-in but nothing acts on it yet. Also push-only, not pull; an unreachable peer just fails that tick and retries next interval. `dendrite herd status` reports per-peer last-attempt/last-success/last-error/packages-pushed, the same shape as `docker node ls`/`pvecm status`. Verified live end-to-end in this session: two real `dendrited` processes, one pushing every 3s, the other's `/api/v1/analysis/packages` showing the imported package with a valid signature/content-root/attestation and `knowledge_status: "not_accepted"` — confirming the no-auto-accept boundary holds in practice, not just in the type signature.
+
+**"Culture" — CLI/IPC surfacing done, execution/enforcement still stubbed.** The campaign-snapshot mechanism (see "Current pre-packaging state" and "Future: Culture" above) existed already but had no CLI, no IPC, and a dead duplicate module (`adaptive_analysis.rs`, an unwired leftover from the AMA→Culture rename — deleted). Added `dendrite culture` / `culture list` / `culture create [LABEL]` / `culture discard <ID>`, wired through new `IpcRequest`/`IpcResponse` variants into `DaemonCore`. Answering the operator's question directly: no, real enforcement does not exist yet either — `dendrite_protocol::ActionType` (`TerminateProcess`, `QuarantineObject`, etc.) is a decision taxonomy the MAGI→policy→Guard→transaction pipeline can approve, but nothing calls `kill()`/moves a file/touches `iptables` today. `crates/dendrited/src/containment.rs` now models both real gaps this depends on — an `ActionExecutor` (approved decision → actual host effect) and a `CampaignSandbox` (actual execution isolation for whatever a campaign runs) — as traits with a logging-only, `NotImplemented`-returning default (`NoopActionExecutor`/`NoopCampaignSandbox`), so there's a real interface to build against later instead of nothing to call or a silently-faked success. Building neither of these was in scope for this pass.
 
 **CLI shell autocompletion — done.** `dendrite-cli` is a hand-rolled parser, not `clap`-based, so there's no free completion generator. Added a `--list-commands` introspection flag (`Command::ListCommands`, handled in `execute()` without touching the daemon socket, same as `--version`/`--help`) backed by `Command::command_paths()`, a hand-maintained, doc-commented, test-guarded flat list of every literal token path `parse()` recognises. `packaging/completions/dendrite-cli.bash` and `packaging/completions/_dendrite-cli` (bash and zsh) both work by calling `dendrite-cli --list-commands` and prefix-filtering the result client-side, rather than hardcoding a copy of the command tree — so neither script can silently drift from the parser as commands are added or removed. A regression test (`every_listed_command_path_is_recognised_by_parse`) fails the build if `command_paths()` ever lists something `parse()` no longer recognises. Both scripts are wired into the `.deb`'s `[package.metadata.deb]` assets (`usr/share/bash-completion/completions/dendrite-cli`, `usr/share/zsh/vendor-completions/_dendrite-cli`). Building this surfaced and fixed a real pre-existing parser bug: `vulnerability import` (missing its required path argument) was silently misparsing as an ID lookup for an exposure literally named "import", the same bug class an existing test already guarded against for `manual`/`authorise`/`update`/`ignore`/`delete` — `import` was just missing from that exclusion list.
 
@@ -160,7 +162,7 @@ Started ahead of Batch 8 (ML), by explicit operator choice, directly on `dev`.
 
 Memory Graph clustering (the earlier backlog item — behaviour/fingerprint-derived named clusters with a "magnetic" pull) is dropped from this batch: the artificial per-kind clustering was removed in favour of pure link+repel+centre physics (see the WebGLMemoryGraph rework earlier this branch), and the operator is satisfied with that result over building a new clustering feature.
 
-To be explicit about what "fleet" does and doesn't mean here: the underlying exchange mechanism (Antiserum export/import/accept, one signed `.danti` package at a time, each acceptance an explicit operator action) already exists and is validated — see "Second-instance Antiserum validation" above. What's genuinely undesigned is any *live*, ongoing, multi-host aggregation: a UI/CLI surface that shows several hosts' state together in real time, without an explicit accept step per exchange. The README's "later federation" phrase points at this same undesigned territory. Nothing in the codebase today does live cross-host querying or in-flight merging; don't assume "fleet" means that already exists just because Antiserum exchange does.
+**Not started, still open:** richer fleet/multi-system *views* — a UI surface that shows several hosts' Herd-known state together — without weakening host-local trust boundaries. Herd (above) gives every host a local copy of what its peers have pushed (via the ordinary Antiserum package store, still per-host and still requiring explicit accept), but there is no cross-host UI aggregation view yet, and no live in-flight querying of another host on demand.
 
 ## Batch 10: Benchmarking
 
@@ -174,7 +176,7 @@ Timeouts and other numeric thresholds introduced during Checkpoint A were placeh
 
 Working name: **Culture** (formerly "Adaptive Malware Analysis"/AMA — code symbols renamed accordingly: `culture.rs`, `Culture{Error,Sources,Campaign,Manager}`).
 
-A low-level campaign snapshot skeleton exists now, but the full feature is future research work. Intended architecture:
+A low-level campaign snapshot skeleton exists now, with `dendrite culture` CLI/IPC surfacing added in Batch 9, but the full feature is future research work. Intended architecture:
 
 ```text
 active Dendrite databases
@@ -185,9 +187,11 @@ contained campaign workspace
 ├── stm.sqlite3
 ├── ltm.sqlite3
 ├── incidents.sqlite3
-├── guard.sqlite3
+├── guard.sqlite3 (only if dendrited can read it — see below)
 └── artifacts/
 ```
+
+`guard.sqlite3` is optional now (`CultureSources::guard_db: Option<PathBuf>`), not because it stopped mattering, but because it moved out of reach: since Guard's privilege-separation split, `dendrite-guard` owns that database under its own system account and `dendrited` has no read access to it at all on a real deployment. A campaign still carries Guard's live trust state as of creation time via the same Antiserum-attestation path a manual export uses; it just isn't a raw file copy any more. Reuniting the two (a deliberately-granted read path, or running Culture as part of a process that does have access) is real follow-up work, not done here.
 
 Rules:
 

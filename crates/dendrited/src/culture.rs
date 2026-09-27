@@ -37,7 +37,18 @@ pub struct CultureSources {
     pub stm_db: PathBuf,
     pub ltm_db: PathBuf,
     pub incidents_db: PathBuf,
-    pub guard_db: PathBuf,
+    /// `None` on every real deployment today: since the Guard split
+    /// (`dendrite-guard` now runs as its own privilege-separated process
+    /// with its own account and its own `guard.sqlite3`, set via its own
+    /// `DENDRITE_GUARD_DB` — see `packaging/dendrite-guard.service`),
+    /// `dendrited` no longer has read access to that database at all, so
+    /// there is nothing for it to snapshot here. A campaign still carries
+    /// Guard's live trust state as of creation time via its own Antiserum
+    /// attestation path rather than a raw file copy. Kept as a field
+    /// (rather than removed) so a future in-process reunification, or a
+    /// deliberately-granted read path, doesn't require reshaping this type
+    /// again.
+    pub guard_db: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +89,6 @@ impl CultureManager {
             ("stm", &sources.stm_db),
             ("ltm", &sources.ltm_db),
             ("incidents", &sources.incidents_db),
-            ("guard", &sources.guard_db),
         ] {
             if !path.exists() {
                 return Err(CultureError::Invalid(format!(
@@ -93,12 +103,27 @@ impl CultureManager {
         secure_dir(&workspace)?;
         secure_dir(&workspace.join("artifacts"))?;
 
+        let guard_db = match &sources.guard_db {
+            Some(path) => {
+                if !path.exists() {
+                    return Err(CultureError::Invalid(format!(
+                        "cannot create Adaptive Malware Analysis campaign: guard database {} does not exist",
+                        path.display()
+                    )));
+                }
+                let destination = workspace.join("guard.sqlite3");
+                sqlite_snapshot(path, &destination)?;
+                Some(destination)
+            }
+            None => None,
+        };
+
         let baseline = CultureSources {
             self_db: workspace.join("self.sqlite3"),
             stm_db: workspace.join("stm.sqlite3"),
             ltm_db: workspace.join("ltm.sqlite3"),
             incidents_db: workspace.join("incidents.sqlite3"),
-            guard_db: workspace.join("guard.sqlite3"),
+            guard_db,
         };
 
         for (source, destination) in [
@@ -106,7 +131,6 @@ impl CultureManager {
             (&sources.stm_db, &baseline.stm_db),
             (&sources.ltm_db, &baseline.ltm_db),
             (&sources.incidents_db, &baseline.incidents_db),
-            (&sources.guard_db, &baseline.guard_db),
         ] {
             sqlite_snapshot(source, destination)?;
         }
@@ -256,7 +280,11 @@ mod tests {
             stm_db: active.join("stm.sqlite3"),
             ltm_db: active.join("ltm.sqlite3"),
             incidents_db: active.join("incidents.sqlite3"),
-            guard_db: active.join("guard.sqlite3"),
+            // No guard_db here — see the field's doc comment: dendrited
+            // doesn't have read access to dendrite-guard's own database
+            // since the privilege-separation split, on a real deployment
+            // or in this test.
+            guard_db: None,
         };
 
         for path in [
@@ -264,7 +292,6 @@ mod tests {
             &sources.stm_db,
             &sources.ltm_db,
             &sources.incidents_db,
-            &sources.guard_db,
         ] {
             create_db(path, "live");
         }
@@ -293,6 +320,47 @@ mod tests {
 
         assert_eq!(active_value, "live");
         assert_eq!(campaign_value, "campaign");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn campaign_snapshots_guard_db_when_present() {
+        let root = std::env::temp_dir().join(format!("dendrite-ama-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+
+        let active = root.join("active");
+        fs::create_dir_all(&active).unwrap();
+
+        let sources = CultureSources {
+            self_db: active.join("self.sqlite3"),
+            stm_db: active.join("stm.sqlite3"),
+            ltm_db: active.join("ltm.sqlite3"),
+            incidents_db: active.join("incidents.sqlite3"),
+            guard_db: Some(active.join("guard.sqlite3")),
+        };
+
+        for path in [
+            &sources.self_db,
+            &sources.stm_db,
+            &sources.ltm_db,
+            &sources.incidents_db,
+            sources.guard_db.as_ref().unwrap(),
+        ] {
+            create_db(path, "live");
+        }
+
+        let manager = CultureManager::open(root.join("campaigns")).unwrap();
+        let campaign = manager
+            .create_campaign(&sources, Some("sample"), 10)
+            .unwrap();
+
+        let guard_db = campaign
+            .baseline
+            .guard_db
+            .as_ref()
+            .expect("guard_db snapshot should be Some when the source was Some");
+        assert!(guard_db.exists());
 
         fs::remove_dir_all(root).unwrap();
     }

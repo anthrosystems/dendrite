@@ -147,6 +147,22 @@ pub enum IpcRequest {
     /// permissions (group `dendrite`, mode `0660`) are the trust boundary
     /// this token is meant to match, not bypass.
     HttpToken,
+    /// Lists Culture campaigns (`crate::culture` — isolated snapshot
+    /// workspaces of the active Self/Memory/Incidents/Guard databases).
+    CultureList,
+    /// Snapshots the active databases into a new isolated campaign
+    /// workspace.
+    CultureCreate {
+        label: Option<String>,
+    },
+    /// Deletes a campaign workspace and all of its snapshots.
+    CultureDiscard {
+        campaign_id: String,
+    },
+    /// Per-peer push status for Herd (`crates/dendrited/src/herd.rs`) —
+    /// last attempt/success/error and packages pushed for each
+    /// operator-configured peer.
+    HerdStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +518,34 @@ pub struct HealthDto {
     pub guard: String,
 }
 
+/// A Culture campaign — an isolated snapshot workspace of the active
+/// Self/Memory/Incidents/Guard databases (see
+/// `crates/dendrited/src/culture.rs`). Deliberately mirrors
+/// `CultureCampaign`'s own fields rather than reusing that type directly,
+/// so the wire shape doesn't change if the internal one does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CultureCampaignDto {
+    pub campaign_id: String,
+    pub label: Option<String>,
+    pub state: String,
+    pub created_at: u64,
+    pub workspace: String,
+    pub run_count: u64,
+    pub notes: Vec<String>,
+}
+
+/// One operator-configured Herd peer's push status (see
+/// `crates/dendrited/src/herd.rs::HerdPeerStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdPeerStatusDto {
+    pub label: String,
+    pub base_url: String,
+    pub last_attempt_at: Option<u64>,
+    pub last_success_at: Option<u64>,
+    pub last_error: Option<String>,
+    pub packages_pushed: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub enum IpcResponse {
@@ -571,6 +615,15 @@ pub enum IpcResponse {
     Health(HealthDto),
     HttpToken {
         token: String,
+    },
+    CultureCampaigns {
+        campaigns: Vec<CultureCampaignDto>,
+    },
+    CultureDiscarded {
+        discarded: bool,
+    },
+    HerdStatus {
+        peers: Vec<HerdPeerStatusDto>,
     },
     Error {
         message: String,

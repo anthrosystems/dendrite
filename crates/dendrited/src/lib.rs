@@ -3,9 +3,11 @@
 mod actions;
 mod analysis;
 mod antiserum;
+mod containment;
 mod core;
 mod culture;
 mod guard;
+mod herd;
 mod http;
 mod incidents;
 mod knowledge;
@@ -36,11 +38,16 @@ pub use antiserum::{
     package_from_danti_bytes, package_to_danti_bytes, verification_key_from_package,
     verify_signed_package,
 };
+pub use containment::{
+    ActionExecutor, CampaignSandbox, ContainmentError, ExecutionOutcome, NoopActionExecutor,
+    NoopCampaignSandbox, SandboxRunOutcome,
+};
 pub use core::{DaemonCore, DaemonError, IngestionOutcome};
 pub use culture::{CultureCampaign, CultureError, CultureManager, CultureSources};
 pub use guard::{
     DEFAULT_GUARD_SOCKET_PATH, GuardEvaluator, GuardIpcClient, GuardService, GuardStoreError,
 };
+pub use herd::{HerdError, HerdPeerConfig, HerdPeerStatus, HerdStore, load_peers, push_to_peer};
 pub use incidents::{IncidentService, IncidentStoreError};
 pub use knowledge::{
     AttackChainClassification, BehaviourDefinition, CorrelationKeyRecord, KnowledgeError,

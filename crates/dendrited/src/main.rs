@@ -106,6 +106,21 @@ fn main() {
         config.telemetry_interval = Duration::from_secs(seconds.max(1));
     }
 
+    if let Ok(value) = env::var("DENDRITE_CULTURE_ROOT") {
+        config.culture_root = PathBuf::from(value);
+    }
+    if let Ok(value) = env::var("DENDRITE_HERD_DB") {
+        config.herd_db_path = PathBuf::from(value);
+    }
+    if let Ok(value) = env::var("DENDRITE_HERD_CONFIG") {
+        config.herd_config_path = PathBuf::from(value);
+    }
+    if let Ok(value) = env::var("DENDRITE_HERD_PUSH_INTERVAL_SECONDS")
+        && let Ok(seconds) = value.parse::<u64>()
+    {
+        config.herd_push_interval = Duration::from_secs(seconds.max(1));
+    }
+
     eprintln!(
         "dendrited starting on {} (HTTP + WebSocket {}, WebSocket path /ws)",
         config.socket_path.display(),
