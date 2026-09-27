@@ -123,4 +123,4 @@ Best Path and Reachable Graph support a finite maximum depth or Unlimited.
 
 ## Validation
 
-Use [`docs/TESTS.md`](../../docs/TESTS.md) as the canonical API validation plan rather than duplicating curl examples here.
+Use [`docs/DEVELOPMENT.md`](../../docs/DEVELOPMENT.md) as the canonical API validation plan rather than duplicating curl examples here.

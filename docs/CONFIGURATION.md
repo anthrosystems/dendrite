@@ -120,7 +120,7 @@ By default (no configuration at all), Dendrite watches every real, currently-mou
 
 ## Example: development startup
 
-Since `DENDRITE_FANOTIFY` and `DENDRITE_EBPF` are both on by default now, neither needs to be set explicitly — both kept below only to match the historical `TESTS.md` Section 4 configuration for reference. `DENDRITE_WATCH_MOUNTS`/`DENDRITE_WATCH_INCLUDE_PATHS` are optional; unset means "every real mount":
+Since `DENDRITE_FANOTIFY` and `DENDRITE_EBPF` are both on by default now, neither needs to be set explicitly — both kept below only to match the historical `DEVELOPMENT.md` Section 4 configuration for reference. `DENDRITE_WATCH_MOUNTS`/`DENDRITE_WATCH_INCLUDE_PATHS` are optional; unset means "every real mount":
 
 ```bash
 DENDRITE_SOCKET_GROUP=dendrite \

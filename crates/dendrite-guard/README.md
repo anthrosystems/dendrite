@@ -38,4 +38,4 @@ cargo test -p dendrite-guard
 cargo clippy -p dendrite-guard --all-targets -- -D warnings
 ```
 
-See `docs/TESTS.md` for an end-to-end exercise (running `dendrite-guard` and `dendrited` as two real processes, changing trust state through the CLI, and confirming both the normal round-trip and the deny-on-unreachable fallback).
+See `docs/DEVELOPMENT.md` for an end-to-end exercise (running `dendrite-guard` and `dendrited` as two real processes, changing trust state through the CLI, and confirming both the normal round-trip and the deny-on-unreachable fallback).

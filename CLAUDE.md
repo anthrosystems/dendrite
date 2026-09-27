@@ -17,7 +17,7 @@ batch is active and what's already been decided. It's a task list, not a
 changelog or a debugging journal: a fully-resolved item gets removed
 outright rather than annotated "done" in place, and design rationale or
 engineering history that's still worth keeping moves to a more fitting
-doc — `docs/architecture.md` for design decisions, `docs/BUILDING.md` for
+doc — `docs/architecture.md` for design decisions, `docs/DEVELOPMENT.md` for
 build/packaging mechanics, `docs/PERFORMANCE.md` for load-testing history.
 `docs/TODO.md` is a scratch tracking list, not a design doc; items should
 get resolved, folded into `ROADMAP.md`/`architecture.md`, or dropped, not
@@ -70,7 +70,7 @@ treating a stub as a real verification.
 ## Local dev vs. distribution packaging
 
 Two different things, don't conflate them — full mechanics in
-`docs/BUILDING.md`:
+`docs/DEVELOPMENT.md`:
 
 - **Local dev**: `scripts/bootstrap.sh` gets a fresh clone runnable. The UI
   runs via `npm run dev` (Vite), proxying `/api`/`/ws` to a locally-running
@@ -101,10 +101,10 @@ to debug than fixing it while the change is still in front of you.
 ## Testing
 
 Inline `#[cfg(test)]` modules exist across most `dendrited` source files —
-run with `cargo +stable test --workspace`. `docs/TESTS.md` is a manual
-validation matrix, currently run by hand rather than automated — there is
+run with `cargo +stable test --workspace`. `docs/DEVELOPMENT.md`'s "Manual
+validation matrix" section is run by hand rather than automated — there is
 no `tests/` directory at the repo root (it never held more than a
-placeholder script, later removed). See `docs/TESTS.md`'s "Open question"
+placeholder script, later removed). See that doc's "Open question"
 section on whether/when an automated integration harness is worth building.
 
 ### `.unwrap()`/`.expect()` audit

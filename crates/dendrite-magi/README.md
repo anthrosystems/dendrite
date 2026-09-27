@@ -39,4 +39,4 @@ cargo test -p dendrite-magi
 cargo clippy -p dendrite-magi --all-targets -- -D warnings
 ```
 
-See `docs/TESTS.md` for an end-to-end exercise (running `dendrite-magi` and `dendrited` as two real processes and confirming both the normal round-trip and the abstain-on-unreachable fallback).
+See `docs/DEVELOPMENT.md` for an end-to-end exercise (running `dendrite-magi` and `dendrited` as two real processes and confirming both the normal round-trip and the abstain-on-unreachable fallback).

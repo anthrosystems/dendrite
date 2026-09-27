@@ -10,13 +10,13 @@ A low-level **Culture** (working name, formerly "Adaptive Malware Analysis"/AMA)
 
 ## Batch 7: Packaging
 
-Checkpoint A (testing the current version against README/docs, updating and testing the CLI, updating docs, and running the full `TESTS.md` validation matrix) is complete — the fixes that came out of it are already reflected in the current state of the CLI, `architecture.md`, and `CONFIGURATION.md`; `TODO.md` only tracks what's still open.
+Checkpoint A (testing the current version against README/docs, updating and testing the CLI, updating docs, and running the full `DEVELOPMENT.md` validation matrix) is complete — the fixes that came out of it are already reflected in the current state of the CLI, `architecture.md`, and `CONFIGURATION.md`; `TODO.md` only tracks what's still open.
 
 Findings from the external code review pass that preceded Checkpoint A, carried forward here since they're genuinely packaging-scoped rather than resolved:
 
 - **`dendrite-guard`'s decision logic is still a stub.** A trust-state enum and an allow/deny match on `evaluate_authority`. No integrity manifests, anti-tamper, attestation, or recovery isolation yet, despite being the architecture's central authority-removal boundary. Given how much the invariants lean on Guard surviving compromise, hardening it should be prioritised ahead of enabling any destructive action executor (`SUSPEND_PROCESS`, `TERMINATE_PROCESS`, `QUARANTINE_OBJECT`, `BLOCK_NETWORK_DESTINATION`, `ISOLATE_HOST`). Confirmed as its own batch: every call site outside `dendrite-guard` only calls `evaluate_authority()`, `trust_state()`, `status()`, and `findings()` (`core.rs`, `actions.rs`, `adaptive_analysis.rs`) — as long as hardening work stays behind that same four-method surface, it should require no changes elsewhere in the codebase. (Process separation itself — the IPC protocol, reconnect behaviour, fail-closed semantics — is done; see `crates/dendrite-guard/README.md`. What's left is the decision logic.)
 
-Build/packaging mechanics (dev bootstrap, the `.deb`, what it installs, required capabilities) now live in `docs/BUILDING.md`.
+Build/packaging mechanics (dev bootstrap, the `.deb`, what it installs, required capabilities) now live in `docs/DEVELOPMENT.md`.
 
 ## CHECKPOINT B
 
@@ -231,7 +231,7 @@ This must remain an observation/export integration and must not grant Obsidian e
 
 ## Future: project website
 
-From the User feedback backlog: consider a project website, potentially hosting the apt repository once the `.deb`/apt distribution target in `docs/BUILDING.md` is real. A live, publicly-interactive Memory Graph demo is a good idea, confirmed worth keeping — but it must not run on the same machine hosting the website/anything real, must obviously limit what it actually shows (a live demo of a real running host's telemetry is not something to expose unfiltered to the public internet), and needs its own explicit demo-scoped token/access story (a token baked into a public demo page is not meaningfully different from no auth at all — see `docs/CONFIGURATION.md`'s "HTTP API authentication" section for the auth mechanism itself) if it's ever reachable beyond localhost. A public Memory Graph endpoint is reconnaissance material if pointed at something that matters — treat "what does the public demo actually reveal" as its own design question, not an afterthought.
+From the User feedback backlog: consider a project website, potentially hosting the apt repository once the `.deb`/apt distribution target in `docs/DEVELOPMENT.md` is real. A live, publicly-interactive Memory Graph demo is a good idea, confirmed worth keeping — but it must not run on the same machine hosting the website/anything real, must obviously limit what it actually shows (a live demo of a real running host's telemetry is not something to expose unfiltered to the public internet), and needs its own explicit demo-scoped token/access story (a token baked into a public demo page is not meaningfully different from no auth at all — see `docs/CONFIGURATION.md`'s "HTTP API authentication" section for the auth mechanism itself) if it's ever reachable beyond localhost. A public Memory Graph endpoint is reconnaissance material if pointed at something that matters — treat "what does the public demo actually reveal" as its own design question, not an afterthought.
 
 ## Future: eBPF pre-filtering for file events
 

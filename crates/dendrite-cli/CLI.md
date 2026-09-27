@@ -152,4 +152,4 @@ target/debug/dendrited
 
 The invoking shell must actually have membership in the `dendrite` group. A packaged install now does this for you (`packaging/postinst` best-effort adds the invoking `sudo` user to the `dendrite` group on install — effective after the next login/`newgrp dendrite`); `scripts/bootstrap.sh` does the equivalent for local dev.
 
-See [`docs/TESTS.md`](../../docs/TESTS.md) for the current CLI smoke/regression sequence.
+See [`docs/DEVELOPMENT.md`](../../docs/DEVELOPMENT.md) for the current CLI smoke/regression sequence.
