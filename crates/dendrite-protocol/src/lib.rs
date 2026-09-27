@@ -21,11 +21,12 @@ pub use ids::{ActionProposalId, EvidenceId, IncidentId, ObjectId, ObservationId}
 pub use ipc::{
     ActionDetailDto, ActionSummaryDto, CreateActionDto, CveKnowledgeStatusDto, DaemonStatusDto,
     EvaluationDto, EvidenceDto, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentSummaryDto,
-    InstanceSigningKeyDto, IntegrityFindingDto, IpcRequest, IpcResponse, MemoryGraphDto,
-    MemoryNodeDto, MemoryPathDto, MemoryRelationshipDto, PackageInventoryDto, RequestEnvelope,
-    ResponseEnvelope, ResponseStatus, TelemetryEventDto, TelemetryPipelineDto,
-    TelemetryPipelineLaneDto, TelemetrySourceDto, TelemetryStatusDto, TransactionEventDto,
-    VulnerabilityExposureDto, VulnerabilityRemediationDto,
+    InstanceSigningKeyDto, IntegrityFindingDto, IntegrityManifestEntryDto,
+    IntegrityManifestStatusDto, IntegrityMismatchDto, IntegrityVerificationDto, IpcRequest,
+    IpcResponse, MemoryGraphDto, MemoryNodeDto, MemoryPathDto, MemoryRelationshipDto,
+    PackageInventoryDto, RequestEnvelope, ResponseEnvelope, ResponseStatus, TelemetryEventDto,
+    TelemetryPipelineDto, TelemetryPipelineLaneDto, TelemetrySourceDto, TelemetryStatusDto,
+    TransactionEventDto, VulnerabilityExposureDto, VulnerabilityRemediationDto,
 };
 pub use magi_ipc::{MagiEvaluation, MagiRequest, MagiResponse};
 pub use trust::{GuardDecision, IntegrityFinding, IntegritySeverity, TrustState};

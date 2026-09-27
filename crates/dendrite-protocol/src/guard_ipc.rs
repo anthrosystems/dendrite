@@ -12,7 +12,10 @@
 //! commands need, not just the authority check on the action-evaluation
 //! path.
 
-use crate::{ActionProposal, GuardDecision, GuardStatusDto, IntegrityFindingDto, TrustState};
+use crate::{
+    ActionProposal, GuardDecision, GuardStatusDto, IntegrityFindingDto, IntegrityManifestStatusDto,
+    IntegrityVerificationDto, TrustState,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +27,14 @@ pub enum GuardRequest {
     TrustState,
     Status,
     Findings,
+    /// Hashes Guard's own configured watch paths (`DENDRITE_GUARD_WATCH_PATHS`,
+    /// read by `dendrite-guard`'s own `main.rs` — deliberately not a field
+    /// on this request, see `crates/dendrite-guard/README.md`'s "Integrity
+    /// manifest" section) and stores the signed result as the new baseline.
+    EstablishBaseline,
+    /// Recomputes hashes for the same configured watch paths and compares
+    /// them against the stored baseline.
+    VerifyIntegrity,
     /// Development-only, mirrors `dendrite-cli debug guard-state`.
     /// `dendrite-guard` refuses this request in a release build (see
     /// `crates/dendrite-guard/README.md`) — it is not gated on the wire,
@@ -44,10 +55,26 @@ pub enum GuardRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GuardResponse {
-    Authority { decision: GuardDecision },
-    TrustState { trust_state: TrustState },
-    Info { guard_status: GuardStatusDto },
-    Findings { findings: Vec<IntegrityFindingDto> },
+    Authority {
+        decision: GuardDecision,
+    },
+    TrustState {
+        trust_state: TrustState,
+    },
+    Info {
+        guard_status: GuardStatusDto,
+    },
+    Findings {
+        findings: Vec<IntegrityFindingDto>,
+    },
+    Manifest {
+        manifest_status: IntegrityManifestStatusDto,
+    },
+    Verification {
+        result: IntegrityVerificationDto,
+    },
     Ack,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }

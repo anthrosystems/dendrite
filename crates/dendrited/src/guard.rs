@@ -1,6 +1,6 @@
 use dendrite_protocol::{
     ActionProposal, GuardDecision, GuardRequest, GuardResponse, GuardStatusDto,
-    IntegrityFindingDto, TrustState,
+    IntegrityFindingDto, IntegrityManifestStatusDto, IntegrityVerificationDto, TrustState,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -40,6 +40,14 @@ pub trait GuardEvaluator: Send {
     fn evaluate_authority(&self, proposal: &ActionProposal) -> GuardDecision;
     fn status(&self) -> Result<GuardStatusDto, GuardStoreError>;
     fn findings(&self) -> Result<Vec<IntegrityFindingDto>, GuardStoreError>;
+    /// Triggers `dendrite-guard` to (re)hash its own configured watch
+    /// paths and store the signed result as the new baseline. Paths are
+    /// never supplied from this side — see `GuardRequest::EstablishBaseline`'s
+    /// doc comment in `guard_ipc.rs` on why.
+    fn establish_baseline(&self) -> Result<IntegrityManifestStatusDto, GuardStoreError>;
+    /// Triggers a read-only comparison of current watch-path hashes
+    /// against the stored baseline.
+    fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError>;
     #[cfg(debug_assertions)]
     fn debug_set_state(&self, state: &str) -> Result<(), GuardStoreError>;
     #[cfg(debug_assertions)]
@@ -183,6 +191,28 @@ impl GuardEvaluator for GuardIpcClient {
         }
     }
 
+    fn establish_baseline(&self) -> Result<IntegrityManifestStatusDto, GuardStoreError> {
+        match self.call(&GuardRequest::EstablishBaseline) {
+            Ok(GuardResponse::Manifest { manifest_status }) => Ok(manifest_status),
+            Ok(GuardResponse::Error { message }) => Err(GuardStoreError::Protocol(message)),
+            Ok(_) => Err(GuardStoreError::Protocol(
+                "unexpected response to establish_baseline".into(),
+            )),
+            Err(error) => Err(GuardStoreError::Unreachable(error)),
+        }
+    }
+
+    fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
+        match self.call(&GuardRequest::VerifyIntegrity) {
+            Ok(GuardResponse::Verification { result }) => Ok(result),
+            Ok(GuardResponse::Error { message }) => Err(GuardStoreError::Protocol(message)),
+            Ok(_) => Err(GuardStoreError::Protocol(
+                "unexpected response to verify_integrity".into(),
+            )),
+            Err(error) => Err(GuardStoreError::Unreachable(error)),
+        }
+    }
+
     #[cfg(debug_assertions)]
     fn debug_set_state(&self, state: &str) -> Result<(), GuardStoreError> {
         match self.call(&GuardRequest::DebugSetState {
@@ -254,6 +284,14 @@ impl GuardService {
 
     pub fn findings(&self) -> Result<Vec<IntegrityFindingDto>, GuardStoreError> {
         self.guard.findings()
+    }
+
+    pub fn establish_baseline(&self) -> Result<IntegrityManifestStatusDto, GuardStoreError> {
+        self.guard.establish_baseline()
+    }
+
+    pub fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
+        self.guard.verify_integrity()
     }
 
     /// `now` is accepted for call-site compatibility (the CLI's `debug
@@ -339,6 +377,18 @@ mod tests {
 
         fn findings(&self) -> Result<Vec<IntegrityFindingDto>, GuardStoreError> {
             Ok(Vec::new())
+        }
+
+        fn establish_baseline(&self) -> Result<IntegrityManifestStatusDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "establish_baseline not supported by FixedGuardEvaluator".into(),
+            ))
+        }
+
+        fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "verify_integrity not supported by FixedGuardEvaluator".into(),
+            ))
         }
 
         #[cfg(debug_assertions)]

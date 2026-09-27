@@ -56,6 +56,18 @@ pub enum IpcRequest {
     },
     GuardStatus,
     GuardFindings,
+    /// Hashes `dendrite-guard`'s own configured watch paths (its own
+    /// `DENDRITE_GUARD_WATCH_PATHS` env var — never paths supplied over
+    /// this wire, since a compromised `dendrited` must not be able to
+    /// redirect Guard to hash attacker-chosen files) and stores the
+    /// result as the new signed baseline, replacing any previous one.
+    GuardBaseline,
+    /// Recomputes hashes for the same configured watch paths and compares
+    /// them against the stored baseline, reporting any mismatches. Read-only
+    /// — does not itself record findings or move trust state (see
+    /// `crates/dendrite-guard/README.md`'s "Integrity manifest" section on
+    /// why that's deliberately separate, later work).
+    GuardVerify,
     TelemetryRecent {
         limit: usize,
     },
@@ -287,6 +299,49 @@ pub struct IntegrityFindingDto {
     pub recorded_at: u64,
 }
 
+/// A single watched path's recorded state in the signed integrity
+/// manifest. `digest` is either `sha256:<hex>` or the literal `absent`
+/// (the path didn't exist when this entry was recorded) — a watched
+/// binary disappearing is itself a finding worth being able to report,
+/// not just a hashing failure to swallow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityManifestEntryDto {
+    pub path: String,
+    pub digest: String,
+}
+
+/// Summary of `dendrite-guard`'s own current signed baseline (or the lack
+/// of one). `key_id`/`fingerprint` identify Guard's own signing key — see
+/// `crates/dendrite-guard/README.md`'s "Integrity manifest" section on why
+/// this is Guard's own key, never `dendrited`'s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityManifestStatusDto {
+    pub established: bool,
+    pub entry_count: usize,
+    pub key_id: String,
+    pub fingerprint: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityMismatchDto {
+    pub path: String,
+    pub baseline_digest: String,
+    pub current_digest: String,
+}
+
+/// Result of comparing current hashes of Guard's configured watch paths
+/// against the stored signed baseline. `signature_valid` is checked first
+/// (over the stored manifest bytes, with Guard's own key) so a corrupted
+/// or hand-edited baseline is reported honestly rather than silently
+/// compared against garbage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityVerificationDto {
+    pub signature_valid: bool,
+    pub matches: bool,
+    pub mismatches: Vec<IntegrityMismatchDto>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryEventDto {
     pub id: String,
@@ -442,6 +497,8 @@ pub enum IpcResponse {
     GuardFindings {
         findings: Vec<IntegrityFindingDto>,
     },
+    GuardManifest(IntegrityManifestStatusDto),
+    GuardVerification(IntegrityVerificationDto),
     TelemetryRecent {
         events: Vec<TelemetryEventDto>,
     },

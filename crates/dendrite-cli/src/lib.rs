@@ -31,6 +31,8 @@ pub enum Command {
     EvaluateAction(String),
     GuardStatus,
     GuardFindings,
+    GuardBaseline,
+    GuardVerify,
     TelemetryStatus,
     TelemetryRecent {
         limit: usize,
@@ -215,6 +217,12 @@ impl Command {
             [command, subcommand] if command == "guard" && subcommand == "findings" => {
                 Self::GuardFindings
             }
+            [command, subcommand] if command == "guard" && subcommand == "baseline" => {
+                Self::GuardBaseline
+            }
+            [command, subcommand] if command == "guard" && subcommand == "verify" => {
+                Self::GuardVerify
+            }
             [command] if command == "telemetry" => Self::TelemetryStatus,
             [command, subcommand] if command == "telemetry" && subcommand == "recent" => {
                 Self::TelemetryRecent { limit: 50 }
@@ -342,6 +350,8 @@ impl Command {
             Self::EvaluateAction(id) => Some(IpcRequest::EvaluateAction { id: id.clone() }),
             Self::GuardStatus => Some(IpcRequest::GuardStatus),
             Self::GuardFindings => Some(IpcRequest::GuardFindings),
+            Self::GuardBaseline => Some(IpcRequest::GuardBaseline),
+            Self::GuardVerify => Some(IpcRequest::GuardVerify),
             Self::TelemetryStatus => Some(IpcRequest::TelemetryStatus),
             Self::TelemetryRecent { limit } => Some(IpcRequest::TelemetryRecent { limit: *limit }),
             Self::DebugSeedIncident { label } => Some(IpcRequest::DebugSeedIncident {
@@ -554,6 +564,34 @@ fn render_response(response: &IpcResponse) -> String {
                     .collect::<Vec<_>>()
                     .join("\n")
             }
+        }
+        IpcResponse::GuardManifest(status) => {
+            if status.established {
+                format!(
+                    "baseline established: {} entries, key {}, fingerprint {}, recorded at {}",
+                    status.entry_count, status.key_id, status.fingerprint, status.created_at
+                )
+            } else {
+                "No integrity baseline established yet.".into()
+            }
+        }
+        IpcResponse::GuardVerification(result) => {
+            let mut lines = vec![format!(
+                "signature valid: {}\nmatches baseline: {}",
+                result.signature_valid, result.matches
+            )];
+            if result.mismatches.is_empty() {
+                lines.push("no mismatches.".into());
+            } else {
+                lines.push("mismatches:".into());
+                for mismatch in &result.mismatches {
+                    lines.push(format!(
+                        "  {}  baseline={} current={}",
+                        mismatch.path, mismatch.baseline_digest, mismatch.current_digest
+                    ));
+                }
+            }
+            lines.join("\n")
         }
         IpcResponse::TelemetryStatus(status) => status
             .sources
@@ -869,7 +907,7 @@ fn help(topic: HelpTopic) -> String {
 
 fn help_general() -> String {
     format!(
-        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  incidents                                   List incidents / show details (see: incidents --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  guard                                       Guard trust state and findings (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  health                                      Show subsystem health\n  http-token                                   Print the HTTP API bearer token\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
+        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  incidents                                   List incidents / show details (see: incidents --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  guard                                       Guard trust state, findings, and integrity manifest (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  health                                      Show subsystem health\n  http-token                                   Print the HTTP API bearer token\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -890,7 +928,7 @@ fn help_actions() -> String {
 }
 
 fn help_guard() -> String {
-    "Usage:\n  dendrite guard\n  dendrite guard findings\n\n  guard            Show Guard trust state and authority\n  guard findings   List Guard integrity findings\n\nTrust states:\n  trusted, degraded, suspected, quarantined, compromised, recovering".into()
+    "Usage:\n  dendrite guard\n  dendrite guard findings\n  dendrite guard baseline\n  dendrite guard verify\n\n  guard            Show Guard trust state and authority\n  guard findings   List Guard integrity findings\n  guard baseline   (Re)establish the signed integrity manifest baseline\n  guard verify     Compare current file hashes against the stored baseline\n\n`guard baseline`/`guard verify` hash the paths `dendrite-guard` is itself configured\nto watch (its own DENDRITE_GUARD_WATCH_PATHS, not anything supplied here) — see\ncrates/dendrite-guard/README.md's \"Integrity manifest\" section. Read-only for now:\nneither turns a mismatch into a recorded finding or a trust-state change yet.\n\nTrust states:\n  trusted, degraded, suspected, quarantined, compromised, recovering".into()
 }
 
 fn help_vulnerabilities() -> String {
@@ -1023,6 +1061,22 @@ mod tests {
         assert_eq!(
             Command::parse(&args(&["telemetry", "recent", "25"])),
             Command::TelemetryRecent { limit: 25 }
+        );
+    }
+
+    #[test]
+    fn parses_guard_baseline() {
+        assert_eq!(
+            Command::parse(&args(&["guard", "baseline"])),
+            Command::GuardBaseline
+        );
+    }
+
+    #[test]
+    fn parses_guard_verify() {
+        assert_eq!(
+            Command::parse(&args(&["guard", "verify"])),
+            Command::GuardVerify
         );
     }
 

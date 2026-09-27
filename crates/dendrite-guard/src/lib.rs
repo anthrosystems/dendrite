@@ -14,11 +14,29 @@
 
 use dendrite_protocol::{
     ActionProposal, GuardDecision, GuardStatusDto, IntegrityFinding, IntegrityFindingDto,
-    IntegritySeverity, ObjectId, TrustState,
+    IntegrityManifestEntryDto, IntegrityManifestStatusDto, IntegrityMismatchDto, IntegritySeverity,
+    IntegrityVerificationDto, ObjectId, TrustState,
 };
-use rusqlite::{Connection, params};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Used for every timestamp this crate records (guard-state transitions,
+/// findings, and the integrity manifest below) — not gated behind
+/// `#[cfg(debug_assertions)]` like `dendrited`'s equivalent helpers,
+/// because establishing/verifying the integrity manifest is real,
+/// release-build functionality, not a development-only surface.
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
 
 pub struct Guard {
     trust_state: TrustState,
@@ -66,6 +84,15 @@ pub enum GuardStoreError {
     Database(rusqlite::Error),
     InvalidTrustState(String),
     InvalidSeverity(String),
+    /// Key generation/parsing failures (OS RNG, malformed key material) —
+    /// mirrors `dendrited`'s own `SelfStoreError::Crypto`.
+    Crypto(String),
+    /// The signing key or manifest is missing, malformed, or otherwise in
+    /// a state that can't be trusted (wrong file mode, unknown key
+    /// reference, no baseline established yet).
+    InvalidKeyState(String),
+    Io(std::io::Error),
+    Json(serde_json::Error),
 }
 
 impl std::fmt::Display for GuardStoreError {
@@ -74,6 +101,10 @@ impl std::fmt::Display for GuardStoreError {
             Self::Database(error) => write!(formatter, "database error: {error}"),
             Self::InvalidTrustState(state) => write!(formatter, "invalid trust state: {state}"),
             Self::InvalidSeverity(severity) => write!(formatter, "invalid severity: {severity}"),
+            Self::Crypto(message) => write!(formatter, "crypto error: {message}"),
+            Self::InvalidKeyState(message) => write!(formatter, "invalid key state: {message}"),
+            Self::Io(error) => write!(formatter, "I/O error: {error}"),
+            Self::Json(error) => write!(formatter, "JSON error: {error}"),
         }
     }
 }
@@ -81,6 +112,18 @@ impl std::fmt::Display for GuardStoreError {
 impl From<rusqlite::Error> for GuardStoreError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Database(error)
+    }
+}
+
+impl From<std::io::Error> for GuardStoreError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for GuardStoreError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
     }
 }
 
@@ -102,6 +145,13 @@ fn configure_connection(connection: &Connection, path: &str) -> rusqlite::Result
 pub struct GuardStore {
     connection: Connection,
     guard: Guard,
+    /// Where Guard's own ed25519 private key material lives — a `keys/`
+    /// subdirectory next to `guard.sqlite3`, inside Guard's own now
+    /// privilege-separated `StateDirectory=` (mode `0700`, owned solely by
+    /// the `dendrite-guard` user — see `README.md`'s "Privilege
+    /// separation" section). Never derived from anything `dendrited` can
+    /// influence.
+    key_dir: PathBuf,
 }
 
 impl GuardStore {
@@ -122,6 +172,22 @@ impl GuardStore {
                 description TEXT NOT NULL,
                 recorded_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS guard_signing_keys (
+                key_id TEXT PRIMARY KEY,
+                public_key TEXT NOT NULL,
+                private_key_reference TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                is_active INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS integrity_manifest (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                key_id TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                entry_count INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
             INSERT OR IGNORE INTO guard_state(singleton, trust_state, updated_at)
             VALUES (1, 'trusted', 0);
             ",
@@ -135,9 +201,16 @@ impl GuardStore {
         let trust_state =
             TrustState::from_str(&state).map_err(|_| GuardStoreError::InvalidTrustState(state))?;
 
+        let key_dir = Path::new(path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join("keys"))
+            .unwrap_or_else(|| PathBuf::from("keys"));
+
         Ok(Self {
             connection,
             guard: Guard::new(trust_state),
+            key_dir,
         })
     }
 
@@ -221,6 +294,369 @@ impl GuardStore {
         )?;
         Ok(())
     }
+
+    /// Returns Guard's own current signing key, generating and persisting
+    /// one on first use. See `README.md`'s "Integrity manifest" section on
+    /// why this is a separate keypair from `dendrited`'s own instance key
+    /// (`crates/dendrited/src/self_store.rs`'s `InstanceKeyRecord`): Guard
+    /// verifies `dendrited`, so `dendrited` must never hold a key that
+    /// could re-sign a tampered manifest as trusted, and after the
+    /// privilege-separation work `dendrited`'s user can no longer read
+    /// Guard's key material at all.
+    pub fn ensure_signing_key(&mut self) -> Result<GuardKeyRecord, GuardStoreError> {
+        if let Some(key) = self.load_active_key()? {
+            return Ok(key);
+        }
+        let key = self.generate_key()?;
+        if let Err(error) = self.insert_key(&key) {
+            let _ = fs::remove_file(private_key_path(&key.private_key_reference));
+            return Err(error);
+        }
+        Ok(key)
+    }
+
+    fn load_active_key(&self) -> Result<Option<GuardKeyRecord>, GuardStoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT key_id, public_key, private_key_reference, fingerprint, created_at, is_active
+             FROM guard_signing_keys WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1",
+                [],
+                read_key_row,
+            )
+            .optional()?)
+    }
+
+    fn load_key(&self, key_id: &str) -> Result<Option<GuardKeyRecord>, GuardStoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT key_id, public_key, private_key_reference, fingerprint, created_at, is_active
+             FROM guard_signing_keys WHERE key_id = ?1",
+                params![key_id],
+                read_key_row,
+            )
+            .optional()?)
+    }
+
+    fn insert_key(&self, key: &GuardKeyRecord) -> Result<(), GuardStoreError> {
+        self.connection.execute(
+            "INSERT INTO guard_signing_keys(
+                key_id, public_key, private_key_reference, fingerprint, created_at, is_active
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                key.key_id,
+                key.public_key,
+                key.private_key_reference,
+                key.fingerprint,
+                key.created_at,
+                i64::from(key.is_active),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn next_key_id(&self) -> Result<String, GuardStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT key_id FROM guard_signing_keys")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut max_id = 0u64;
+        for key_id in rows {
+            let key_id = key_id?;
+            if let Some(number) = key_id
+                .strip_prefix("guardkey_")
+                .and_then(|value| value.parse().ok())
+            {
+                max_id = max_id.max(number);
+            }
+        }
+        Ok(format!("guardkey_{:08}", max_id + 1))
+    }
+
+    fn generate_key(&self) -> Result<GuardKeyRecord, GuardStoreError> {
+        let key_id = self.next_key_id()?;
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret)
+            .map_err(|error| GuardStoreError::Crypto(format!("OS RNG failed: {error}")))?;
+        let signing_key = SigningKey::from_bytes(&secret);
+        let public_bytes = signing_key.verifying_key().to_bytes();
+        let public_key = format!("ed25519:{}", hex::encode(public_bytes));
+        let fingerprint = format!("sha256:{}", hex::encode(Sha256::digest(public_bytes)));
+
+        fs::create_dir_all(&self.key_dir)?;
+        fs::set_permissions(&self.key_dir, fs::Permissions::from_mode(0o700))?;
+        let key_path = self.key_dir.join(format!("{key_id}.ed25519"));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)?;
+        file.write_all(&secret)?;
+        file.sync_all()?;
+        drop(file);
+
+        Ok(GuardKeyRecord {
+            key_id,
+            public_key,
+            private_key_reference: format!("file:{}", key_path.display()),
+            fingerprint,
+            created_at: unix_now(),
+            is_active: true,
+        })
+    }
+
+    /// Hashes `watch_paths` (already resolved by the caller — `main.rs`'s
+    /// own `DENDRITE_GUARD_WATCH_PATHS`, never anything supplied over the
+    /// `GuardRequest` wire, see `guard_ipc.rs`) and stores the signed
+    /// result as the new baseline, replacing any previous one. Signing
+    /// Guard's own manifest (rather than just hashing) means a later
+    /// `verify_integrity` call can detect the baseline itself having been
+    /// hand-edited or corrupted, not just the watched files drifting from
+    /// it.
+    pub fn establish_baseline(
+        &mut self,
+        watch_paths: &[PathBuf],
+        now: u64,
+    ) -> Result<IntegrityManifestStatusDto, GuardStoreError> {
+        let key = self.ensure_signing_key()?;
+
+        let mut paths: Vec<&PathBuf> = watch_paths.iter().collect();
+        paths.sort();
+        paths.dedup();
+        let entries: Vec<IntegrityManifestEntryDto> = paths
+            .into_iter()
+            .map(|path| IntegrityManifestEntryDto {
+                path: path.display().to_string(),
+                digest: hash_path(path),
+            })
+            .collect();
+
+        let manifest_json = serde_json::to_string(&entries)?;
+        let secret = read_private_seed(&key.private_key_reference, &key.key_id)?;
+        let signing_key = SigningKey::from_bytes(&secret);
+        let preimage = manifest_preimage(&key.key_id, manifest_json.as_bytes());
+        let signature: Signature = signing_key.sign(&preimage);
+        let signature = format!("ed25519:{}", hex::encode(signature.to_bytes()));
+
+        self.connection.execute(
+            "INSERT INTO integrity_manifest(singleton, key_id, manifest_json, signature, entry_count, created_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(singleton) DO UPDATE SET
+                key_id = excluded.key_id,
+                manifest_json = excluded.manifest_json,
+                signature = excluded.signature,
+                entry_count = excluded.entry_count,
+                created_at = excluded.created_at",
+            params![key.key_id, manifest_json, signature, entries.len() as i64, now],
+        )?;
+
+        Ok(IntegrityManifestStatusDto {
+            established: true,
+            entry_count: entries.len(),
+            key_id: key.key_id,
+            fingerprint: key.fingerprint,
+            created_at: now,
+        })
+    }
+
+    /// Current baseline summary, or `established: false` if none has been
+    /// recorded yet.
+    pub fn manifest_status(&self) -> Result<IntegrityManifestStatusDto, GuardStoreError> {
+        let stored: Option<(String, i64, i64)> = self
+            .connection
+            .query_row(
+                "SELECT key_id, entry_count, created_at FROM integrity_manifest WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((key_id, entry_count, created_at)) = stored else {
+            return Ok(IntegrityManifestStatusDto {
+                established: false,
+                entry_count: 0,
+                key_id: String::new(),
+                fingerprint: String::new(),
+                created_at: 0,
+            });
+        };
+        let key = self.load_key(&key_id)?.ok_or_else(|| {
+            GuardStoreError::InvalidKeyState(format!("manifest references unknown key {key_id}"))
+        })?;
+        Ok(IntegrityManifestStatusDto {
+            established: true,
+            entry_count: entry_count as usize,
+            key_id,
+            fingerprint: key.fingerprint,
+            created_at: created_at as u64,
+        })
+    }
+
+    /// Recomputes hashes for `watch_paths` and compares them against the
+    /// stored signed baseline. Read-only: this does not record findings or
+    /// move trust state itself — turning a mismatch into a real
+    /// `IntegrityFinding` and, from there, a trust-state transition is
+    /// later work (see `README.md`'s "Integrity manifest" section).
+    pub fn verify_integrity(
+        &self,
+        watch_paths: &[PathBuf],
+    ) -> Result<IntegrityVerificationDto, GuardStoreError> {
+        let stored: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT key_id, manifest_json, signature FROM integrity_manifest WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((key_id, manifest_json, signature)) = stored else {
+            return Err(GuardStoreError::InvalidKeyState(
+                "no integrity baseline has been established yet".into(),
+            ));
+        };
+        let key = self.load_key(&key_id)?.ok_or_else(|| {
+            GuardStoreError::InvalidKeyState(format!("manifest references unknown key {key_id}"))
+        })?;
+
+        let public_bytes = parse_public_key(&key.public_key)?;
+        let verifying_key = VerifyingKey::from_bytes(&public_bytes).map_err(|error| {
+            GuardStoreError::Crypto(format!("invalid Ed25519 public key: {error}"))
+        })?;
+        let signature_bytes = parse_signature(&signature)?;
+        let preimage = manifest_preimage(&key_id, manifest_json.as_bytes());
+        let signature_valid = verifying_key.verify(&preimage, &signature_bytes).is_ok();
+
+        let baseline_entries: Vec<IntegrityManifestEntryDto> =
+            serde_json::from_str(&manifest_json)?;
+        let mut mismatches = Vec::new();
+        for entry in &baseline_entries {
+            let current = hash_path(Path::new(&entry.path));
+            if current != entry.digest {
+                mismatches.push(IntegrityMismatchDto {
+                    path: entry.path.clone(),
+                    baseline_digest: entry.digest.clone(),
+                    current_digest: current,
+                });
+            }
+        }
+        // A watch path configured now but absent from the stored baseline
+        // (e.g. `DENDRITE_GUARD_WATCH_PATHS` grew since the baseline was
+        // established) is flagged too, rather than silently going
+        // unverified until the next `establish_baseline`.
+        let baseline_paths: std::collections::HashSet<&str> = baseline_entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        for path in watch_paths {
+            let path_str = path.display().to_string();
+            if !baseline_paths.contains(path_str.as_str()) {
+                mismatches.push(IntegrityMismatchDto {
+                    path: path_str,
+                    baseline_digest: "not-in-baseline".into(),
+                    current_digest: hash_path(path),
+                });
+            }
+        }
+
+        Ok(IntegrityVerificationDto {
+            signature_valid,
+            matches: signature_valid && mismatches.is_empty(),
+            mismatches,
+        })
+    }
+}
+
+/// Guard's own ed25519 signing key — never shared with or derived from
+/// `dendrited`'s own instance key. See `ensure_signing_key`.
+#[derive(Debug, Clone)]
+pub struct GuardKeyRecord {
+    pub key_id: String,
+    pub public_key: String,
+    pub private_key_reference: String,
+    pub fingerprint: String,
+    pub created_at: u64,
+    pub is_active: bool,
+}
+
+fn read_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GuardKeyRecord> {
+    Ok(GuardKeyRecord {
+        key_id: row.get(0)?,
+        public_key: row.get(1)?,
+        private_key_reference: row.get(2)?,
+        fingerprint: row.get(3)?,
+        created_at: row.get(4)?,
+        is_active: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+fn private_key_path(reference: &str) -> &str {
+    reference.strip_prefix("file:").unwrap_or(reference)
+}
+
+fn read_private_seed(reference: &str, key_id: &str) -> Result<[u8; 32], GuardStoreError> {
+    let path = reference.strip_prefix("file:").ok_or_else(|| {
+        GuardStoreError::InvalidKeyState(format!("unsupported private key reference for {key_id}"))
+    })?;
+    let metadata = fs::metadata(path)?;
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(GuardStoreError::InvalidKeyState(format!(
+            "private key {key_id} must have mode 0600"
+        )));
+    }
+    fs::read(path)?.try_into().map_err(|_| {
+        GuardStoreError::InvalidKeyState(format!(
+            "private key {key_id} is not a 32-byte Ed25519 seed"
+        ))
+    })
+}
+
+fn parse_public_key(value: &str) -> Result<[u8; 32], GuardStoreError> {
+    let encoded = value
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| GuardStoreError::Crypto("unsupported public key algorithm".into()))?;
+    let bytes = hex::decode(encoded)
+        .map_err(|error| GuardStoreError::Crypto(format!("invalid public key hex: {error}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| GuardStoreError::Crypto("Ed25519 public key must contain 32 bytes".into()))
+}
+
+fn parse_signature(value: &str) -> Result<Signature, GuardStoreError> {
+    let encoded = value
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| GuardStoreError::Crypto("unsupported signature algorithm".into()))?;
+    let bytes = hex::decode(encoded)
+        .map_err(|error| GuardStoreError::Crypto(format!("invalid signature hex: {error}")))?;
+    let bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| GuardStoreError::Crypto("Ed25519 signature must contain 64 bytes".into()))?;
+    Ok(Signature::from_bytes(&bytes))
+}
+
+/// Domain-separated preimage for signing/verifying a manifest — mirrors
+/// `dendrited`'s own `instance_bound_preimage` in `self_store.rs`, with its
+/// own distinct version tag so a signature produced for one purpose can
+/// never be replayed as valid for the other.
+fn manifest_preimage(key_id: &str, payload: &[u8]) -> Vec<u8> {
+    let mut preimage = Vec::with_capacity(32 + key_id.len() + payload.len());
+    preimage.extend_from_slice(b"DENDRITE-GUARD-MANIFEST-V1\0");
+    preimage.extend_from_slice(key_id.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(payload);
+    preimage
+}
+
+/// `sha256:<hex>` for a readable file, `absent` for a path that doesn't
+/// exist (a watched binary disappearing is itself worth being able to
+/// report, not just a hashing failure to swallow), or `unreadable` for any
+/// other I/O error (permission denied, etc.) — kept distinct from `absent`
+/// since those mean different things to an operator.
+fn hash_path(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => format!("sha256:{}", hex::encode(Sha256::digest(bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".into(),
+        Err(_) => "unreadable".into(),
+    }
 }
 
 #[cfg(test)]
@@ -268,5 +704,150 @@ mod tests {
         assert_eq!(store.trust_state(), TrustState::Compromised);
         assert_eq!(store.evaluate_authority(&proposal()), GuardDecision::Deny);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A fresh temp directory to hold both a `GuardStore`'s `guard.sqlite3`
+    /// (and its `keys/` subdirectory, created alongside it) and any dummy
+    /// watched files a test wants to hash — cleaned up on drop so key
+    /// material and manifest fixtures never leak between test runs.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "dendrite-guard-manifest-test-{label}-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn db_path(&self) -> String {
+            self.0.join("guard.sqlite3").to_str().unwrap().to_owned()
+        }
+
+        fn write_watched(&self, name: &str, contents: &[u8]) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn signing_key_is_generated_once_and_persists_across_reopen() {
+        let dir = TestDir::new("key-persist");
+
+        let first = {
+            let mut store = GuardStore::open(&dir.db_path()).unwrap();
+            store.ensure_signing_key().unwrap()
+        };
+        let second = {
+            let mut store = GuardStore::open(&dir.db_path()).unwrap();
+            store.ensure_signing_key().unwrap()
+        };
+
+        assert_eq!(first.key_id, second.key_id);
+        assert_eq!(first.public_key, second.public_key);
+        assert_eq!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
+    fn baseline_round_trips_and_reports_no_mismatches_when_unchanged() {
+        let dir = TestDir::new("round-trip");
+        let watched = vec![dir.write_watched("binary-a", b"hello world")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        let status = store.establish_baseline(&watched, 1000).unwrap();
+        assert!(status.established);
+        assert_eq!(status.entry_count, 1);
+
+        let result = store.verify_integrity(&watched).unwrap();
+        assert!(result.signature_valid);
+        assert!(result.matches);
+        assert!(result.mismatches.is_empty());
+    }
+
+    #[test]
+    fn verify_integrity_flags_a_modified_watched_file() {
+        let dir = TestDir::new("modified-file");
+        let watched = vec![dir.write_watched("binary-a", b"original contents")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+
+        fs::write(&watched[0], b"tampered contents").unwrap();
+
+        let result = store.verify_integrity(&watched).unwrap();
+        assert!(result.signature_valid);
+        assert!(!result.matches);
+        assert_eq!(result.mismatches.len(), 1);
+        assert_eq!(result.mismatches[0].path, watched[0].display().to_string());
+    }
+
+    #[test]
+    fn verify_integrity_flags_a_deleted_watched_file() {
+        let dir = TestDir::new("deleted-file");
+        let watched = vec![dir.write_watched("binary-a", b"present")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+
+        fs::remove_file(&watched[0]).unwrap();
+
+        let result = store.verify_integrity(&watched).unwrap();
+        assert!(!result.matches);
+        assert_eq!(result.mismatches[0].current_digest, "absent");
+    }
+
+    #[test]
+    fn verify_integrity_flags_a_watch_path_added_after_the_baseline() {
+        let dir = TestDir::new("added-path");
+        let first = dir.write_watched("binary-a", b"present");
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store
+            .establish_baseline(std::slice::from_ref(&first), 1000)
+            .unwrap();
+
+        let second = dir.write_watched("binary-b", b"new file");
+        let result = store.verify_integrity(&[first, second]).unwrap();
+        assert!(!result.matches);
+        assert_eq!(result.mismatches[0].baseline_digest, "not-in-baseline");
+    }
+
+    #[test]
+    fn verify_integrity_detects_a_hand_edited_baseline_signature() {
+        let dir = TestDir::new("tampered-signature");
+        let watched = vec![dir.write_watched("binary-a", b"present")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+        let bogus_signature = format!("ed25519:{}", "00".repeat(64));
+        store
+            .connection
+            .execute(
+                "UPDATE integrity_manifest SET signature = ?1 WHERE singleton = 1",
+                params![bogus_signature],
+            )
+            .unwrap();
+
+        let result = store.verify_integrity(&watched).unwrap();
+        assert!(!result.signature_valid);
+        assert!(!result.matches);
+    }
+
+    #[test]
+    fn verify_integrity_without_a_baseline_is_an_error() {
+        let dir = TestDir::new("no-baseline");
+        let store = GuardStore::open(&dir.db_path()).unwrap();
+        assert!(store.verify_integrity(&[]).is_err());
     }
 }

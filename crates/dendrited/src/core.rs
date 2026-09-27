@@ -22,10 +22,10 @@ use dendrite_memory::storage::{
 use dendrite_protocol::{
     ActionDetailDto, ActionSummaryDto, Confidence, EntityKind, EvidenceCandidate, EvidenceId,
     EvidenceObjectRef, EvidenceSource, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentId,
-    IncidentSummaryDto, InstanceSigningKeyDto, IntegrityFindingDto, MemoryGraphDto, MemoryNodeDto,
-    MemoryRelationshipDto, ObjectDescriptor, ObjectId, Observation, ObservationKind, Severity,
-    TelemetryEventDto, TelemetryPipelineDto, TelemetrySourceDto, TelemetryStatusDto,
-    VulnerabilityExposureDto,
+    IncidentSummaryDto, InstanceSigningKeyDto, IntegrityFindingDto, IntegrityManifestStatusDto,
+    IntegrityVerificationDto, MemoryGraphDto, MemoryNodeDto, MemoryRelationshipDto,
+    ObjectDescriptor, ObjectId, Observation, ObservationKind, Severity, TelemetryEventDto,
+    TelemetryPipelineDto, TelemetrySourceDto, TelemetryStatusDto, VulnerabilityExposureDto,
 };
 use rusqlite::Connection;
 use std::collections::{BTreeMap, VecDeque};
@@ -2044,6 +2044,14 @@ impl DaemonCore {
         Ok(self.guard.findings()?)
     }
 
+    pub fn guard_establish_baseline(&self) -> Result<IntegrityManifestStatusDto, DaemonError> {
+        Ok(self.guard.establish_baseline()?)
+    }
+
+    pub fn guard_verify_integrity(&self) -> Result<IntegrityVerificationDto, DaemonError> {
+        Ok(self.guard.verify_integrity()?)
+    }
+
     #[cfg(debug_assertions)]
     pub fn debug_set_guard_state(
         &mut self,
@@ -2700,6 +2708,18 @@ mod tests {
 
         fn findings(&self) -> Result<Vec<IntegrityFindingDto>, GuardStoreError> {
             Ok(Vec::new())
+        }
+
+        fn establish_baseline(&self) -> Result<IntegrityManifestStatusDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "establish_baseline not supported by TrustedGuardEvaluator".into(),
+            ))
+        }
+
+        fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "verify_integrity not supported by TrustedGuardEvaluator".into(),
+            ))
         }
 
         #[cfg(debug_assertions)]

@@ -317,9 +317,14 @@ name = "dendrite-guard"
 version = "0.1.0"
 dependencies = [
  "dendrite-protocol",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "hex",
  "libc",
  "rusqlite",
+ "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

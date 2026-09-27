@@ -73,6 +73,16 @@ Environment=DENDRITE_GUARD_SOCKET=/run/dendrite-guard/dendrite-guard.sock
 # user, member of the dendrite group) must still be able to connect to it.
 Environment=DENDRITE_GUARD_SOCKET_GROUP=dendrite
 Environment=DENDRITE_GUARD_SOCKET_MODE=0660
+# The integrity manifest's watch set: the binaries cargo-deb installs, the
+# eBPF object, and the four units themselves (see
+# crates/dendrited/Cargo.toml's [package.metadata.deb] `assets`/
+# `systemd-units` for where each of these actually lands) — see
+# crates/dendrite-guard/README.md's "Integrity manifest" section for what
+# `dendrite guard baseline`/`guard verify` do with this. Not read until an
+# operator runs one of those commands (or a later batch wires in automatic
+# verification — ROADMAP.md items #3/#4) — setting this alone doesn't
+# establish a baseline by itself.
+Environment=DENDRITE_GUARD_WATCH_PATHS=/usr/bin/dendrited:/usr/bin/dendrite-cli:/usr/bin/dendrite-ui-server:/usr/bin/dendrite-magi:/usr/bin/dendrite-guard:/usr/lib/dendrite/dendrite-ebpf:/lib/systemd/system/dendrited.service:/lib/systemd/system/dendrite-ui.service:/lib/systemd/system/dendrite-magi.service:/lib/systemd/system/dendrite-guard.service
 
 # --- Sandboxing / hardening ---
 # No telemetry, no eBPF, no network beyond its own socket — lock this down

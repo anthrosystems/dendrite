@@ -81,7 +81,21 @@ mkdir -p "$WATCH_DIR"
 
 if [[ ! -S "$GUARD_SOCKET" ]] && [[ -x target/debug/dendrite-guard ]]; then
     echo "Starting dendrite-guard for test..."
-    target/debug/dendrite-guard >"$GUARD_LOG_FILE" 2>&1 &
+    # A real, stable set of watch paths for `guard baseline`/`guard verify`
+    # (see run_guard below) — small, always-present repo files, so `guard`
+    # mode exercises real hashing/signing rather than only the
+    # trust-state/findings debug surfaces. Deliberately NOT the built dev
+    # binaries themselves: those are unstripped debug builds tens of MB
+    # each, and hashing them cold (first read, before the OS page cache is
+    # warm) can take several seconds on a slow/throttled disk — comfortably
+    # past dendrited's 2s GuardIpcClient timeout, which would make this
+    # mode flaky for a reason that has nothing to do with Guard itself. A
+    # packaged install's own `DENDRITE_GUARD_WATCH_PATHS` (see
+    # packaging/dendrite-guard.service) points at real, much smaller
+    # release/stripped binaries instead, so that combination doesn't apply
+    # there.
+    DENDRITE_GUARD_WATCH_PATHS="$PROJECT_ROOT/packaging/dendrited.service:$PROJECT_ROOT/packaging/dendrite-guard.service:$PROJECT_ROOT/packaging/dendrite-magi.service:$PROJECT_ROOT/Cargo.lock" \
+        target/debug/dendrite-guard >"$GUARD_LOG_FILE" 2>&1 &
     GUARD_PID=$!
     STARTED_GUARD=1
 elif [[ ! -S "$GUARD_SOCKET" ]]; then
@@ -129,6 +143,12 @@ for _ in {1..100}; do
     sleep 0.1
 done
 [[ -S "$SOCKET" ]] || { echo "Timed out waiting for $SOCKET" >&2; exit 1; }
+
+# All three daemons' sockets existing doesn't mean they're done with their
+# own startup work (telemetry threads, opening several sqlite DBs) — a
+# short settle delay here is cheaper than making every mode below retry
+# its own first command.
+sleep 1
 
 json_field() {
     local json="$1"
@@ -291,6 +311,16 @@ run_incidents() {
 }
 
 run_guard() {
+    echo "Establishing a real signed integrity baseline..."
+    # Only meaningful when this run started dendrite-guard itself (see
+    # above, where DENDRITE_GUARD_WATCH_PATHS is set) — a reused,
+    # already-running dendrite-guard from outside this script may have no
+    # watch paths configured at all, in which case dendrite-cli prints
+    # (not fails on, per its own exit-code convention) a server-side
+    # "nothing configured to baseline" error here, which is expected.
+    cli guard baseline
+    echo "Verifying against that baseline..."
+    cli guard verify
     echo "Recording controlled Guard integrity findings..."
     cli debug guard-finding "test:integrity:config" high "Controlled stress-test integrity mismatch"
     cli debug guard-finding "test:integrity:binary" warning "Controlled stress-test protected-object change"

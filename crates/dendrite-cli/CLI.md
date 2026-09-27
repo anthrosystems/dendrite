@@ -34,6 +34,8 @@ actions propose <incident-id> <action> <target>
 actions evaluate <proposal-id>
 guard
 guard findings
+guard baseline
+guard verify
 telemetry
 telemetry recent [limit]
 vulnerabilities [--all]
@@ -66,6 +68,7 @@ debug guard-finding <target> <severity> <description>
 - Debug commands are development-only surfaces and should not be treated as production operator APIs.
 - `http-token` prints the bearer token that gates `dendrited`'s HTTP API and `/ws` WebSocket upgrade (see `docs/CONFIGURATION.md`'s "HTTP API authentication" section). It's deliberately the only way to retrieve it — the HTTP API never serves it over itself. The local dev UI (`npm run dev`) never needs this pasted in by hand; it's only for the packaged UI's one-time token-entry prompt, or for a manual `curl`/script against the HTTP API.
 - `memory nodes` caps what it prints to the terminal at 20 by default (the daemon's own `MemoryNodes` query is unbounded, since it also backs the HTTP API's node listing, which the UI paginates/searches itself) — pass an explicit `[limit]` to see more, or `0` for no limit at all.
+- `guard baseline`/`guard verify` hash the paths `dendrite-guard` is itself configured to watch (its own `DENDRITE_GUARD_WATCH_PATHS`, never anything supplied by this command) and compare against a signed baseline it stores and verifies itself — see `crates/dendrite-guard/README.md`'s "Integrity manifest" section. Read-only for now: neither command turns a mismatch into a recorded finding or a trust-state change.
 
 Analysis/Antiserum and Vulnerability Candidate management currently live in the HTTP/UI surface rather than the CLI. A later CLI update should add feature parity deliberately rather than exposing raw file/database primitives.
 

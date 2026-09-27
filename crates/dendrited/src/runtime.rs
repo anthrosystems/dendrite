@@ -699,6 +699,12 @@ impl DaemonRuntime {
             IpcRequest::GuardFindings => Ok(IpcResponse::GuardFindings {
                 findings: self.core.guard_findings()?,
             }),
+            IpcRequest::GuardBaseline => Ok(IpcResponse::GuardManifest(
+                self.core.guard_establish_baseline()?,
+            )),
+            IpcRequest::GuardVerify => Ok(IpcResponse::GuardVerification(
+                self.core.guard_verify_integrity()?,
+            )),
             IpcRequest::TelemetryRecent { limit } => Ok(IpcResponse::TelemetryRecent {
                 events: self.core.telemetry_recent(limit),
             }),

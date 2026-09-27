@@ -84,6 +84,8 @@ Unlike MAGI (a stateless per-request vote), Guard owns real persistent state —
 
 `dendrited` talks to it as a client (`GuardIpcClient`) and is deliberately **fail-closed**, but differently from MAGI: if `dendrite-guard` is unreachable, times out, or isn't running, the trust state reads as **`Compromised`** and every authority check as **`Deny`** — not abstain, and not a hang. Guard has exactly one voice on trust rather than MAGI's three-way vote, so there's no quorum for "unreachable" to defer to; collapsing straight to the same denial a real detected compromise produces is the only fail-closed answer available. Reading Guard's status or findings (`dendrite guard`) behaves differently again — it fails the request outright rather than reporting a synthetic status, because those calls also feed signed Antiserum attestations, and a fabricated "unreachable" status could misrepresent host integrity in an exported package. `DENDRITE_GUARD_SOCKET` is listed under "IPC and network" above.
 
+`dendrite-guard` also owns a signed integrity manifest: `dendrite guard baseline`/`dendrite guard verify` hash a configured set of paths (`DENDRITE_GUARD_WATCH_PATHS`, `dendrite-guard`'s own env var, never accepted over the wire from `dendrited`) and compare current hashes against a stored, signed baseline. See `crates/dendrite-guard/README.md`'s "Integrity manifest" section for the full design, including why Guard signs with its own key rather than `dendrited`'s.
+
 ## Telemetry collectors
 
 | Variable | Default | Description |

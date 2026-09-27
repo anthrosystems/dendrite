@@ -3,7 +3,7 @@
 //! socket. See `crates/dendrite-guard/README.md` for why this is its own
 //! process rather than in-process logic inside `dendrited`.
 
-use dendrite_guard::GuardStore;
+use dendrite_guard::{GuardStore, unix_now};
 use dendrite_protocol::{GuardRequest, GuardResponse};
 use std::env;
 use std::ffi::CString;
@@ -13,8 +13,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-#[cfg(debug_assertions)]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/dendrite-guard.sock";
 const DEFAULT_DB_PATH: &str = "data/guard.sqlite3";
@@ -26,16 +24,6 @@ const DEFAULT_DB_PATH: &str = "data/guard.sqlite3";
 /// own dedicated user, distinct from `dendrited`'s (see `README.md`'s
 /// "Privilege separation" section).
 const DEFAULT_SOCKET_MODE: u32 = 0o660;
-
-/// Only the `#[cfg(debug_assertions)]` debug handlers below need a
-/// timestamp to record, so this would otherwise be dead code in a release
-/// build.
-#[cfg(debug_assertions)]
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
-}
 
 fn main() {
     let db_path = env::var("DENDRITE_GUARD_DB").unwrap_or_else(|_| DEFAULT_DB_PATH.into());
@@ -59,6 +47,19 @@ fn main() {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+
+    // The set of paths the integrity manifest hashes — configured on
+    // Guard's own side, deliberately never accepted as part of a
+    // `GuardRequest` (see `guard_ipc.rs`'s `EstablishBaseline`/
+    // `VerifyIntegrity` doc comments): a compromised `dendrited` asking
+    // Guard to hash/verify attacker-chosen paths instead of the real
+    // watched set would make the whole manifest meaningless.
+    let watch_paths: Vec<PathBuf> = env::var("DENDRITE_GUARD_WATCH_PATHS")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect();
 
     if let Some(parent) = std::path::Path::new(&db_path).parent()
         && !parent.as_os_str().is_empty()
@@ -129,7 +130,7 @@ fn main() {
 
     for incoming in listener.incoming() {
         let Ok(stream) = incoming else { continue };
-        if let Err(error) = handle_connection(stream, &store) {
+        if let Err(error) = handle_connection(stream, &store, &watch_paths) {
             eprintln!("dendrite-guard: request failed: {error}");
         }
     }
@@ -172,12 +173,16 @@ fn set_socket_group(path: &Path, group: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle_connection(mut stream: UnixStream, store: &Mutex<GuardStore>) -> std::io::Result<()> {
+fn handle_connection(
+    mut stream: UnixStream,
+    store: &Mutex<GuardStore>,
+    watch_paths: &[PathBuf],
+) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
 
     let response = match serde_json::from_str::<GuardRequest>(line.trim()) {
-        Ok(request) => handle_request(request, store),
+        Ok(request) => handle_request(request, store, watch_paths),
         Err(error) => GuardResponse::Error {
             message: format!("invalid request: {error}"),
         },
@@ -190,7 +195,11 @@ fn handle_connection(mut stream: UnixStream, store: &Mutex<GuardStore>) -> std::
     stream.flush()
 }
 
-fn handle_request(request: GuardRequest, store: &Mutex<GuardStore>) -> GuardResponse {
+fn handle_request(
+    request: GuardRequest,
+    store: &Mutex<GuardStore>,
+    watch_paths: &[PathBuf],
+) -> GuardResponse {
     let mut store = match store.lock() {
         Ok(store) => store,
         Err(_) => {
@@ -215,6 +224,26 @@ fn handle_request(request: GuardRequest, store: &Mutex<GuardStore>) -> GuardResp
         },
         GuardRequest::Findings => match store.findings() {
             Ok(findings) => GuardResponse::Findings { findings },
+            Err(error) => GuardResponse::Error {
+                message: format!("{error}"),
+            },
+        },
+        GuardRequest::EstablishBaseline => {
+            if watch_paths.is_empty() {
+                return GuardResponse::Error {
+                    message: "DENDRITE_GUARD_WATCH_PATHS is empty; nothing configured to baseline"
+                        .into(),
+                };
+            }
+            match store.establish_baseline(watch_paths, unix_now()) {
+                Ok(manifest_status) => GuardResponse::Manifest { manifest_status },
+                Err(error) => GuardResponse::Error {
+                    message: format!("{error}"),
+                },
+            }
+        }
+        GuardRequest::VerifyIntegrity => match store.verify_integrity(watch_paths) {
+            Ok(result) => GuardResponse::Verification { result },
             Err(error) => GuardResponse::Error {
                 message: format!("{error}"),
             },

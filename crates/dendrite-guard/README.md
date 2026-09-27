@@ -28,6 +28,7 @@ If `dendrite-guard` is unreachable, times out, or isn't running, `dendrited`'s c
 | `DENDRITE_GUARD_SOCKET` | `/tmp/dendrite-guard.sock` | Unix socket path this process listens on, and `dendrited` connects to |
 | `DENDRITE_GUARD_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket after binding — see "Privilege separation" below |
 | `DENDRITE_GUARD_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
+| `DENDRITE_GUARD_WATCH_PATHS` | unset (empty) | Colon-separated paths the integrity manifest hashes — see "Integrity manifest" below |
 
 ## Privilege separation
 
@@ -42,6 +43,19 @@ In the packaged install (`packaging/dendrite-guard.service`):
 - The socket file itself still needs an explicit group/mode, since it's created by the `dendrite-guard` user but must be connectable by `dendrited`, a different user: `dendrite-guard`'s own code (`src/main.rs`) `chmod`s it to `DENDRITE_GUARD_SOCKET_MODE` (default `0660`) and, when `DENDRITE_GUARD_SOCKET_GROUP` is set, `chown`s its group — packaging sets this to `dendrite`. Mirrors `dendrited`'s own `DENDRITE_SOCKET_GROUP`/`DENDRITE_SOCKET_MODE` handling for its client-facing socket exactly (see `docs/CONFIGURATION.md`).
 
 Local dev leaves `DENDRITE_GUARD_SOCKET_GROUP` unset (no chown attempted) since both processes run as the same local user there — nothing to separate.
+
+## Integrity manifest
+
+`dendrite-guard` can hash a configured set of paths (`DENDRITE_GUARD_WATCH_PATHS`, colon-separated — meant for the binaries/systemd unit files/eBPF object `dendrited`, `dendrite-magi`, and `dendrite-guard` itself are built from) and store the result as a signed baseline, then later recompute the same hashes and compare. This is `dendrited`'s ROADMAP.md finding item #2 (of the 5-item ordered plan under "Ordered plan for this work, agreed before starting").
+
+- **`GuardRequest::EstablishBaseline`** (`dendrite guard baseline`) hashes every configured path with SHA-256 (`sha256:<hex>` for a readable file, `absent` for one that doesn't exist — a watched binary disappearing is itself worth reporting, not just a hashing failure to swallow — or `unreadable` for any other I/O error), builds a deterministic path-sorted JSON manifest, signs it, and stores it in `guard.sqlite3`, replacing any previous baseline.
+- **`GuardRequest::VerifyIntegrity`** (`dendrite guard verify`) recomputes the same hashes and reports any path whose current digest no longer matches the stored baseline, plus any newly-configured watch path the baseline doesn't cover yet. It also re-verifies the baseline's own signature first, so a hand-edited or corrupted baseline is reported honestly (`signature_valid: false`) rather than silently compared against garbage.
+
+**Deliberately excluded from this crate's own request:** the watch-path list is never accepted as part of a `GuardRequest` — only read from Guard's own `DENDRITE_GUARD_WATCH_PATHS` — precisely so a compromised `dendrited` can't ask Guard to hash or verify attacker-chosen paths instead of the real watched set. `dendrited`'s `guard.rs`/`core.rs` only ever trigger these two operations; they never supply what gets hashed.
+
+**Guard signs with its own key, never `dendrited`'s.** `ensure_signing_key` generates and persists a dedicated ed25519 keypair the first time it's needed — its private key stored as a mode-`0600` file under a `keys/` subdirectory next to `guard.sqlite3` (inside Guard's own now privilege-separated `StateDirectory=`, see below), referenced from the database the same way `crates/dendrited/src/self_store.rs`'s `InstanceKeyRecord` references its own. This mirrors that existing pattern deliberately, but the keypair itself is never shared or derived from `dendrited`'s: Guard's whole job is verifying `dendrited`, so `dendrited` must never hold a key that could re-sign a tampered manifest as trusted. Manifest signatures use their own domain-separated preimage (`DENDRITE-GUARD-MANIFEST-V1`), distinct from `dendrited`'s `instance_bound_preimage` convention, so a signature produced for one purpose can never be replayed as valid for the other.
+
+**What this doesn't do yet** (later items on the same ordered plan, deliberately not this one): neither `establish_baseline` nor `verify_integrity` runs automatically — there's no startup or periodic verification pass yet (item #3), and a detected mismatch doesn't yet become a recorded `IntegrityFinding` or move trust state (item #4). Both are read/write operations triggered on demand today, over the same socket, for testing and for a future scheduler to call into.
 
 ## Development-only surfaces
 
