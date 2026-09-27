@@ -78,11 +78,19 @@ Environment=DENDRITE_GUARD_SOCKET_MODE=0660
 # crates/dendrited/Cargo.toml's [package.metadata.deb] `assets`/
 # `systemd-units` for where each of these actually lands) — see
 # crates/dendrite-guard/README.md's "Integrity manifest" section for what
-# `dendrite guard baseline`/`guard verify` do with this. Not read until an
-# operator runs one of those commands (or a later batch wires in automatic
-# verification — ROADMAP.md items #3/#4) — setting this alone doesn't
-# establish a baseline by itself.
+# `dendrite guard baseline`/`guard verify` do with this. Setting this alone
+# still doesn't establish a baseline by itself — an operator (or install
+# tooling) must still run `dendrite guard baseline` once — but once a
+# baseline exists, this process verifies these same paths against it
+# automatically in the background (see DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS
+# below), not only when `dendrite guard verify` is run by hand.
 Environment=DENDRITE_GUARD_WATCH_PATHS=/usr/bin/dendrited:/usr/bin/dendrite-cli:/usr/bin/dendrite-ui-server:/usr/bin/dendrite-magi:/usr/bin/dendrite-guard:/usr/lib/dendrite/dendrite-ebpf:/lib/systemd/system/dendrited.service:/lib/systemd/system/dendrite-ui.service:/lib/systemd/system/dendrite-magi.service:/lib/systemd/system/dendrite-guard.service
+# How often the background verification pass re-checks the watch set above
+# against the stored baseline (see crates/dendrite-guard/README.md's
+# "Integrity manifest" section). Explicit here even though it matches the
+# built-in default (300s), so the packaged interval is a deliberate, visible
+# choice rather than an implicit one.
+Environment=DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS=300
 
 # --- Sandboxing / hardening ---
 # No telemetry, no eBPF, no network beyond its own socket — lock this down

@@ -12,7 +12,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/dendrite-guard.sock";
 const DEFAULT_DB_PATH: &str = "data/guard.sqlite3";
@@ -24,6 +26,12 @@ const DEFAULT_DB_PATH: &str = "data/guard.sqlite3";
 /// own dedicated user, distinct from `dendrited`'s (see `README.md`'s
 /// "Privilege separation" section).
 const DEFAULT_SOCKET_MODE: u32 = 0o660;
+/// How often the background thread re-verifies against the stored
+/// baseline (see `run_periodic_verification`) when
+/// `DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS` isn't set. `dendrite guard
+/// verify` triggers the identical check on demand any time, independent of
+/// this interval.
+const DEFAULT_VERIFY_INTERVAL_SECONDS: u64 = 300;
 
 fn main() {
     let db_path = env::var("DENDRITE_GUARD_DB").unwrap_or_else(|_| DEFAULT_DB_PATH.into());
@@ -61,6 +69,25 @@ fn main() {
         .map(PathBuf::from)
         .collect();
 
+    let verify_interval_secs = match env::var("DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS") {
+        Ok(value) => match value.trim().parse::<u64>() {
+            Ok(0) => {
+                eprintln!(
+                    "dendrite-guard: invalid DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS `{value}`; must be a positive number of seconds"
+                );
+                std::process::exit(2);
+            }
+            Ok(seconds) => seconds,
+            Err(_) => {
+                eprintln!(
+                    "dendrite-guard: invalid DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS `{value}`; expected a positive number of seconds"
+                );
+                std::process::exit(2);
+            }
+        },
+        Err(_) => DEFAULT_VERIFY_INTERVAL_SECONDS,
+    };
+
     if let Some(parent) = std::path::Path::new(&db_path).parent()
         && !parent.as_os_str().is_empty()
         && let Err(error) = std::fs::create_dir_all(parent)
@@ -73,7 +100,7 @@ fn main() {
     }
 
     let store = match GuardStore::open(&db_path) {
-        Ok(store) => Mutex::new(store),
+        Ok(store) => Arc::new(Mutex::new(store)),
         Err(error) => {
             eprintln!("dendrite-guard: failed to open {db_path}: {error}");
             std::process::exit(1);
@@ -128,11 +155,72 @@ fn main() {
         socket_path.display()
     );
 
+    // Item #3 (ROADMAP.md): a real verification pass on startup and
+    // periodically, not just when something asks for one. Runs in its own
+    // thread since it shares the same `store` lock as request handling —
+    // see `run_periodic_verification`'s doc comment. Started only when
+    // something is actually configured to watch: with an empty
+    // `DENDRITE_GUARD_WATCH_PATHS`, there's nothing to verify and no
+    // baseline can meaningfully exist yet.
+    if !watch_paths.is_empty() {
+        let store = Arc::clone(&store);
+        let watch_paths = watch_paths.clone();
+        thread::spawn(move || {
+            run_periodic_verification(&store, &watch_paths, verify_interval_secs)
+        });
+    }
+
     for incoming in listener.incoming() {
         let Ok(stream) = incoming else { continue };
         if let Err(error) = handle_connection(stream, &store, &watch_paths) {
             eprintln!("dendrite-guard: request failed: {error}");
         }
+    }
+}
+
+/// Runs `GuardStore::verify_integrity` immediately (the "on startup" half
+/// of item #3) and then every `interval_secs` (the "periodically" half),
+/// for as long as the process runs. `dendrite guard verify` (see
+/// `handle_request`'s `GuardRequest::VerifyIntegrity` arm) triggers the
+/// identical check on demand — there's exactly one verification code path,
+/// just two ways to trigger it.
+///
+/// Shares `store`'s `Mutex` with request handling: a verification pass
+/// holds the lock for as long as hashing every configured watch path takes
+/// (real I/O, potentially real file reads), so a request arriving mid-pass
+/// waits for it to finish. Acceptable given how infrequently this runs by
+/// default and how small a real watch set should be — see
+/// `crates/dendrite-guard/README.md`'s "Integrity manifest" section.
+fn run_periodic_verification(
+    store: &Mutex<GuardStore>,
+    watch_paths: &[PathBuf],
+    interval_secs: u64,
+) {
+    loop {
+        {
+            let mut store = match store.lock() {
+                Ok(store) => store,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match store.has_baseline() {
+                Ok(true) => {
+                    if let Err(error) = store.verify_integrity(watch_paths, unix_now()) {
+                        eprintln!(
+                            "dendrite-guard: periodic integrity verification failed: {error}"
+                        );
+                    }
+                }
+                Ok(false) => {
+                    // No baseline established yet (nobody has run `dendrite
+                    // guard baseline`) — nothing to verify against, and not
+                    // worth logging every interval while that's true.
+                }
+                Err(error) => {
+                    eprintln!("dendrite-guard: failed to check for an integrity baseline: {error}")
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(interval_secs));
     }
 }
 
@@ -242,7 +330,7 @@ fn handle_request(
                 },
             }
         }
-        GuardRequest::VerifyIntegrity => match store.verify_integrity(watch_paths) {
+        GuardRequest::VerifyIntegrity => match store.verify_integrity(watch_paths, unix_now()) {
             Ok(result) => GuardResponse::Verification { result },
             Err(error) => GuardResponse::Error {
                 message: format!("{error}"),

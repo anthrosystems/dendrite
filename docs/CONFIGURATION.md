@@ -86,6 +86,8 @@ Unlike MAGI (a stateless per-request vote), Guard owns real persistent state —
 
 `dendrite-guard` also owns a signed integrity manifest: `dendrite guard baseline`/`dendrite guard verify` hash a configured set of paths (`DENDRITE_GUARD_WATCH_PATHS`, `dendrite-guard`'s own env var, never accepted over the wire from `dendrited`) and compare current hashes against a stored, signed baseline. See `crates/dendrite-guard/README.md`'s "Integrity manifest" section for the full design, including why Guard signs with its own key rather than `dendrited`'s.
 
+Verification is not only triggered manually: `dendrite-guard` also runs it automatically, in a background thread that verifies once at startup and then every `DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS` (default `300`) — same env-var-configuration pattern as everything else here. A detected mismatch now has real consequences rather than just being reported: it's recorded as an `IntegrityFinding` (deduplicated, so a persistent unresolved mismatch produces one finding, not one per tick) and escalates trust state, via a monotonic rule that never automatically moves trust back toward `Trusted`. See `crates/dendrite-guard/README.md`'s "Integrity manifest" section for the severity heuristic and escalation rules.
+
 ## Telemetry collectors
 
 | Variable | Default | Description |

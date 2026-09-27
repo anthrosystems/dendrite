@@ -29,6 +29,7 @@ If `dendrite-guard` is unreachable, times out, or isn't running, `dendrited`'s c
 | `DENDRITE_GUARD_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket after binding — see "Privilege separation" below |
 | `DENDRITE_GUARD_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
 | `DENDRITE_GUARD_WATCH_PATHS` | unset (empty) | Colon-separated paths the integrity manifest hashes — see "Integrity manifest" below |
+| `DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS` | `300` | How often the background verification pass re-checks `DENDRITE_GUARD_WATCH_PATHS` against the stored baseline — see "Integrity manifest" below |
 
 ## Privilege separation
 
@@ -55,7 +56,20 @@ Local dev leaves `DENDRITE_GUARD_SOCKET_GROUP` unset (no chown attempted) since 
 
 **Guard signs with its own key, never `dendrited`'s.** `ensure_signing_key` generates and persists a dedicated ed25519 keypair the first time it's needed — its private key stored as a mode-`0600` file under a `keys/` subdirectory next to `guard.sqlite3` (inside Guard's own now privilege-separated `StateDirectory=`, see below), referenced from the database the same way `crates/dendrited/src/self_store.rs`'s `InstanceKeyRecord` references its own. This mirrors that existing pattern deliberately, but the keypair itself is never shared or derived from `dendrited`'s: Guard's whole job is verifying `dendrited`, so `dendrited` must never hold a key that could re-sign a tampered manifest as trusted. Manifest signatures use their own domain-separated preimage (`DENDRITE-GUARD-MANIFEST-V1`), distinct from `dendrited`'s `instance_bound_preimage` convention, so a signature produced for one purpose can never be replayed as valid for the other.
 
-**What this doesn't do yet** (later items on the same ordered plan, deliberately not this one): neither `establish_baseline` nor `verify_integrity` runs automatically — there's no startup or periodic verification pass yet (item #3), and a detected mismatch doesn't yet become a recorded `IntegrityFinding` or move trust state (item #4). Both are read/write operations triggered on demand today, over the same socket, for testing and for a future scheduler to call into.
+**Verification runs automatically, and can also be triggered on demand (items #3 and #4 of the same ordered plan).** `dendrite-guard` runs one real verification implementation — `GuardStore::verify_integrity` — from two callers that share it identically:
+
+- A background thread, spawned at startup whenever `DENDRITE_GUARD_WATCH_PATHS` is non-empty, runs a verification pass immediately and then every `DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS` (default 300s). It quietly skips a tick if no baseline has been established yet (nothing to compare against), rather than logging an error every interval.
+- **`GuardRequest::VerifyIntegrity`** (`dendrite guard verify`) triggers the exact same pass on demand, so an operator never has to wait for the next tick to confirm a suspicion.
+
+Both callers share `GuardStore`'s single `Mutex`, so a verification pass (hashing every watch path) holds the lock for its duration; a request arriving mid-pass waits behind it. Acceptable given the default interval and expected small watch sets, but worth knowing if watch paths grow large or slow to hash.
+
+A verification pass now has real side effects, not just a diagnostic report:
+
+- If the stored baseline's own signature no longer verifies (a hand-edited or corrupted baseline), that's treated as an unconditional `Critical` finding against a fixed target (`guard:manifest-signature`), which escalates trust straight to `Compromised`. Per-path diffing is skipped — the manifest can't be trusted enough to diff against.
+- Otherwise, each path whose current digest no longer matches the baseline gets a severity from a built-in heuristic based on its basename: `dendrited`/`dendrite-guard` binaries are `Critical` (→ `Compromised`), any `*.service` unit file is `High` (→ `Suspected`), everything else (e.g. `dendrite-magi`, the eBPF object) is `Warning` (→ `Degraded`). This isn't yet configurable per path.
+- A watch path configured after the last baseline was established (baseline doesn't cover it yet) is reported for visibility only — it's operator config drift, not a security event, so it never becomes a finding and never affects trust state.
+- Trust state escalation is **monotonic**: `escalate_trust_state` only ever moves to a candidate state that's strictly worse than the current one (rank order `Trusted < Degraded < Suspected < Quarantined < Compromised < Recovering`, matching the pipeline diagram at the top of this file). A verification pass can never automatically move trust state back toward `Trusted` — recovering trust is deliberately left to item #5 (an explicit, authenticated re-baseline action), not yet designed.
+- Repeated detection of the same unresolved mismatch (same path, same current digest) records exactly one `IntegrityFinding`, not one per tick — a `guard_open_mismatches` table tracks what's already been reported and only inserts a new finding when a tracked path's digest actually changes again. This table (and only this table) is cleared by `establish_baseline`: re-baselining accepts the new content as the reference point for future mismatches, but it does **not** restore trust state — a system doesn't get to be trusted again just because someone re-ran `guard baseline`.
 
 ## Development-only surfaces
 
