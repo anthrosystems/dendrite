@@ -4,8 +4,8 @@ A repeatable, by-hand checklist for confirming a build actually works end to
 end — beyond `cargo test`. Useful after a change that touches daemon
 startup, telemetry, the HTTP/WebSocket surface, the UI, or packaging, and
 before cutting a checkpoint. Each section names the commands to run and
-what a pass looks like; none of it is automated yet (see `docs/ROADMAP.md`'s
-Batch 7 notes on whether that's worth building).
+what a pass looks like; none of it is automated yet — see "Open question:
+an automated integration harness" below.
 
 ## 1. Build and unit tests
 
@@ -227,3 +227,28 @@ test (routine-lane throughput ceilings, hub-node relationship blowups, CPU
 contention with another workload on the same core), see `docs/PERFORMANCE.md`
 — those are live-hardware findings, not something to re-derive from scratch
 here.
+
+## Open question: an automated integration harness
+
+There is no `tests/` directory at the repo root — it once held a single
+placeholder script (`tests/test-dendrite.sh`), removed when this file took
+over as the canonical manual validation matrix. Inline `#[cfg(test)]`
+coverage exists across ~20 modules and catches unit-level logic errors, but
+nothing today automates the checklist above: process-boundary behaviour
+(does a real `dendrited` actually 401 an unauthenticated HTTP request, does
+Guard's IPC client actually fail closed when `dendrite-guard` is killed
+mid-request, does a packaged install's `postinst` actually work) is only
+ever exercised by hand, once per checkpoint.
+
+Building a full harness matching everything in this file is a real project
+in its own right, not something to bolt on incidentally — so rather than
+attempting it wholesale, the better path is to add one real integration
+test the next time work needs exactly the kind of end-to-end check unit
+tests can't give (spin up a real `dendrited` against ephemeral
+sockets/ports, drive it over the real Unix socket or HTTP API, assert on
+the real behaviour), and let `tests/` grow organically from there. Hardening
+`dendrite-guard`'s decision logic is a plausible first candidate: unit
+tests can cover the trust-state machine's logic in isolation, but only a
+real `dendrited` + `dendrite-guard` pair over the real IPC socket exercises
+the process-boundary/fail-closed behaviour the way Checkpoint B's manual
+testing did.

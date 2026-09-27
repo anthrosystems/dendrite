@@ -15,55 +15,8 @@ Checkpoint A (testing the current version against README/docs, updating and test
 Findings from the external code review pass that preceded Checkpoint A, carried forward here since they're genuinely packaging-scoped rather than resolved:
 
 - **`dendrite-guard`'s decision logic is still a stub.** A trust-state enum and an allow/deny match on `evaluate_authority`. No integrity manifests, anti-tamper, attestation, or recovery isolation yet, despite being the architecture's central authority-removal boundary. Given how much the invariants lean on Guard surviving compromise, hardening it should be prioritised ahead of enabling any destructive action executor (`SUSPEND_PROCESS`, `TERMINATE_PROCESS`, `QUARANTINE_OBJECT`, `BLOCK_NETWORK_DESTINATION`, `ISOLATE_HOST`). Confirmed as its own batch: every call site outside `dendrite-guard` only calls `evaluate_authority()`, `trust_state()`, `status()`, and `findings()` (`core.rs`, `actions.rs`, `adaptive_analysis.rs`) — as long as hardening work stays behind that same four-method surface, it should require no changes elsewhere in the codebase. (Process separation itself — the IPC protocol, reconnect behaviour, fail-closed semantics — is done; see `crates/dendrite-guard/README.md`. What's left is the decision logic.)
-- **`.unwrap()`/`.expect()` audit in `dendrited`.** An ongoing, periodic pass distinguishing genuinely infallible cases (see `CLAUDE.md`'s note on the validated-newtype pattern — `Confidence`, `MemoryStrength`, `MemoryConfidence`, `DecayRate`) from ones that could take the daemon down on unexpected input (e.g. odd filesystem metadata, malformed telemetry). Re-run this whenever a batch of new I/O-adjacent code lands rather than treating it as a one-time count, since raw call counts drift with every change and aren't themselves meaningful.
-- **There is no `tests/` directory at the repo root.** It once held a single placeholder script (`tests/test-dendrite.sh`), removed when `docs/TESTS.md` took over as the canonical manual validation matrix. Inline `#[cfg(test)]` coverage exists across ~20 modules, but there's still no automated integration/end-to-end harness matching what `TESTS.md` describes — that file is executed by hand, once per checkpoint so far. Whether it's worth automating into a real harness (vs. continuing to re-run it manually before each future checkpoint) is an open question for this batch.
-- **Docs-to-code ratio.** `architecture.md` documents a very ambitious end-state (CVE intelligence, federation, ML, Culture/AMA sandbox, cross-host correlation) against ~20k lines of code concentrated almost entirely in one crate (`dendrited`, ~12.9k lines). Not a problem in itself this early, but a reason to hold off documenting further ahead of implementation until packaging closes more of the gap.
 
-The current development binary needs:
-
-```text
-CAP_DAC_READ_SEARCH
-CAP_SYS_ADMIN
-CAP_PERFMON
-CAP_BPF
-```
-
-Current development capability set:
-
-```text
-cap_bpf,cap_perfmon,cap_sys_admin,cap_dac_read_search+ep
-```
-
-Packaging goals:
-
-- eBPF + the UI are compiled during release/build and bundled with Dendrite;
-- create/use a dedicated `dendrite` service user and `dendrite` group with appropriate ownership/permissions;
-- install service files, default configuration, state directories, UI assets, eBPF assets, CLI and daemon binaries;
-- configure systemd hardening and only the capabilities that the packaged collectors actually require;
-- provide safe package upgrades that preserve configuration and state;
-- make installation require minimal faff, ideally:
-
-```bash
-sudo apt install dendrite
-sudo systemctl enable --now dendrited
-```
-
-The intended native layout should converge on `/usr/bin`, `/usr/lib/dendrite`, `/usr/share/dendrite`, `/etc/dendrite`, and `/var/lib/dendrite`, with an Anthrosystems-owned signed APT repository as the long-term distribution target.
-
-### Local packaging (done) vs. distribution packaging (skeleton, later)
-
-These are two different things and shouldn't be conflated:
-
-- **Local packaging** — getting a fresh clone to a runnable state with one command, for dev work across machines. Done: `scripts/bootstrap.sh` builds `dendrited`/`dendrite-cli`, the eBPF object, and the UI, and sets up the dev `dendrite` group/capabilities — idempotent (skips anything already built, `--force` to override), and each step degrades gracefully rather than aborting the others if a toolchain piece (bpf-linker, nightly, npm) is missing, since eBPF and the UI are both optional at runtime. `scripts/launch_host_a.sh` calls it automatically on a fresh clone (no `target/debug/dendrited` yet) and skips straight to launching once built. For a dev who wants to rebuild just one piece, `scripts/bootstrap.sh` takes `--skip-ebpf`/`--skip-ui`/`--skip-capabilities`/`--force` directly.
-- **Distribution packaging** — the actual `.deb`, for real installs on machines that aren't a dev clone. **Implemented** via `cargo-deb` (chosen over hand-rolled `debian/` control files — version/metadata stays in `Cargo.toml` next to the code it describes, no separate changelog-version-sync step, and it has built-in systemd-unit install support that maps directly onto `packaging/dendrited.service`). `scripts/build-deb.sh` wraps the whole sequence (`build-ebpf.sh` → `npm run build` in `ui/` → `cargo deb -p dendrited`) into one command, since `cargo build`/`cargo deb` only packages what already exists on disk and won't run the eBPF or UI builds itself — matching the same "wraps, doesn't replace, `bootstrap.sh`'s steps" relationship called out here previously. Installing the result is exactly the two commands the packaging goals at the top of this batch call for:
-    ```bash
-    sudo apt install ./dendrited_0.1.0-1_amd64.deb
-    systemctl status dendrited
-    ```
-    with no separate `enable --now` step needed — see the "auto-starts on install" point below.
-  - **Done:** the WebSocket port merged onto the same HTTP listener (no more `DENDRITE_WS_ADDR`), the UI split into its own process (`dendrite-ui-server`), MAGI split into its own process (`dendrite-magi`), Guard split into its own process (`dendrite-guard`), and the HTTP API/WebSocket bearer-token requirement (`dendrite-cli http-token`) — each verified end to end with real running processes. Current design/configuration lives in `docs/CONFIGURATION.md` and each crate's own README (`crates/dendrite-ui-server/README.md`, `crates/dendrite-magi/README.md`, `crates/dendrite-guard/README.md`); the process-separation and fail-closed design rationale (why MAGI/Guard are separate units, ABSTAIN vs. DENY/VETO, the MCP client/server split) now lives in `docs/architecture.md` rather than here.
-  - **Closed:** the real-hardware run this used to wait on happened (see CHECKPOINT B below) — real `bpf-linker`-built eBPF object, real systemd host, full install/remove/purge/reinstall cycle. Two real bugs surfaced and were fixed as a direct result, not sandbox-only findings: `dendrited`, `dendrite-magi`, and `dendrite-guard` sharing one `RuntimeDirectory=dendrite` meant restarting any single one of them deleted the others' still-listening sockets out from under them (systemd removes a `RuntimeDirectory=` when the first referencing unit stops, even while siblings sharing the name are still running — [systemd/systemd#5394](https://github.com/systemd/systemd/issues/5394)); fixed by provisioning `/run/dendrite` via a tmpfiles.d snippet instead (`packaging/dendrite.tmpfiles`) with `RuntimeDirectory=` removed from all three units. Separately, `dendrite-cli` hardcoded `/tmp/dendrited.sock` as its fallback, which never matches a packaged install (`dendrited.service` sets `DENDRITE_SOCKET` via its own `Environment=`, invisible to an interactive shell) — fixed by checking the packaged path first. See `docs/CONFIGURATION.md`'s "IPC and network" section and `crates/dendrite-cli/README.md` for the current behaviour.
-  - Website/distribution (from the User feedback backlog): consider a project website, potentially hosting the apt repository once this batch's `.deb`/apt distribution target is real (see the "long-term distribution target" note at the top of this batch). A live, publicly-interactive Memory Graph demo is a good idea, confirmed worth keeping — but it must not run on the same machine hosting the website/anything real, must obviously limit what it actually shows (a live demo of a real running host's telemetry is not something to expose unfiltered to the public internet), and, now that the HTTP/WebSocket bearer-token requirement above is in place, still needs its own explicit demo-scoped token/access story (a token baked into a public demo page is not meaningfully different from no auth at all) if it's ever reachable beyond localhost. A public Memory Graph endpoint is reconnaissance material if pointed at something that matters — treat "what does the public demo actually reveal" as its own design question, not an afterthought.
+Build/packaging mechanics (dev bootstrap, the `.deb`, what it installs, required capabilities) now live in `docs/BUILDING.md`.
 
 ## CHECKPOINT B
 
@@ -82,7 +35,7 @@ Verify:
 - socket ownership/permissions; **done** — confirmed `0660`/group-`dendrite` ownership, and the group-membership requirement is now handled by `packaging/postinst` (adds the invoking `sudo` user automatically).
 - systemd service hardening/capabilities; **done** — all four units active with their configured hardening; no manual `setcap` needed.
 - eBPF and fanotify work without manual `setcap`; **done** — confirmed via `dendrite-cli telemetry` showing both `active` (real `bpf-linker`-built object, not a stub) with the `/proc`/filesystem-polling fallbacks correctly in `standby`.
-- service restart/reboot behaviour; **partially done** — individual-service restart resilience is verified (including the `RuntimeDirectory=` bug above, found by restarting `dendrite-guard` alone and confirmed fixed by restarting `dendrited` alone afterward with no ill effect); a full machine reboot hasn't specifically been exercised yet.
+- service restart/reboot behaviour; **partially done** — individual-service restart resilience is verified, including a real shared-`RuntimeDirectory=` teardown bug found by restarting `dendrite-guard` alone and confirmed fixed by restarting `dendrited` alone afterward with no ill effect (see `docs/CONFIGURATION.md`'s "IPC and network" section for the fix); a full machine reboot hasn't specifically been exercised yet.
 - package upgrades preserve configuration/data correctly; **partially done** — remove-then-reinstall-same-version was verified to preserve `/var/lib/dendrite` and `/etc/dendrite` and resume the *same* instance (matching `instance id` across the round-trip); an actual version-bump upgrade path hasn't been exercised yet (there's only one released version so far).
 - uninstall/reinstall behaviour where safe. **done** — `apt remove` leaves state/conffiles/account alone (confirmed), `apt purge` removes all of it cleanly (confirmed), matching `packaging/postrm`.
 
@@ -184,7 +137,7 @@ Batch 7/Checkpoint B is also the point to install a second real Dendrite instanc
 4. Confirm host-scoped `object_id`s remain distinct while correlation keys/behaviour identities allow equivalent observations to be related.
 5. Confirm historical origin/lineage remains provenance asserted by Host A and does not become execution authority on Host B.
 
-"Host B" does not require a second physical machine or VM. Instance identity is a random `Uuid::new_v4()` generated once per fresh, empty self-store (`self_store.rs`) — it has no dependency on hostname, MAC address, or any other host-derived value. Two `dendrited` processes on the same machine, each pointed at a fully separate set of `DENDRITE_*_DB`/`DENDRITE_SOCKET`/`DENDRITE_HTTP_ADDR` values (see `CONFIGURATION.md`; `DENDRITE_HTTP_ADDR` alone now covers both HTTP and WebSocket, per the port-merge note above), get genuinely distinct instance IDs and behave as distinct hosts for every purpose this validation cares about. A literal second machine only starts to matter once real host-level differences (actual separate telemetry, actual separate package inventory, network reachability between the two) become relevant — not for exercising the Antiserum trust boundary itself.
+"Host B" does not require a second physical machine or VM. Instance identity is a random `Uuid::new_v4()` generated once per fresh, empty self-store (`self_store.rs`) — it has no dependency on hostname, MAC address, or any other host-derived value. Two `dendrited` processes on the same machine, each pointed at a fully separate set of `DENDRITE_*_DB`/`DENDRITE_SOCKET`/`DENDRITE_HTTP_ADDR` values (see `CONFIGURATION.md`; `DENDRITE_HTTP_ADDR` alone covers both HTTP and WebSocket, which share one listener), get genuinely distinct instance IDs and behave as distinct hosts for every purpose this validation cares about. A literal second machine only starts to matter once real host-level differences (actual separate telemetry, actual separate package inventory, network reachability between the two) become relevant — not for exercising the Antiserum trust boundary itself.
 
 `scripts/launch_host_a.sh` and `scripts/launch_host_XYZ.sh [HOST_NAME]` automate exactly this setup — the latter can be run repeatedly with different `HOST_NAME`s (each requiring its own explicit `DENDRITE_HOST_HTTP_PORT`, which covers both HTTP and the `/ws` WebSocket upgrade — see `docs/CONFIGURATION.md`) to stand up as many additional same-machine hosts as needed, each fully isolated under its own folder outside the repository. Both scripts support `--cleanup` to reset a host's data; `launch_host_XYZ.sh` additionally supports `--remove-host` to delete a disposable host entirely.
 
@@ -275,6 +228,10 @@ Export-only, deliberately: a plugin/script that exports selected Dendrite knowle
 This must remain an observation/export integration and must not grant Obsidian execution authority over Dendrite.
 
 **Realistic beyond novelty even scoped this way.** Dendrite already has the raw material a plugin like this would need — persistent incidents/evidence, a Memory Graph with real relationships, correlation keys, and the existing Antiserum export format as a template for "here is a consistent, signed snapshot of what I know." An export that writes one Markdown note per incident/node, cross-linked via `[[wikilinks]]` from the graph's own relationships, would give an operator a genuinely useful, searchable, linkable security journal inside a tool they already use for notes. Lower priority than Batch 7/8 core work either way.
+
+## Future: project website
+
+From the User feedback backlog: consider a project website, potentially hosting the apt repository once the `.deb`/apt distribution target in `docs/BUILDING.md` is real. A live, publicly-interactive Memory Graph demo is a good idea, confirmed worth keeping — but it must not run on the same machine hosting the website/anything real, must obviously limit what it actually shows (a live demo of a real running host's telemetry is not something to expose unfiltered to the public internet), and needs its own explicit demo-scoped token/access story (a token baked into a public demo page is not meaningfully different from no auth at all — see `docs/CONFIGURATION.md`'s "HTTP API authentication" section for the auth mechanism itself) if it's ever reachable beyond localhost. A public Memory Graph endpoint is reconnaissance material if pointed at something that matters — treat "what does the public demo actually reveal" as its own design question, not an afterthought.
 
 ## Future: eBPF pre-filtering for file events
 

@@ -13,11 +13,16 @@ vulnerability tracking.
 
 `docs/ROADMAP.md` is the canonical implementation roadmap (organised into
 numbered batches) — read it before starting non-trivial work to see what
-batch is active and what's already been decided. `docs/TODO.md` is a
-scratch tracking list, not a design doc; items should get resolved,
-folded into `ROADMAP.md`/`architecture.md`, or dropped, not left open
-indefinitely. `docs/architecture.md` documents the long-term vision and
-is intentionally ahead of the current implementation in places.
+batch is active and what's already been decided. It's a task list, not a
+changelog or a debugging journal: a fully-resolved item gets removed
+outright rather than annotated "done" in place, and design rationale or
+engineering history that's still worth keeping moves to a more fitting
+doc — `docs/architecture.md` for design decisions, `docs/BUILDING.md` for
+build/packaging mechanics, `docs/PERFORMANCE.md` for load-testing history.
+`docs/TODO.md` is a scratch tracking list, not a design doc; items should
+get resolved, folded into `ROADMAP.md`/`architecture.md`, or dropped, not
+left open indefinitely. `docs/architecture.md` documents the long-term
+vision and is intentionally ahead of the current implementation in places.
 
 ## Workspace layout
 
@@ -64,38 +69,19 @@ treating a stub as a real verification.
 
 ## Local dev vs. distribution packaging
 
-Two different things, don't conflate them (see `docs/ROADMAP.md`'s Batch 7):
+Two different things, don't conflate them — full mechanics in
+`docs/BUILDING.md`:
 
-- **Local dev**: `scripts/bootstrap.sh` gets a fresh clone runnable (builds
-  `dendrited`/`dendrite-cli`, the eBPF object, the UI; sets up the dev
-  `dendrite` group/capabilities). `scripts/launch_host_a.sh` calls it
-  automatically on a fresh clone. The UI runs via `npm run dev` (Vite),
-  proxying `/api`/`/ws` to a locally-running `dendrited`.
-- **Distribution packaging**: `scripts/build-deb.sh` builds the eBPF
-  object, builds the UI (`ui/dist`, baked with an absolute `dendrited`
-  origin — see `docs/CONFIGURATION.md`), then runs `cargo deb -p dendrited`.
-  The resulting `.deb` installs a dedicated `dendrite` system user/group and
-  **four** independent systemd units: `dendrited.service` (the daemon),
-  `dendrite-ui.service` (`dendrite-ui-server`, a minimal unprivileged
-  static-file server for the UI — see `crates/dendrite-ui-server/README.md`
-  for why it's a separate process/unit rather than something `dendrited`
-  serves itself), `dendrite-magi.service` (`dendrite-magi`, the MAGI
-  quorum-evaluation process `dendrited` reaches over a Unix socket — see
-  `crates/dendrite-magi/README.md`), and `dendrite-guard.service`
-  (`dendrite-guard`, the trust/integrity process that owns Guard's
-  persistent state and answers authority checks over its own Unix socket —
-  see `crates/dendrite-guard/README.md`). Each unit can be enabled/disabled
-  independently (`systemctl disable --now dendrite-ui`/`dendrite-magi`/
-  `dendrite-guard`); `dendrited` treats an unreachable `dendrite-magi` as
-  fail-closed (every MAGI seat abstains, so nothing can complete) and an
-  unreachable `dendrite-guard` as fail-closed the other way (trust state
-  reads `Compromised` and every authority check reads `Deny`, since Guard
-  has only one voice on trust, unlike MAGI's quorum) — neither hangs nor
-  silently allows. Config lives in `/etc/dendrite/dendrited.env`/
-  `dendrite-magi.env`/`dendrite-guard.env` (conffiles — survive
-  upgrades/removal, only `purge` deletes them), state in
-  `/var/lib/dendrite` (via systemd's `StateDirectory=`, same survival
-  rules).
+- **Local dev**: `scripts/bootstrap.sh` gets a fresh clone runnable. The UI
+  runs via `npm run dev` (Vite), proxying `/api`/`/ws` to a locally-running
+  `dendrited` and injecting its HTTP API bearer token automatically (see
+  `docs/CONFIGURATION.md`'s "HTTP API authentication" section) — dev never
+  needs the token pasted in by hand.
+- **Distribution packaging**: `scripts/build-deb.sh` produces the real
+  `.deb`, which installs a dedicated `dendrite` system user/group and
+  **four** independent systemd units (`dendrited`, `dendrite-ui`,
+  `dendrite-magi`, `dendrite-guard` — see each crate's own README for its
+  fail-closed behaviour when another is unreachable).
 
 ## Keeping scripts compatible with code changes
 
@@ -118,12 +104,20 @@ Inline `#[cfg(test)]` modules exist across most `dendrited` source files —
 run with `cargo +stable test --workspace`. `docs/TESTS.md` is a manual
 validation matrix, currently run by hand rather than automated — there is
 no `tests/` directory at the repo root (it never held more than a
-placeholder script, later removed); see `docs/ROADMAP.md`'s Batch 7 open
-questions on whether an automated integration harness is worth building.
+placeholder script, later removed). See `docs/TESTS.md`'s "Open question"
+section on whether/when an automated integration harness is worth building.
 
-When auditing `.unwrap()`/`.expect()` calls (a recurring roadmap item):
-count only production code, not inline test modules — test-assertion
-`.unwrap()`s are normal and not part of that audit's scope. Several
+### `.unwrap()`/`.expect()` audit
+
+An ongoing, periodic pass over `dendrited`, distinguishing genuinely
+infallible cases from ones that could take the daemon down on unexpected
+input (odd filesystem metadata, malformed telemetry, etc.). Re-run this
+whenever a batch of new I/O-adjacent code lands rather than treating it as
+a one-time count, since raw call counts drift with every change and aren't
+themselves meaningful on their own.
+
+Count only production code, not inline test modules — test-assertion
+`.unwrap()`s are normal and not part of this audit's scope. Several
 validated newtypes in this codebase (`Confidence`, `MemoryStrength`,
 `MemoryConfidence`, `DecayRate` — all private-field `u8` wrappers whose
 only public constructor validates a `0..=100` range) make many

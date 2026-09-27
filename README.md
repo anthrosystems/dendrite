@@ -193,6 +193,8 @@ The daemon HTTP API defaults to `127.0.0.1:8766`. The development Unix socket de
 - [`docs/VULNERABILITIES_AND_UPDATES.md`](docs/VULNERABILITIES_AND_UPDATES.md) — CVEs, candidates, remediation and updater boundary
 - [`ui/UI.md`](ui/UI.md) — operator UI, Memory Graph and Analysis workflows
 - [`docs/TESTS.md`](docs/TESTS.md) — canonical Checkpoint A validation plan
+- [`docs/BUILDING.md`](docs/BUILDING.md) — local dev bootstrap and `.deb` packaging mechanics
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — routine-lane throughput load-testing history
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — current batches/checkpoints and future work
 - [`antiserum/FORMAT.md`](antiserum/FORMAT.md) — canonical Antiserum package format
 
