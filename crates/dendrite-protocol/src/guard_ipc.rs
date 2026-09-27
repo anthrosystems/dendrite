@@ -35,7 +35,7 @@ pub enum GuardRequest {
     /// Recomputes hashes for the same configured watch paths and compares
     /// them against the stored baseline.
     VerifyIntegrity,
-    /// Recovery step 1 of 2 (ROADMAP.md item #5, `README.md`'s "Recovery"
+    /// Recovery step 1 of 2 (`crates/dendrite-guard/README.md`'s "Recovery"
     /// section): moves trust state to `Recovering` and writes a one-time
     /// recovery token into Guard's own privilege-separated state directory.
     /// The token is never included in the response — see `RecoveryBeginDto`.

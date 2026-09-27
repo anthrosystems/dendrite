@@ -311,8 +311,7 @@ impl GuardStore {
     /// current state (see `trust_rank`) — real verification findings only
     /// ever degrade trust automatically, never restore it. Recovering back
     /// to `Trusted` after a legitimate fix is deliberately not handled here;
-    /// see `complete_recovery` (ROADMAP.md item #5). Returns whether the
-    /// state actually changed.
+    /// see `complete_recovery`. Returns whether the state actually changed.
     fn escalate_trust_state(
         &mut self,
         candidate: TrustState,
@@ -368,7 +367,7 @@ impl GuardStore {
     /// many verification passes produces one finding, not one per pass.
     /// `guard_open_mismatches` is cleared by `establish_baseline`, which is
     /// the only thing that resets it — a re-baseline is an acknowledged
-    /// fresh start, not automatic recovery (see ROADMAP.md's item #5).
+    /// fresh start, not automatic recovery (see `complete_recovery`).
     fn record_open_mismatch(
         &mut self,
         key: &str,
@@ -568,8 +567,8 @@ impl GuardStore {
         // `verify_integrity` starts clean against the new baseline rather
         // than immediately re-flagging findings from before. This is
         // deliberately the only thing that resets `guard_open_mismatches`;
-        // it does not touch trust state (see ROADMAP.md's item #5 on why
-        // restoring trust automatically isn't done here).
+        // it does not touch trust state — see `complete_recovery` for the
+        // one explicit, separately-gated path back to `Trusted`.
         self.connection
             .execute("DELETE FROM guard_open_mismatches", [])?;
 
@@ -625,8 +624,7 @@ impl GuardStore {
     /// `IntegrityFinding`, and the worst severity found this pass can
     /// escalate trust state (see `escalate_trust_state` — this only ever
     /// makes trust state worse, never better; see `complete_recovery` for
-    /// the explicit, separately-gated path back to `Trusted`, ROADMAP.md
-    /// item #5).
+    /// the explicit, separately-gated path back to `Trusted`).
     ///
     /// If the stored baseline's own signature no longer verifies — the
     /// trust anchor itself may be corrupted or tampered — this is treated
@@ -739,8 +737,8 @@ impl GuardStore {
         })
     }
 
-    /// Recovery step 1 of 2 (ROADMAP.md item #5, see `README.md`'s
-    /// "Recovery" section for the full design). `escalate_trust_state`
+    /// Recovery step 1 of 2 (see `README.md`'s "Recovery" section for the
+    /// full design). `escalate_trust_state`
     /// only ever makes trust worse, by design — restoring it needs its own
     /// explicit, deliberately harder-to-reach path, gated on proving real
     /// host access rather than just IPC reachability.
@@ -887,8 +885,8 @@ fn state_for_severity(severity: IntegritySeverity) -> TrustState {
 /// (`escalate_trust_state` only ever moves up this ranking, never down —
 /// restoring `Trusted` is instead `complete_recovery`'s job, gated on a
 /// token proving real host access rather than reachable automatically; see
-/// `README.md`'s "Recovery" section, ROADMAP.md item #5). Follows the
-/// pipeline order in `README.md`'s diagram: `TRUSTED -> DEGRADED ->
+/// `README.md`'s "Recovery" section). Follows the pipeline order in
+/// `README.md`'s diagram: `TRUSTED -> DEGRADED ->
 /// SUSPECTED -> QUARANTINED -> COMPROMISED -> RECOVERING`.
 fn trust_rank(state: TrustState) -> u8 {
     match state {
@@ -1306,8 +1304,8 @@ mod tests {
         let result = store.verify_integrity(&watched, 4000).unwrap();
         assert!(result.matches);
         // ...but does not itself restore trust — that's `complete_recovery`'s
-        // job, gated on a token an operator must read off the host
-        // (ROADMAP.md item #5, see the `recovery_` tests below).
+        // job, gated on a token an operator must read off the host (see the
+        // `recovery_` tests below).
         assert_eq!(store.trust_state(), TrustState::Degraded);
         assert_eq!(store.findings().unwrap().len(), 1);
     }

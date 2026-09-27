@@ -69,10 +69,10 @@ pub enum IpcRequest {
     /// "Integrity manifest" section): a real mismatch is recorded as an
     /// `IntegrityFinding` and can escalate trust state, monotonically.
     GuardVerify,
-    /// Recovery step 1 of 2 (`crates/dendrite-guard/README.md`'s
-    /// "Recovery" section, ROADMAP.md item #5): moves trust state to
-    /// `Recovering` and has `dendrite-guard` write a one-time recovery
-    /// token into its own privilege-separated state directory. The token
+    /// Recovery step 1 of 2 (`crates/dendrite-guard/README.md`'s "Recovery"
+    /// section): moves trust state to `Recovering` and has `dendrite-guard`
+    /// write a one-time recovery token into its own privilege-separated
+    /// state directory. The token
     /// itself never travels back over this wire — an operator must read it
     /// directly off the host.
     GuardRecoverBegin,
@@ -359,8 +359,8 @@ pub struct IntegrityVerificationDto {
     pub mismatches: Vec<IntegrityMismatchDto>,
 }
 
-/// Result of `GuardRecoverBegin` (ROADMAP.md item #5). Deliberately never
-/// carries the recovery token itself — only its confirmation and the path
+/// Result of `GuardRecoverBegin`. Deliberately never carries the recovery
+/// token itself — only its confirmation and the path
 /// an operator must read it from directly on the host, since this response
 /// travels back through `dendrited`'s own IPC relay and a compromised
 /// `dendrited` must not be able to learn the token by relaying its own

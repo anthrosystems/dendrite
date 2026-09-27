@@ -47,7 +47,7 @@ Local dev leaves `DENDRITE_GUARD_SOCKET_GROUP` unset (no chown attempted) since 
 
 ## Integrity manifest
 
-`dendrite-guard` can hash a configured set of paths (`DENDRITE_GUARD_WATCH_PATHS`, colon-separated — meant for the binaries/systemd unit files/eBPF object `dendrited`, `dendrite-magi`, and `dendrite-guard` itself are built from) and store the result as a signed baseline, then later recompute the same hashes and compare. This is `dendrited`'s ROADMAP.md finding item #2 (of the 5-item ordered plan under "Ordered plan for this work, agreed before starting").
+`dendrite-guard` can hash a configured set of paths (`DENDRITE_GUARD_WATCH_PATHS`, colon-separated — meant for the binaries/systemd unit files/eBPF object `dendrited`, `dendrite-magi`, and `dendrite-guard` itself are built from) and store the result as a signed baseline, then later recompute the same hashes and compare.
 
 - **`GuardRequest::EstablishBaseline`** (`dendrite guard baseline`) hashes every configured path with SHA-256 (`sha256:<hex>` for a readable file, `absent` for one that doesn't exist — a watched binary disappearing is itself worth reporting, not just a hashing failure to swallow — or `unreadable` for any other I/O error), builds a deterministic path-sorted JSON manifest, signs it, and stores it in `guard.sqlite3`, replacing any previous baseline.
 - **`GuardRequest::VerifyIntegrity`** (`dendrite guard verify`) recomputes the same hashes and reports any path whose current digest no longer matches the stored baseline, plus any newly-configured watch path the baseline doesn't cover yet. It also re-verifies the baseline's own signature first, so a hand-edited or corrupted baseline is reported honestly (`signature_valid: false`) rather than silently compared against garbage.

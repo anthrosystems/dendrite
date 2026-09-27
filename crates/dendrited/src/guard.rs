@@ -49,8 +49,8 @@ pub trait GuardEvaluator: Send {
     /// Triggers a read-only comparison of current watch-path hashes
     /// against the stored baseline.
     fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError>;
-    /// Recovery step 1 of 2 (ROADMAP.md item #5): moves Guard's trust state
-    /// to `Recovering` and has it write a one-time recovery token to its
+    /// Recovery step 1 of 2: moves Guard's trust state to `Recovering` and
+    /// has it write a one-time recovery token to its
     /// own privilege-separated state directory. The token itself never
     /// reaches this side — see `crates/dendrite-guard/README.md`'s
     /// "Recovery" section on why.

@@ -40,8 +40,8 @@ crates/dendrite-guard     - trust/integrity boundary, its own process/systemd
                              unit; decision logic (privilege separation,
                              signed integrity manifest, automatic + on-demand
                              verification, severity-based trust escalation,
-                             host-authenticated recovery) is done, see
-                             ROADMAP.md's Batch 7 findings
+                             host-authenticated recovery) is done, see its
+                             own README
 crates/dendrite-action    - response action execution
 crates/dendrite-updater   - self-update foundations
 crates/dendrite-ebpf-common - shared types for the eBPF collector

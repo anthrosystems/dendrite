@@ -155,10 +155,10 @@ fn main() {
         socket_path.display()
     );
 
-    // Item #3 (ROADMAP.md): a real verification pass on startup and
-    // periodically, not just when something asks for one. Runs in its own
-    // thread since it shares the same `store` lock as request handling —
-    // see `run_periodic_verification`'s doc comment. Started only when
+    // A real verification pass on startup and periodically, not just when
+    // something asks for one. Runs in its own thread since it shares the
+    // same `store` lock as request handling — see
+    // `run_periodic_verification`'s doc comment. Started only when
     // something is actually configured to watch: with an empty
     // `DENDRITE_GUARD_WATCH_PATHS`, there's nothing to verify and no
     // baseline can meaningfully exist yet.
