@@ -2,6 +2,7 @@ use crate::{
     DaemonCore, DaemonError, TelemetryManager, VulnerabilityError, VulnerabilityService,
     http::handle_http_stream,
     live::LiveBroadcaster,
+    sysmem,
     telemetry::{CollectedObservation, TelemetryScope},
 };
 use dendrite_memory::storage::MemoryStore;
@@ -1151,6 +1152,11 @@ fn spawn_routine_worker(
                             if let Err(error) = core.expire_memory(unix_now()) {
                                 eprintln!("memory lifecycle sweep failed: {error:?}");
                             }
+                            // Give back whatever heap the expiry above (and any
+                            // ingestion since the last sweep) freed but glibc is
+                            // still holding onto — see sysmem::trim_heap's doc
+                            // comment for why this doesn't happen on its own.
+                            sysmem::trim_heap();
                             last_lifecycle_sweep = Instant::now();
                         }
                         continue;
@@ -1242,6 +1248,7 @@ fn spawn_routine_worker(
                     if let Err(error) = core.expire_memory(unix_now()) {
                         eprintln!("memory lifecycle sweep failed: {error:?}");
                     }
+                    sysmem::trim_heap();
                     last_lifecycle_sweep = Instant::now();
                 }
 

@@ -12,6 +12,7 @@ mod knowledge;
 mod live;
 mod runtime;
 mod self_store;
+mod sysmem;
 mod telemetry;
 mod vulnerability;
 

@@ -216,6 +216,12 @@ export function WebGLMemoryGraph({
     [graph.nodes, visibleKinds],
   )
 
+  // Distinct from searchMatches.size > 0: a non-empty query with zero matches
+  // must still be treated as "searching" (hide everything) rather than as
+  // "not searching" (show everything) — searchMatches alone can't tell those
+  // two states apart, since both produce an empty set.
+  const searchActive = useMemo(() => search.trim().length > 0, [search])
+
   const searchMatches = useMemo(() => {
     const query = search.trim().toLowerCase()
     if (!query) return new Set<string>()
@@ -481,7 +487,11 @@ export function WebGLMemoryGraph({
       trackSelectedNode()
       const rect = canvas.getBoundingClientRect()
       const dpr = canvas.width / Math.max(rect.width, 1)
-      const nodes = nodesRef.current.filter(node => visibleNodeIds.has(node.id))
+      // A search query that matches nothing hides the whole graph rather than
+      // falling back to "no search" and showing everything — see searchActive.
+      const nodes = searchActive && searchMatches.size === 0
+        ? []
+        : nodesRef.current.filter(node => visibleNodeIds.has(node.id))
       const index = new Map(nodes.map(node => [node.id, node]))
       const activeId = hoveredId ?? selectedId
       const hasSearch = searchMatches.size > 0
@@ -592,7 +602,7 @@ export function WebGLMemoryGraph({
       gl.deleteProgram(pointProgram); gl.deleteProgram(lineProgram)
       gl.deleteBuffer(pointPosition); gl.deleteBuffer(pointColour); gl.deleteBuffer(pointSize); gl.deleteBuffer(linePosition); gl.deleteBuffer(lineColour)
     }
-  }, [mode, visibleNodeIds, searchMatches, selectedId, hoveredId, settings, autoOrbit, viewRevision])
+  }, [mode, visibleNodeIds, searchActive, searchMatches, selectedId, hoveredId, settings, autoOrbit, viewRevision])
 
   function projectForHit(node: SimNode) {
     const canvas = canvasRef.current
@@ -618,6 +628,7 @@ export function WebGLMemoryGraph({
     let best: SimNode | null = null
     let bestDistance = Infinity
     let bestDepth = -Infinity
+    if (searchActive && searchMatches.size === 0) return null
     for (const node of nodesRef.current) {
       if (!visibleNodeIds.has(node.id)) continue
       const p = projectForHit(node)
