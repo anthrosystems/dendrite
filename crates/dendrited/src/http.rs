@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tungstenite::handshake::derive_accept_key;
@@ -27,6 +28,74 @@ const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// binding a separate `DENDRITE_WS_ADDR` port, so distribution packaging
 /// only needs to expose one address for both.
 const WEBSOCKET_PATH: &str = "/ws";
+
+/// Seconds of idleness before the kernel sends the first TCP keepalive
+/// probe on an accepted connection, how many seconds apart follow-up
+/// probes are sent, and how many unanswered probes mark the peer dead.
+/// 30s + 3*10s = a ~60s worst-case detection window for a peer that
+/// vanished without a clean FIN — a laptop that slept, roamed to a new
+/// Wi-Fi network, or lost its NAT mapping mid-connection, all of which a
+/// browser's long-lived `/ws` connection (see `live.rs`) hits routinely.
+const TCP_KEEPALIVE_IDLE_SECONDS: libc::c_int = 30;
+const TCP_KEEPALIVE_INTERVAL_SECONDS: libc::c_int = 10;
+const TCP_KEEPALIVE_PROBE_COUNT: libc::c_int = 3;
+
+/// Enables TCP keepalive on an accepted connection so a peer that vanishes
+/// without closing cleanly is detected and reaped within a bounded time,
+/// instead of leaving its socket (and, for a WebSocket upgrade, its
+/// dedicated `LiveBroadcaster` client thread — see `live.rs`) held open
+/// indefinitely. Without this, `LiveBroadcaster` only notices a dead
+/// subscriber when a *write* to it fails, and without a keepalive probe a
+/// write to a silently-vanished peer can block on kernel-level TCP
+/// retransmission for many minutes (default `tcp_retries2` settings) before
+/// ever failing — long enough for repeated sleep/wake or Wi-Fi-roam cycles
+/// on a client machine to exhaust the daemon's open-file limit over a few
+/// hours of normal use. Best-effort: a `setsockopt` failure here is not
+/// fatal to serving the connection, just less resilient, so it's logged and
+/// otherwise ignored rather than turned into a request error.
+pub fn enable_tcp_keepalive(stream: &TcpStream) {
+    let fd = stream.as_raw_fd();
+    let enable: libc::c_int = 1;
+    let idle = TCP_KEEPALIVE_IDLE_SECONDS;
+    let interval = TCP_KEEPALIVE_INTERVAL_SECONDS;
+    let count = TCP_KEEPALIVE_PROBE_COUNT;
+    unsafe {
+        let mut ok = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_KEEPALIVE,
+            (&raw const enable).cast(),
+            size_of_val(&enable) as libc::socklen_t,
+        ) == 0;
+        ok &= libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPIDLE,
+            (&raw const idle).cast(),
+            size_of_val(&idle) as libc::socklen_t,
+        ) == 0;
+        ok &= libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPINTVL,
+            (&raw const interval).cast(),
+            size_of_val(&interval) as libc::socklen_t,
+        ) == 0;
+        ok &= libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_KEEPCNT,
+            (&raw const count).cast(),
+            size_of_val(&count) as libc::socklen_t,
+        ) == 0;
+        if !ok {
+            eprintln!(
+                "warning: failed to enable TCP keepalive on an accepted connection: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+}
 
 pub fn handle_http_stream(
     core: &mut DaemonCore,
@@ -359,6 +428,49 @@ fn route(
         ("GET", "/api/v1/guard/findings") => Ok(HttpBody::Json(serde_json::to_string(
             &core.guard_findings()?,
         )?)),
+        ("GET", "/api/v1/culture/campaigns") => Ok(HttpBody::Json(serde_json::to_string(
+            &core.culture_list_campaigns()?,
+        )?)),
+        ("POST", "/api/v1/culture/campaigns") => {
+            #[derive(serde::Deserialize, Default)]
+            struct CreateCampaignRequest {
+                label: Option<String>,
+            }
+            let request: CreateCampaignRequest = if body.is_empty() {
+                CreateCampaignRequest::default()
+            } else {
+                serde_json::from_slice(body).map_err(|error| {
+                    HttpRouteError::BadRequest(format!("invalid culture campaign request: {error}"))
+                })?
+            };
+            let campaign = core.culture_create_campaign(request.label.as_deref(), unix_now())?;
+            Ok(HttpBody::Created(serde_json::to_string(&campaign)?))
+        }
+        // POST, not DELETE, matching the vulnerabilities `/delete` routes below:
+        // this server has no CORS preflight/OPTIONS handling, so a non-"simple"
+        // method like DELETE would be blocked by a real cross-origin browser
+        // before it ever reached this route.
+        ("POST", _)
+            if path.starts_with("/api/v1/culture/campaigns/") && path.ends_with("/discard") =>
+        {
+            let encoded = path
+                .trim_start_matches("/api/v1/culture/campaigns/")
+                .trim_end_matches("/discard")
+                .trim_end_matches('/');
+            let id = percent_decode(encoded)?;
+            if core.culture_discard_campaign(&id)? {
+                Ok(HttpBody::Json(
+                    serde_json::json!({"discarded": true, "campaign_id": id}).to_string(),
+                ))
+            } else {
+                Err(HttpRouteError::NotFound(format!(
+                    "culture campaign {id} was not found"
+                )))
+            }
+        }
+        ("GET", "/api/v1/herd/status") => {
+            Ok(HttpBody::Json(serde_json::to_string(&core.herd_status()?)?))
+        }
         ("GET", "/api/v1/telemetry/status") => Ok(HttpBody::Json(serde_json::to_string(
             &core.telemetry_status(),
         )?)),
@@ -749,6 +861,7 @@ fn publish_http_mutation(live: &LiveBroadcaster, method: &str, target: &str, bod
     let kind = if path.starts_with("/api/v1/actions")
         || path.starts_with("/api/v1/vulnerabilities")
         || path.starts_with("/api/v1/analysis")
+        || path.starts_with("/api/v1/culture")
     {
         Some("control")
     } else {

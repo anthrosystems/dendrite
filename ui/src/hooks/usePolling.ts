@@ -16,7 +16,7 @@ function liveRefreshDelay(cacheKey: string, event: LiveEvent): number | null {
   }
 
   if (event.kind === 'control') {
-    if (cacheKey === 'actions' || cacheKey === 'incidents' || cacheKey === 'guard' || cacheKey === 'guard-findings' || cacheKey === 'status' || cacheKey === 'health') return 100
+    if (cacheKey === 'actions' || cacheKey === 'incidents' || cacheKey === 'guard' || cacheKey === 'guard-findings' || cacheKey === 'status' || cacheKey === 'health' || cacheKey === 'culture-campaigns') return 100
     return null
   }
 

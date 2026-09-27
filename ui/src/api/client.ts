@@ -28,7 +28,9 @@ import type {
   AttackChainRecord,
   BehaviourDefinition,
   CreateAntiserumRequest,
+  CultureCampaign,
   CveKnowledgeRecord,
+  HerdPeerStatus,
   VulnerabilityCandidate,
   VulnerabilityCandidateRequest,
 } from './types'
@@ -170,4 +172,12 @@ export const api = {
     del<{ unloaded: boolean; review_id: string }>(`/analysis/reviews/${encodeURIComponent(reviewId)}`),
   antiserumDownloadUrl: (id: string) =>
     withToken(`${apiBase()}/analysis/packages/${encodeURIComponent(id)}/download`),
+  cultureCampaigns: () => get<CultureCampaign[]>('/culture/campaigns'),
+  createCultureCampaign: (label?: string) =>
+    post<CultureCampaign>('/culture/campaigns', label ? { label } : undefined),
+  discardCultureCampaign: (campaignId: string) =>
+    post<{ discarded: boolean; campaign_id: string }>(
+      `/culture/campaigns/${encodeURIComponent(campaignId)}/discard`,
+    ),
+  herdStatus: () => get<HerdPeerStatus[]>('/herd/status'),
 }

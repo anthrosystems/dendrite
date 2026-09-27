@@ -23,6 +23,8 @@ export const Icons = {
   magi: (props: Props) => <Icon {...props}><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M11 7 6 16"/><path d="m13 7 5 9"/><path d="M7 18h10"/></Icon>,
   self: (props: Props) => <Icon {...props}><path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6l-7-3Z"/><path d="m9.5 12 1.6 1.6 3.5-4"/></Icon>,
   health: (props: Props) => <Icon {...props}><path d="M3 12h4l2-4 3 8 3-6 2 2h4"/></Icon>,
+  culture: (props: Props) => <Icon {...props}><path d="M9 3h6"/><path d="M10 3v6.5L4.8 18a2 2 0 0 0 1.7 3h11a2 2 0 0 0 1.7-3L14 9.5V3"/><path d="M7.5 15h9"/></Icon>,
+  herd: (props: Props) => <Icon {...props}><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8 7.5 16 16.5"/><path d="M16 7.5 8 16.5"/></Icon>,
   chevron: (props: Props) => <Icon {...props}><path d="m9 18 6-6-6-6"/></Icon>,
   refresh: (props: Props) => <Icon {...props}><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.5-2.6L20 8"/><path d="M17.9 15a7 7 0 0 1-11.5 2.6L4 16"/></Icon>,
   search: (props: Props) => <Icon {...props}><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></Icon>,

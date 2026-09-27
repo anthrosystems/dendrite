@@ -1,16 +1,33 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
-import type { ActionDetail, ActionSummary, Evaluation, TelemetryEvent, TelemetrySource } from '../api/types'
+import type { ActionDetail, ActionSummary, Evaluation, TelemetrySource } from '../api/types'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
 import { subscribeLive, type LiveEvent } from '../hooks/live'
 import { usePolling } from '../hooks/usePolling'
 
 const MAGI = [
-  { key: 'host', name: 'BALTHASAR-2', role: 'HOST' },
-  { key: 'user', name: 'CASPER-3', role: 'USER' },
-  { key: 'environment', name: 'MELCHIOR-1', role: 'ENVIRONMENT' },
+  { key: 'host', name: 'BALTHASAR-2', role: 'Host evaluator' },
+  { key: 'user', name: 'CASPER-3', role: 'User evaluator' },
+  { key: 'environment', name: 'MELCHIOR-1', role: 'Environment evaluator' },
 ] as const
+
+const telemetrySourceOrder: Record<string, number> = {
+  ebpf: 0,
+  fanotify: 1,
+  proc_polling: 2,
+  filesystem_polling: 3,
+}
+
+function telemetrySourceLabel(source: string) {
+  switch (source) {
+    case 'ebpf': return 'EBPF'
+    case 'fanotify': return 'Fanotify'
+    case 'proc_polling': return 'Proc polling'
+    case 'filesystem_polling': return 'Filesystem polling'
+    default: return source.replaceAll('_', ' ')
+  }
+}
 
 function latestAction(rows: ActionSummary[] | null | undefined) {
   return [...(rows ?? [])].sort((a, b) => (b.updated_at - a.updated_at) || b.id.localeCompare(a.id))[0] ?? null
@@ -21,22 +38,11 @@ function sourceStatus(sources: TelemetrySource[] | undefined, source: string) {
 }
 
 function verdictFor(evaluations: Evaluation[], key: string) {
-  return evaluations.find(item => item.evaluator === key)?.verdict?.toUpperCase() ?? 'IDLE'
+  return evaluations.find(item => item.evaluator === key)?.verdict ?? 'idle'
 }
 
 function gateValue(value: string | null | undefined) {
-  return (value ?? 'PENDING').replaceAll('_', ' ').toUpperCase()
-}
-
-function gateTone(value: string | null | undefined) {
-  const normalised = (value ?? '').toLowerCase()
-  if (['approved', 'allow', 'available', 'trusted', 'completed', 'verified'].includes(normalised)) return 'good'
-  if (['deny', 'denied', 'removed', 'blocked', 'failed', 'compromised', 'quarantined', 'not_authorised'].includes(normalised)) return 'bad'
-  return 'warn'
-}
-
-function isRecent(event: TelemetryEvent, seconds = 7) {
-  return Date.now() / 1000 - event.observed_at <= seconds
+  return value ?? 'pending'
 }
 
 function isActionDetail(value: unknown): value is ActionDetail {
@@ -44,24 +50,13 @@ function isActionDetail(value: unknown): value is ActionDetail {
   return 'proposal' in value && 'evaluations' in value && 'transactions' in value
 }
 
-function Rail({ active, label, direction = 'down' }: { active: boolean; label: string; direction?: 'down' | 'right' }) {
-  return (
-    <div className={`sys-rail sys-rail--${direction} ${active ? 'is-active' : ''}`} aria-label={label}>
-      <span className="sys-rail-line" />
-      {active && <i className="sys-rail-pulse" />}
-    </div>
-  )
-}
-
 export function SystemMap() {
   const status = usePolling(useCallback(() => api.status(), []), 5000, 'status')
   const guard = usePolling(useCallback(() => api.guard(), []), 5000, 'guard')
   const telemetry = usePolling(useCallback(() => api.telemetryStatus(), []), 5000, 'telemetry-status')
-  const recentTelemetry = usePolling(useCallback(() => api.telemetryRecent(160), []), 5000, 'telemetry-recent-160')
   const actions = usePolling(useCallback(() => api.actions(), []), 5000, 'actions')
   const incidents = usePolling(useCallback(() => api.incidents(), []), 5000, 'incidents')
   const [detail, setDetail] = useState<ActionDetail | null>(null)
-  const [decisionPulse, setDecisionPulse] = useState(0)
   const latest = useMemo(() => latestAction(actions.data), [actions.data])
 
   const loadLatest = useCallback(async () => {
@@ -85,10 +80,6 @@ export function SystemMap() {
   }, [latest?.id, latest?.updated_at])
 
   useEffect(() => subscribeLive((event: LiveEvent) => {
-    if (event.kind === 'telemetry') {
-      void recentTelemetry.refresh()
-      return
-    }
     if (event.kind === 'incidents') {
       void incidents.refresh()
       return
@@ -96,31 +87,25 @@ export function SystemMap() {
     if (event.kind === 'control') {
       if (isActionDetail(event.payload)) setDetail(event.payload)
       else void loadLatest()
-      setDecisionPulse(value => value + 1)
       void actions.refresh()
       void guard.refresh()
     }
-  }), [actions.refresh, guard.refresh, incidents.refresh, recentTelemetry.refresh, loadLatest])
+  }), [actions.refresh, guard.refresh, incidents.refresh, loadLatest])
 
   const evaluations = detail?.evaluations ?? []
-  const recentHostTelemetry = (recentTelemetry.data ?? []).filter(event => event.scope !== 'dendrite_control_plane' && isRecent(event))
-  const telemetryActive = recentHostTelemetry.length > 0
-  const incidentActive = recentHostTelemetry.some(event => event.incident_ids.length > 0)
-  const decisionActive = Boolean(detail && (detail.proposal.status === 'proposed' || Date.now() / 1000 - detail.proposal.updated_at < 20))
-  const hasEvaluations = evaluations.length > 0
   const guardLocked = guard.data?.authority === 'removed'
 
   const refresh = () => {
-    void status.refresh(); void guard.refresh(); void telemetry.refresh(); void recentTelemetry.refresh()
+    void status.refresh(); void guard.refresh(); void telemetry.refresh()
     void actions.refresh(); void incidents.refresh(); void loadLatest()
   }
 
   return (
-    <section className="page-stack system-map-page">
+    <section className="page-stack">
       <PageHeader
-        eyebrow="System topology // live state"
+        eyebrow="System topology"
         title="System Map"
-        description="Live operational map of Dendrite. Static channels show architecture; animated signals represent recorded telemetry, incident, MAGI, policy, Guard and action state."
+        description="How telemetry, MAGI evaluation, policy and Guard connect for the most recent action decision on this host."
         onRefresh={refresh}
       />
 
@@ -128,111 +113,130 @@ export function SystemMap() {
         <div className="error-banner">{status.error ?? guard.error ?? telemetry.error ?? actions.error}</div>
       )}
 
-      <div className={`system-map-v2 ${guardLocked ? 'is-critical' : ''}`}>
-        <header className="system-map-v2-hud">
-          <div><span>DENDRITE / SYSTEM MAP / LIVE</span><strong>{guardLocked ? 'AUTHORITY RESTRICTED' : 'SYSTEM NOMINAL'}</strong></div>
-          <div className="system-map-v2-metrics">
-            <span>OBSERVATIONS <b>{status.data?.observations_ingested ?? '—'}</b></span>
-            <span>INCIDENTS <b>{status.data?.incidents_open ?? '—'}</b></span>
-            <span>MEMORY <b>{status.data?.memory_nodes_known ?? '—'}</b></span>
-            <span>AUTHORITY <b>{(guard.data?.authority ?? 'unknown').toUpperCase()}</b></span>
-          </div>
-        </header>
+      <div className="overview-metrics">
+        <article>
+          <span>Observations</span>
+          <strong>{status.data?.observations_ingested ?? '—'}</strong>
+          <small>this daemon session</small>
+        </article>
+        <article>
+          <span>Open incidents</span>
+          <strong>{status.data?.incidents_open ?? '—'}</strong>
+          <small>correlated detections</small>
+        </article>
+        <article>
+          <span>Memory nodes</span>
+          <strong>{status.data?.memory_nodes_known ?? '—'}</strong>
+          <small><a href="#/memory">known graph entities</a></small>
+        </article>
+        <article>
+          <span>Authority</span>
+          <strong><StatusPill value={guard.data?.authority ?? 'unknown'} /></strong>
+          <small>Guard boundary</small>
+        </article>
+      </div>
 
-        <section className="system-zone system-zone--sensing">
-          <div className="system-zone-heading"><span>01</span><div><strong>SENSING / KNOWLEDGE</strong><small>HOST OBSERVATION AND CORRELATION</small></div></div>
-          <div className="system-zone-row system-zone-row--three">
-            <article className={`instrument-node ${telemetryActive ? 'is-active' : ''}`}>
-              <span className="instrument-code">SENSOR ARRAY</span><h2>TELEMETRY</h2>
-              <div className="instrument-status-grid">
-                {['ebpf', 'fanotify', 'proc_polling', 'filesystem_polling'].map(source => (
-                  <div key={source}><span>{source.replaceAll('_', ' ').toUpperCase()}</span><StatusPill value={sourceStatus(telemetry.data?.sources, source)} /></div>
-                ))}
-              </div>
-            </article>
-
-            <article className={`instrument-node instrument-node--core ${telemetryActive ? 'is-active' : ''}`}>
-              <span className="instrument-code">RUNTIME CORE</span><h2>DENDRITE CORE</h2>
-              <div className="core-reactor-v2"><i /><i /><i /></div>
-              <strong>dendrited {status.data?.version ?? '—'}</strong>
-            </article>
-
-            <div className="instrument-stack">
-              <a className="instrument-node instrument-node--compact" href="#/memory">
-                <span className="instrument-code">KNOWLEDGE PLANE</span><h2>MEMORY GRAPH</h2>
-                <strong>{status.data?.memory_nodes_known?.toLocaleString() ?? '—'} NODES</strong>
-              </a>
-              <a className={`instrument-node instrument-node--compact ${incidentActive ? 'is-active' : ''}`} href="#/incidents">
-                <span className="instrument-code">CORRELATION ENGINE</span><h2>INCIDENT ENGINE</h2>
-                <strong>{incidents.data?.length ?? status.data?.incidents_open ?? '—'} OPEN</strong>
-              </a>
+      <div className="dashboard-grid">
+        <article className="surface">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">01 · Sensing &amp; knowledge</span>
+              <h2>Telemetry &amp; correlation</h2>
             </div>
           </div>
-          <div className="system-flow-row"><Rail active={telemetryActive} label="Recorded telemetry entering Dendrite Core" direction="right" /><Rail active={incidentActive} label="Recorded correlation entering decision plane" direction="right" /></div>
-        </section>
+          <div className="source-list">
+            {['ebpf', 'fanotify', 'proc_polling', 'filesystem_polling']
+              .sort((left, right) => (telemetrySourceOrder[left] ?? 99) - (telemetrySourceOrder[right] ?? 99))
+              .map(source => (
+                <div key={source}>
+                  <span>{telemetrySourceLabel(source)}</span>
+                  <StatusPill value={sourceStatus(telemetry.data?.sources, source)} />
+                </div>
+              ))}
+          </div>
+          <div className="compact-list">
+            <a href="#/memory" className="compact-row">
+              <StatusPill value="graph" />
+              <div><strong>Memory Graph</strong><small>Tiered short/long-term correlation store</small></div>
+              <strong>{status.data?.memory_nodes_known?.toLocaleString() ?? '—'}</strong>
+            </a>
+            <a href="#/incidents" className="compact-row">
+              <StatusPill value="engine" />
+              <div><strong>Incident engine</strong><small>Correlated threat evidence</small></div>
+              <strong>{incidents.data?.length ?? status.data?.incidents_open ?? '—'}</strong>
+            </a>
+          </div>
+        </article>
 
-        <section className="system-zone system-zone--decision" key={decisionPulse}>
-          <div className="system-zone-heading"><span>02</span><div><strong>DECISION PLANE / MAGI</strong><small>{detail?.proposal.id ?? 'NO ACTIVE PROPOSAL'}</small></div></div>
-          <div className={`magi-console ${decisionActive ? 'is-evaluating' : ''}`}>
-            <div className="magi-geometry" aria-hidden="true"><i /><i /><i /></div>
-            {MAGI.map((unit, index) => {
-              const evaluation = evaluations.find(item => item.evaluator === unit.key)
-              const verdict = verdictFor(evaluations, unit.key)
+        <article className="surface">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">02 · Decision plane</span>
+              <h2>MAGI quorum</h2>
+            </div>
+            <span>{detail?.proposal.id ?? 'No active proposal'}</span>
+          </div>
+          <div className="source-list">
+            {MAGI.map(unit => (
+              <div key={unit.key}>
+                <span>{unit.name} <small>{unit.role}</small></span>
+                <StatusPill value={verdictFor(evaluations, unit.key)} />
+              </div>
+            ))}
+          </div>
+          <div className="source-list">
+            <div><span>Quorum</span><StatusPill value={gateValue(detail?.proposal.quorum)} /></div>
+            <div><span>Policy</span><StatusPill value={gateValue(detail?.proposal.policy)} /></div>
+          </div>
+        </article>
+
+        <article className={`surface ${guardLocked ? 'trust-hero--restricted' : ''}`}>
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">03 · Authority &amp; response</span>
+              <h2>Guard boundary</h2>
+            </div>
+          </div>
+          <div className="source-list">
+            <div><span>Guard</span><StatusPill value={gateValue(detail?.proposal.guard ?? guard.data?.authority)} /></div>
+            <div><span>Host trust</span><StatusPill value={guard.data?.trust_state ?? 'unknown'} /></div>
+          </div>
+          <a href="#/magi" className="compact-row">
+            <StatusPill value="action" />
+            <div><strong>Action coordinator</strong><small>Response controller</small></div>
+            <StatusPill value={detail ? gateValue(detail.proposal.status) : 'idle'} />
+          </a>
+          <div className="transaction-track">
+            {['proposal', 'prepare', 'revalidate', 'commit', 'verify'].map(state => {
+              const complete = state === 'proposal' ? Boolean(detail) : detail?.transactions.some(event => event.state === state)
               return (
-                <article className={`magi-console-unit magi-console-unit--${unit.key} verdict-${verdict.toLowerCase()}`} style={{ '--magi-delay': `${index * 180}ms` } as CSSProperties} key={unit.key}>
-                  <div className="magi-console-verdict">{verdict}</div>
-                  <div className="magi-console-glyph"><i /></div>
-                  <h3>{unit.name}</h3>
-                  <small>{unit.role} EVALUATOR</small>
-                  <p>{evaluation?.reason ?? 'Awaiting evaluation state.'}</p>
-                </article>
+                <div className="transaction-step" key={state}>
+                  <span className={`transaction-dot ${complete ? 'transaction-dot--completed' : ''}`} />
+                  <div><strong>{state.replaceAll('_', ' ')}</strong></div>
+                </div>
               )
             })}
-            <div className="magi-console-centre"><span>MAGI</span><b>{hasEvaluations ? 'DELIBERATION RECORDED' : decisionActive ? 'EVALUATING' : 'STANDBY'}</b></div>
           </div>
+        </article>
 
-          <Rail active={hasEvaluations} label="MAGI verdicts entering quorum" />
-          <div className="decision-gates">
-            <article className={`decision-gate tone-${gateTone(detail?.proposal.quorum)}`}><span>QUORUM</span><strong>{gateValue(detail?.proposal.quorum)}</strong></article>
-            <Rail active={Boolean(detail?.proposal.quorum)} label="Quorum entering policy" direction="right" />
-            <article className={`decision-gate tone-${gateTone(detail?.proposal.policy)}`}><span>POLICY</span><strong>{gateValue(detail?.proposal.policy)}</strong></article>
-          </div>
-        </section>
-
-        <section className="system-zone system-zone--authority">
-          <div className="system-zone-heading"><span>03</span><div><strong>AUTHORITY / RESPONSE</strong><small>PRIVILEGED ACTION BOUNDARY</small></div></div>
-          <Rail active={Boolean(detail?.proposal.policy)} label="Policy entering Guard" />
-          <article className={`guard-boundary-v2 tone-${gateTone(detail?.proposal.guard ?? guard.data?.authority)}`}>
-            <div><span>GUARD / AUTHORITY BOUNDARY</span><strong>{gateValue(detail?.proposal.guard ?? guard.data?.authority)}</strong></div>
-            <div><span>HOST TRUST</span><strong>{(guard.data?.trust_state ?? 'UNKNOWN').toUpperCase()}</strong></div>
-          </article>
-          <Rail active={detail?.proposal.guard === 'allow'} label="Guard authorised action coordinator" />
-          <a className="action-coordinator-v2" href="#/magi">
-            <span className="instrument-code">RESPONSE CONTROLLER</span>
-            <h2>ACTION COORDINATOR</h2>
-            <strong>{detail ? gateValue(detail.proposal.status) : 'IDLE'}</strong>
-            <div className="transaction-track-v2">
-              {['proposal', 'prepare', 'revalidate', 'commit', 'verify'].map(state => {
-                const complete = state === 'proposal' ? Boolean(detail) : detail?.transactions.some(event => event.state === state)
-                return <span className={complete ? 'is-complete' : ''} key={state}><i />{state.toUpperCase()}</span>
-              })}
+        <article className="surface">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Batch 9</span>
+              <h2>Not shown above</h2>
             </div>
-          </a>
-        </section>
-
-        <section className="system-secondary-strip">
-          <article><span>ADAPTIVE / SELF</span><strong>NOT EXPOSED</strong><small>Batch 7 maturity API required</small></article>
-          <article><span>THREAT KNOWLEDGE</span><strong>PARTIAL</strong><small>Batch 6+ knowledge plane</small></article>
-          <article><span>LIVE SIGNAL</span><strong>{telemetryActive ? 'ACTIVE' : 'QUIET'}</strong><small>Animations represent recorded events only</small></article>
-        </section>
-
-        <footer className="system-map-v2-footer">
-          <span><i className="legend-dot legend-dot--pulse" /> moving signal = recorded activity</span>
-          <span><i className="legend-dot legend-dot--idle" /> static channel = architecture</span>
-          <span><i className="legend-dot legend-dot--good" /> cyan = approved / available</span>
-          <span><i className="legend-dot legend-dot--warn" /> amber = pending / evaluating</span>
-          <span><i className="legend-dot legend-dot--bad" /> red = denied / authority removed</span>
-        </footer>
+          </div>
+          <div className="compact-list">
+            <a href="#/culture" className="compact-row">
+              <StatusPill value="prepared" />
+              <div><strong>Culture</strong><small>Isolated analysis workspaces — scaffold only, no execution yet</small></div>
+            </a>
+            <a href="#/herd" className="compact-row">
+              <StatusPill value="unknown" />
+              <div><strong>Herd</strong><small>Per-host push status — no cross-host fleet view yet</small></div>
+            </a>
+          </div>
+        </article>
       </div>
     </section>
   )

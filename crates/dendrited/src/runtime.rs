@@ -1,7 +1,7 @@
 use crate::{
     CultureSources, DaemonCore, DaemonError, TelemetryManager, VulnerabilityError,
     VulnerabilityService,
-    http::handle_http_stream,
+    http::{enable_tcp_keepalive, handle_http_stream},
     live::LiveBroadcaster,
     sysmem,
     telemetry::{CollectedObservation, TelemetryScope},
@@ -597,6 +597,7 @@ impl DaemonRuntime {
             for _ in 0..MAX_CONTROL_CLIENTS_PER_TICK {
                 match self.http_listener.accept() {
                     Ok((stream, _)) => {
+                        enable_tcp_keepalive(&stream);
                         if let Err(error) = handle_http_stream(
                             &mut self.core,
                             &mut self.vulnerability,

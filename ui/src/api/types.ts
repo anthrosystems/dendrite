@@ -462,3 +462,22 @@ export interface CreateAntiserumRequest {
   indicator_urls?: RecordExportOptions
   behaviours?: RecordExportOptions
 }
+
+export interface CultureCampaign {
+  campaign_id: string
+  label: string | null
+  state: string
+  created_at: number
+  workspace: string
+  run_count: number
+  notes: string[]
+}
+
+export interface HerdPeerStatus {
+  label: string
+  base_url: string
+  last_attempt_at: number | null
+  last_success_at: number | null
+  last_error: string | null
+  packages_pushed: number
+}

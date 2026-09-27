@@ -14,6 +14,8 @@ import { Actions } from '../pages/Actions'
 import { HealthPage } from '../pages/Health'
 import { Vulnerabilities } from '../pages/Vulnerabilities'
 import { SystemMap } from '../pages/SystemMap'
+import { Culture } from '../pages/Culture'
+import { Herd } from '../pages/Herd'
 
 type Page =
   | 'dashboard'
@@ -22,7 +24,9 @@ type Page =
   | 'vulnerabilities'
   | 'memory'
   | 'analysis'
+  | 'culture'
   | 'system-map'
+  | 'herd'
   | 'magi'
   | 'health'
 
@@ -47,12 +51,14 @@ const groups: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { id: 'memory', label: 'Memory Graph', icon: 'memory' },
       { id: 'analysis', label: 'Analysis', icon: 'chain' },
+      { id: 'culture', label: 'Culture', icon: 'culture' },
     ],
   },
   {
     label: 'System',
     items: [
       { id: 'system-map', label: 'System Map', icon: 'topology' },
+      { id: 'herd', label: 'Herd', icon: 'herd' },
       { id: 'magi', label: 'MAGI & Response', icon: 'magi' },
       { id: 'health', label: 'System Health', icon: 'health' },
     ],
@@ -156,7 +162,9 @@ export function App() {
           {page === 'vulnerabilities' && <Vulnerabilities />}
           {page === 'memory' && <Memory />}
           {page === 'analysis' && <Analysis />}
+          {page === 'culture' && <Culture />}
           {page === 'system-map' && <SystemMap />}
+          {page === 'herd' && <Herd />}
           {page === 'magi' && <Actions />}
           {page === 'health' && <HealthPage />}
         </main>

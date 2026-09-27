@@ -107,6 +107,8 @@ This is a workspace-management skeleton only: there is no sandboxed execution he
 | `dendrite culture create [LABEL]` | Snapshot the active databases into a new campaign |
 | `dendrite culture discard <CAMPAIGN_ID>` | Delete a campaign workspace and its snapshots |
 
+The same three operations are also reachable over HTTP (`GET`/`POST /api/v1/culture/campaigns`, `POST /api/v1/culture/campaigns/<ID>/discard` — `POST`, not `DELETE`, matching this server's other mutation routes, since it has no CORS preflight handling for non-"simple" methods) and from the UI's Culture page (nav: Knowledge → Culture).
+
 ## Herd
 
 Herd (`crates/dendrited/src/herd.rs`, `dendrite herd status`) automates Antiserum exchange between operator-named peer hosts on a timer (`DENDRITE_HERD_PUSH_INTERVAL_SECONDS`, default `120`), rather than requiring a manual export/copy/import for every exchange. There is no leader and no election: every peer relationship is configured explicitly and symmetrically (a full mesh, if every host lists every other host as a peer — the same way a Proxmox cluster's config is fully replicated to every node rather than funnelled through one), and pushing reuses the exact same signed-envelope verify/dedup/store pipeline a manual `.danti` import already uses (`POST /api/v1/analysis/import` on the receiving peer).
@@ -125,7 +127,7 @@ Two things this deliberately does not do:
 
 `token` is the peer's own ordinary HTTP API bearer token (`dendrite http-token` run on that peer). Message authenticity/integrity comes from the Antiserum envelope's own Ed25519 signature, verified on the receiving end exactly as a manual import is — the transport itself carries no additional trust, so an operator who wants encryption in transit (e.g. across an untrusted network segment) should put a TLS-terminating reverse proxy in front of each peer's API, the same way they would for the UI.
 
-`dendrite herd status` reports, per configured peer: last push attempt/success time, the last error (if any), and how many packages have been successfully pushed — the same shape as `docker node ls`/`pvecm status`.
+`dendrite herd status` reports, per configured peer: last push attempt/success time, the last error (if any), and how many packages have been successfully pushed — the same shape as `docker node ls`/`pvecm status`. The same data is reachable over HTTP (`GET /api/v1/herd/status`) and from the UI's Herd page (nav: System → Herd) as a status table.
 
 ## Telemetry collectors
 

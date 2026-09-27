@@ -9661,3 +9661,29 @@ tbody tr:hover td {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Culture / Herd (Batch 9) */
+.culture-create-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.culture-create-form input {
+  flex: 1;
+  min-width: 220px;
+  height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.herd-peer-error {
+  display: block;
+  color: var(--red);
+  margin-top: 2px;
+}
