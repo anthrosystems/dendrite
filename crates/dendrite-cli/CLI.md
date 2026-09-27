@@ -10,7 +10,7 @@ Only `--help`/`-h` trigger help output — the bare word `help` is not a recogni
 
 - `dendrite-cli --help` (or `-h`, or no arguments at all) shows general help: the full command list below, plus a pointer to per-command help.
 - Multi-form commands — `incidents`, `memory`, `actions`, `guard`, `vulnerabilities`, `vulnerability`, `telemetry`, `debug` — each support their own `dendrite-cli <command> --help`, showing that command's full usage (including forms not obvious from the general list, like `incidents <ID>` or `memory nodes --kind <KIND>`). `--help`/`-h` is recognised anywhere in the arguments, not just immediately after the command.
-- Argument-less commands — `status`, `health`, `version` — have no dedicated help screen. A stray `--help`/`-h` passed to one of these is ignored and the command runs normally, rather than being rejected or explained.
+- Argument-less commands — `status`, `health`, `http-token`, `version` — have no dedicated help screen. A stray `--help`/`-h` passed to one of these is ignored and the command runs normally, rather than being rejected or explained.
 - Any unrecognised or malformed input under a known command family falls back to that family's own help (not the general list) where possible — e.g. `memory nodes --kind` (missing value) shows `memory --help`'s output.
 
 `dendrite-cli --help` is the executable source of truth if this document diverges from it.
@@ -20,6 +20,7 @@ Only `--help`/`-h` trigger help output — the bare word `help` is not a recogni
 ```text
 status
 health
+http-token
 version
 incidents
 incidents <id>
@@ -63,6 +64,7 @@ debug guard-finding <target> <severity> <description>
 - `vulnerability update` remains transactional and policy/Guard-gated.
 - `vulnerability import` validates behaviour conditions strictly and rejects the whole import on the first invalid one (see "CVE knowledge bundle format" below) rather than importing partial/best-effort data.
 - Debug commands are development-only surfaces and should not be treated as production operator APIs.
+- `http-token` prints the bearer token that gates `dendrited`'s HTTP API and `/ws` WebSocket upgrade (see `docs/CONFIGURATION.md`'s "HTTP API authentication" section). It's deliberately the only way to retrieve it — the HTTP API never serves it over itself. The local dev UI (`npm run dev`) never needs this pasted in by hand; it's only for the packaged UI's one-time token-entry prompt, or for a manual `curl`/script against the HTTP API.
 
 Analysis/Antiserum and Vulnerability Candidate management currently live in the HTTP/UI surface rather than the CLI. A later CLI update should add feature parity deliberately rather than exposing raw file/database primitives.
 

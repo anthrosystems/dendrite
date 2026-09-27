@@ -1,3 +1,5 @@
+import { withToken } from '../api/token'
+
 export type LiveEvent = {
   kind: string
   payload: unknown
@@ -10,9 +12,9 @@ let started = false
 
 function websocketUrl() {
   const configured = import.meta.env.VITE_DENDRITE_WS_URL as string | undefined
-  if (configured) return configured
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/ws`
+  const base = configured ?? `${protocol}//${window.location.host}/ws`
+  return withToken(base)
 }
 
 function connect() {

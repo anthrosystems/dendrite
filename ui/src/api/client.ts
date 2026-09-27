@@ -1,4 +1,5 @@
 import { emitLocalLive } from '../hooks/live'
+import { reportAuthResult, withToken } from './token'
 import type {
   ActionDetail,
   ActionSummary,
@@ -40,7 +41,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(withToken(`${API_BASE}${path}`), {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -48,6 +49,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   })
+  reportAuthResult(response.status)
 
   const text = await response.text()
   if (!response.ok) {
@@ -81,11 +83,12 @@ const del = async <T,>(path: string) => {
 }
 
 async function uploadAntiserum(file: File): Promise<AntiserumPackageSummary> {
-  const response = await fetch(`${API_BASE}/analysis/import`, {
+  const response = await fetch(withToken(`${API_BASE}/analysis/import`), {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/vnd.dendrite.antiserum' },
     body: file,
   })
+  reportAuthResult(response.status)
   const text = await response.text()
   if (!response.ok) {
     let message = text || `${response.status} ${response.statusText}`
@@ -156,5 +159,6 @@ export const api = {
     post<AnalysisReview>(`/analysis/reviews/${encodeURIComponent(reviewId)}/open`),
   unloadAnalysisReview: (reviewId: string) =>
     del<{ unloaded: boolean; review_id: string }>(`/analysis/reviews/${encodeURIComponent(reviewId)}`),
-  antiserumDownloadUrl: (id: string) => `${API_BASE}/analysis/packages/${encodeURIComponent(id)}/download`,
+  antiserumDownloadUrl: (id: string) =>
+    withToken(`${API_BASE}/analysis/packages/${encodeURIComponent(id)}/download`),
 }

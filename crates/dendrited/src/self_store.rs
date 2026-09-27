@@ -168,6 +168,12 @@ impl SelfStore {
                 issuer_instance_id TEXT NOT NULL,
                 accepted_at        INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS http_api_token (
+                singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+                token      TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -199,6 +205,41 @@ impl SelfStore {
             [],
             |row| row.get(0),
         )?)
+    }
+
+    /// Bearer token that gates `dendrited`'s HTTP API and `/ws` WebSocket
+    /// upgrade (see `crates/dendrited/src/http.rs`). Generated once and
+    /// stable across restarts — like the signing key, but deliberately not
+    /// rotated automatically, since there's no revocation/re-issue UI flow
+    /// yet and rotating it out from under an already-authenticated browser
+    /// tab (localStorage) or long-lived automation would be a worse default
+    /// than a stable value an operator can explicitly rotate later. Unlike
+    /// the signing key's private material, this is stored directly in
+    /// `self.sqlite3` (not a separate `0600` file) — it's a shared secret
+    /// with no asymmetric structure to protect, and this file already lives
+    /// under `/var/lib/dendrite`, which is not readable outside the
+    /// `dendrite` account.
+    pub fn ensure_http_api_token(&mut self) -> Result<String, SelfStoreError> {
+        if let Some(token) = self
+            .connection
+            .query_row(
+                "SELECT token FROM http_api_token WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(token);
+        }
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret)
+            .map_err(|error| SelfStoreError::Crypto(format!("OS RNG failed: {error}")))?;
+        let token = hex::encode(secret);
+        self.connection.execute(
+            "INSERT INTO http_api_token (singleton, token, created_at) VALUES (1, ?1, ?2)",
+            params![token, unix_now()],
+        )?;
+        Ok(token)
     }
 
     pub fn active_key(&self) -> Result<Option<InstanceKeyRecord>, SelfStoreError> {
@@ -843,6 +884,31 @@ mod tests {
         assert!(private_blob.unwrap().starts_with("ed25519:"));
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn http_api_token_is_generated_once_and_stable_across_reopen() {
+        let (path, key_dir) = test_paths("http-token");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+
+        let first = {
+            let mut store = SelfStore::open_with_key_dir(&path_text, key_dir.clone()).unwrap();
+            let first = store.ensure_http_api_token().unwrap();
+            let second = store.ensure_http_api_token().unwrap();
+            assert_eq!(first, second);
+            first
+        };
+        let reopened = {
+            let mut store = SelfStore::open_with_key_dir(&path_text, key_dir).unwrap();
+            store.ensure_http_api_token().unwrap()
+        };
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+        assert_eq!(first, reopened);
+        // 32 random bytes, hex-encoded.
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

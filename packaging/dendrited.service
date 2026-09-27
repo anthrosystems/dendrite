@@ -48,6 +48,7 @@ Environment=DENDRITE_CVE_SNAPSHOT=/etc/dendrite/cve-snapshot.json
 Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
 Environment=DENDRITE_MAGI_SOCKET=/run/dendrite/dendrite-magi.sock
 Environment=DENDRITE_GUARD_SOCKET=/run/dendrite/dendrite-guard.sock
+Environment=DENDRITE_HTTP_TOKEN_FILE=/run/dendrite/http.token
 Environment=DENDRITE_SOCKET_GROUP=dendrite
 Environment=DENDRITE_SOCKET_MODE=0660
 Environment=DENDRITE_HTTP_ADDR=127.0.0.1:8766

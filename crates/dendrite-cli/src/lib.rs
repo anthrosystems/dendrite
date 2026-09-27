@@ -60,6 +60,7 @@ pub enum Command {
     VulnerabilityIgnore(String),
     VulnerabilityDelete(String),
     Health,
+    HttpToken,
     Version,
     Help(HelpTopic),
 }
@@ -118,7 +119,10 @@ impl Command {
             if let Some(topic) = HelpTopic::for_family(family) {
                 return Self::Help(topic);
             }
-            if matches!(family, "status" | "health" | "version" | "--version" | "-V") {
+            if matches!(
+                family,
+                "status" | "health" | "http-token" | "version" | "--version" | "-V"
+            ) {
                 // These commands take no arguments beyond the command word
                 // itself and have no dedicated help surface; a stray
                 // --help/-h is ignored and the command runs as if it were
@@ -277,6 +281,7 @@ impl Command {
                 Self::EvaluateAction(id.clone())
             }
             [command] if command == "health" => Self::Health,
+            [command] if command == "http-token" => Self::HttpToken,
             [command] if command == "version" || command == "--version" || command == "-V" => {
                 Self::Version
             }
@@ -361,6 +366,7 @@ impl Command {
                 Some(IpcRequest::VulnerabilityDelete { id: id.clone() })
             }
             Self::Health => Some(IpcRequest::Health),
+            Self::HttpToken => Some(IpcRequest::HttpToken),
             Self::Version | Self::Help(_) => None,
         }
     }
@@ -712,6 +718,7 @@ fn render_response(response: &IpcResponse) -> String {
             "daemon: {}\nmemory: {}\nguard: {}",
             health.daemon, health.memory, health.guard
         ),
+        IpcResponse::HttpToken { token } => token.clone(),
         IpcResponse::VulnerabilityDeleted { deleted } => {
             if *deleted {
                 "vulnerability exposure deleted".to_string()
@@ -808,7 +815,7 @@ fn help(topic: HelpTopic) -> String {
 
 fn help_general() -> String {
     format!(
-        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  incidents                                   List incidents / show details (see: incidents --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  guard                                       Guard trust state and findings (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  health                                      Show subsystem health\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
+        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  incidents                                   List incidents / show details (see: incidents --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  guard                                       Guard trust state and findings (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  health                                      Show subsystem health\n  http-token                                   Print the HTTP API bearer token\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
         env!("CARGO_PKG_VERSION")
     )
 }

@@ -44,6 +44,7 @@ pub fn handle_http_stream(
     let mut connection_header = None;
     let mut upgrade_header = None;
     let mut sec_websocket_key = None;
+    let mut authorization = None;
 
     loop {
         let mut line = String::new();
@@ -63,6 +64,8 @@ pub fn handle_http_stream(
                 upgrade_header = Some(value.trim().to_owned());
             } else if name.eq_ignore_ascii_case("sec-websocket-key") {
                 sec_websocket_key = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.trim().to_owned());
             }
         }
     }
@@ -75,6 +78,28 @@ pub fn handle_http_stream(
             403,
             &ErrorBody::new("origin is not allowed"),
             None,
+        );
+    }
+
+    // Bearer-token auth. `ALLOWED_ORIGINS` above only restricts *browser*
+    // requests (it's a no-op for any client that omits `Origin`, which is
+    // every non-browser HTTP client), so this is the only check that
+    // actually gates the API. Ordinary requests carry the token in the
+    // `Authorization: Bearer <token>` header; the WebSocket handshake is
+    // issued by the browser itself and can't set custom headers on it, so
+    // it's also accepted via a `?token=` query parameter on the upgrade
+    // target.
+    let request_target = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    if !token_authorised(core, authorization.as_deref(), &request_target) {
+        return write_json(
+            &mut stream,
+            401,
+            &ErrorBody::new("missing or invalid bearer token"),
+            origin.as_deref(),
         );
     }
 
@@ -227,6 +252,31 @@ impl From<serde_json::Error> for HttpRouteError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
     }
+}
+
+/// Checks the request's bearer token against `core`'s HTTP API token
+/// (see [`DaemonCore::http_api_token`]). Accepts either an
+/// `Authorization: Bearer <token>` header or, since the WebSocket
+/// handshake can't carry custom headers from a browser, a `?token=`
+/// query parameter on `target`.
+fn token_authorised(core: &DaemonCore, authorization: Option<&str>, target: &str) -> bool {
+    let expected = core.http_api_token();
+    if let Some(header) = authorization
+        && let Some(token) = header.strip_prefix("Bearer ")
+        && token == expected
+    {
+        return true;
+    }
+    if let Some((_, query)) = target.split_once('?') {
+        for pair in query.split('&') {
+            if let Some(token) = pair.strip_prefix("token=")
+                && token == expected
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn route(
@@ -872,5 +922,32 @@ mod tests {
         let query = parse_query("source=process%3A1&target=threat%3Atest").unwrap();
         assert_eq!(query.get("source").unwrap(), "process:1");
         assert_eq!(query.get("target").unwrap(), "threat:test");
+    }
+
+    #[test]
+    fn token_authorised_accepts_header_or_query_and_rejects_everything_else() {
+        let core = DaemonCore::open(":memory:").unwrap();
+        let token = core.http_api_token().to_owned();
+
+        // Correct bearer header.
+        assert!(token_authorised(
+            &core,
+            Some(&format!("Bearer {token}")),
+            "/api/v1/status"
+        ));
+        // Correct `?token=` query param (the WebSocket-handshake path).
+        assert!(token_authorised(&core, None, &format!("/ws?token={token}")));
+        // No credentials at all.
+        assert!(!token_authorised(&core, None, "/api/v1/status"));
+        // Wrong token in either form.
+        assert!(!token_authorised(
+            &core,
+            Some("Bearer not-the-token"),
+            "/api/v1/status"
+        ));
+        assert!(!token_authorised(&core, None, "/ws?token=not-the-token"));
+        // Header without the `Bearer ` prefix doesn't match even if the
+        // raw value is otherwise correct.
+        assert!(!token_authorised(&core, Some(&token), "/api/v1/status"));
     }
 }

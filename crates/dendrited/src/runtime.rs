@@ -53,6 +53,16 @@ pub struct RuntimeConfig {
     pub socket_mode: u32,
     pub socket_group: Option<String>,
     pub http_addr: SocketAddr,
+    /// Where the HTTP API's bearer token (see `http.rs` and
+    /// `self_store.rs`'s `ensure_http_api_token`) is written out in plain
+    /// text on every startup, for other local trusted tooling to read
+    /// directly from disk — the Vite dev-proxy config reads it to inject
+    /// `Authorization` automatically in local dev, and a packaged install's
+    /// value lands in `/run/dendrite` alongside the sockets, readable by
+    /// the same `dendrite` group that already gates them. Same group/mode
+    /// as the Unix socket (`socket_group`/`socket_mode` above) — sharing
+    /// that trust boundary is the whole point, not a separate one.
+    pub http_token_path: PathBuf,
     /// Unix socket for the separate `dendrite-magi` process (see
     /// `docs/CONFIGURATION.md`). Defaults to
     /// `crate::DEFAULT_MAGI_SOCKET_PATH` — this field exists mainly so
@@ -90,6 +100,7 @@ impl RuntimeConfig {
             http_addr: "127.0.0.1:8766"
                 .parse()
                 .expect("default HTTP address must be valid"),
+            http_token_path: PathBuf::from("/tmp/dendrite-http.token"),
             magi_socket_path: PathBuf::from(crate::DEFAULT_MAGI_SOCKET_PATH),
             guard_socket_path: PathBuf::from(crate::DEFAULT_GUARD_SOCKET_PATH),
             watch_mounts: Vec::new(),
@@ -358,6 +369,12 @@ impl DaemonRuntime {
         let mut core = DaemonCore::open_with_tiered_stores(&self_store, &stm, &ltm, &incidents)?;
         core.set_magi_socket_path(config.magi_socket_path.clone());
         core.set_guard_socket_path(config.guard_socket_path.clone());
+        write_http_token_file(
+            &config.http_token_path,
+            core.http_api_token(),
+            config.socket_mode,
+            config.socket_group.as_deref(),
+        )?;
         let mut vulnerability = VulnerabilityService::open(&incidents)?;
         let now = unix_now();
         if config.cve_snapshot_path.exists()
@@ -988,6 +1005,9 @@ impl DaemonRuntime {
                 }
             }
             IpcRequest::Health => Ok(IpcResponse::Health(self.core.health_check()?)),
+            IpcRequest::HttpToken => Ok(IpcResponse::HttpToken {
+                token: self.core.http_api_token().to_owned(),
+            }),
         }
     }
 }
@@ -1379,6 +1399,26 @@ impl From<VulnerabilityError> for RuntimeError {
     fn from(error: VulnerabilityError) -> Self {
         Self::Vulnerability(error)
     }
+}
+
+/// Writes the HTTP API's bearer token out in plain text, with the same
+/// group/mode as the Unix socket — see `RuntimeConfig::http_token_path`'s
+/// doc comment for why. Re-written on every startup (the token itself is
+/// stable, from `self.sqlite3` — see `ensure_http_api_token` — so this is
+/// idempotent, not a fresh value each time).
+fn write_http_token_file(
+    path: &Path,
+    token: &str,
+    mode: u32,
+    group: Option<&str>,
+) -> Result<(), RuntimeError> {
+    ensure_parent(path)?;
+    fs::write(path, token)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    if let Some(group) = group {
+        set_socket_group(path, group)?;
+    }
+    Ok(())
 }
 
 fn set_socket_group(path: &Path, group: &str) -> Result<(), RuntimeError> {

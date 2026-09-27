@@ -34,6 +34,9 @@ fn main() {
     {
         config.http_addr = address;
     }
+    if let Ok(value) = env::var("DENDRITE_HTTP_TOKEN_FILE") {
+        config.http_token_path = PathBuf::from(value);
+    }
     if let Ok(value) = env::var("DENDRITE_SOCKET_GROUP") {
         let value = value.trim();
         if !value.is_empty() {

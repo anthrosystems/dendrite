@@ -112,6 +112,12 @@ pub enum IpcRequest {
         id: String,
     },
     Health,
+    /// Returns the bearer token gating `dendrited`'s HTTP API/`/ws` upgrade
+    /// (see `crates/dendrited/src/http.rs`). Deliberately exposed only over
+    /// the Unix socket, not the HTTP API itself — the socket's own
+    /// permissions (group `dendrite`, mode `0660`) are the trust boundary
+    /// this token is meant to match, not bypass.
+    HttpToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,6 +472,9 @@ pub enum IpcResponse {
         queued: bool,
     },
     Health(HealthDto),
+    HttpToken {
+        token: String,
+    },
     Error {
         message: String,
     },

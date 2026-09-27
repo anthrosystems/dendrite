@@ -211,6 +211,7 @@ pub struct DaemonCore {
     incidents: IncidentService,
     actions: ActionService,
     guard: GuardService,
+    http_api_token: String,
     observations_ingested: u64,
     telemetry_recent: VecDeque<TelemetryEventDto>,
     telemetry_sources: Vec<TelemetrySourceDto>,
@@ -269,6 +270,7 @@ impl DaemonCore {
         let mut self_store = SelfStore::open(self_path)?;
         let instance_id = self_store.instance_id()?;
         let signing_key = self_store.ensure_active_signing_key()?;
+        let http_api_token = self_store.ensure_http_api_token()?;
         if run_memory_startup_maintenance {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -287,6 +289,7 @@ impl DaemonCore {
             incidents: IncidentService::open(incident_path)?,
             actions: ActionService::open(incident_path)?,
             guard: GuardService::new(),
+            http_api_token,
             observations_ingested: 0,
             telemetry_recent: VecDeque::with_capacity(512),
             telemetry_sources: Vec::new(),
@@ -304,6 +307,14 @@ impl DaemonCore {
 
     pub fn incidents_store(&self) -> &IncidentService {
         &self.incidents
+    }
+
+    /// The bearer token gating the HTTP API/`/ws` upgrade (see `http.rs`).
+    /// Exposed to `dendrite-cli http-token` over the Unix socket, which is
+    /// already permission-gated the same way as the HTTP API is meant to
+    /// be — see `docs/CONFIGURATION.md`'s "HTTP API authentication" section.
+    pub fn http_api_token(&self) -> &str {
+        &self.http_api_token
     }
 
     /// Placeholder timeout for the liveness probe below. Deliberately not

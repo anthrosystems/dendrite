@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { isAuthRequired, subscribeAuthRequired } from '../api/token'
 import { Icons } from '../components/Icons'
 import { StatusPill } from '../components/StatusPill'
+import { TokenGate } from '../components/TokenGate'
 import { usePolling } from '../hooks/usePolling'
 import { Dashboard } from '../pages/Dashboard'
 import { Investigations } from '../pages/Investigations'
@@ -67,6 +69,7 @@ function pageFromHash(): Page {
 
 export function App() {
   const [page, setPage] = useState<Page>(pageFromHash)
+  const [needsToken, setNeedsToken] = useState(isAuthRequired)
   const status = usePolling(useCallback(() => api.status(), []), 5000, 'status')
   const guard = usePolling(useCallback(() => api.guard(), []), 5000, 'guard')
 
@@ -75,6 +78,20 @@ export function App() {
     window.addEventListener('hashchange', listener)
     return () => window.removeEventListener('hashchange', listener)
   }, [])
+
+  useEffect(() => subscribeAuthRequired(() => setNeedsToken(isAuthRequired())), [])
+
+  if (needsToken) {
+    return (
+      <TokenGate
+        onSubmit={() => {
+          setNeedsToken(false)
+          void status.refresh()
+          void guard.refresh()
+        }}
+      />
+    )
+  }
 
   const localState = status.data ? 'ready' : status.error ? 'error' : 'checking'
   const localCopy = status.data

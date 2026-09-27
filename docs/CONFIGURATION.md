@@ -26,6 +26,7 @@ If this file exists, it's imported via the same path (and validation) as `vulner
 | `DENDRITE_SOCKET_GROUP` | unset (no group change) | Group ownership applied to the socket |
 | `DENDRITE_SOCKET_MODE` | `0660` | Socket file permission mode, octal (`0o` prefix accepted) |
 | `DENDRITE_HTTP_ADDR` | `127.0.0.1:8766` | Localhost HTTP API bind address — also serves the live-event WebSocket (see below) |
+| `DENDRITE_HTTP_TOKEN_FILE` | `/tmp/dendrite-http.token` | Path `dendrited` writes its HTTP API bearer token to on startup (see "HTTP API authentication" below) |
 
 `DENDRITE_HTTP_ADDR` is silently ignored if it fails to parse as a socket address — the default is kept in that case with no warning printed. `DENDRITE_SOCKET_MODE` is stricter: an unparseable value logs an error and exits with status `2`.
 
@@ -35,7 +36,19 @@ On a packaged install, `/run/dendrite` (holding `dendrited`'s, `dendrite-magi`'s
 
 The live event stream is a WebSocket upgrade of a normal request to `/ws` on this same address/port — there is no separate `DENDRITE_WS_ADDR` any more (removed as part of Batch 7's "one address, just works" distribution-packaging goal). `dendrited` detects the upgrade (`Connection: Upgrade`, `Upgrade: websocket`, `Sec-WebSocket-Key` headers on a `GET /ws` request) itself on its ordinary HTTP accept loop and performs the handshake by hand rather than via a second listener.
 
-Neither the HTTP API nor the `/ws` WebSocket endpoint currently perform any request authentication; the HTTP API (and, as of the port merge, `/ws` too) only enforces a CORS origin allowlist against the UI's known origins (the Vite dev server and the packaged `dendrite-ui-server`, see below). See the "Deliberately deferred" note in [`ROADMAP.md`](ROADMAP.md) Checkpoint A — this is being treated as an explicit pre-MCP item rather than an oversight, but it's worth keeping the endpoint bound to loopback until it's addressed.
+### HTTP API authentication
+
+Both the HTTP API and the `/ws` WebSocket upgrade require a bearer token. The origin allowlist above only ever restricted requests a *browser* sends (it checks the `Origin` header, which any non-browser HTTP client simply omits), so it was never a real access control on its own — the token is what actually gates the API now.
+
+`dendrited` generates the token once, the first time it starts against a given `self.sqlite3` (persisted there — like the instance identity and signing key — so it's stable across restarts, not rotated per-boot), and writes it out to the path in `DENDRITE_HTTP_TOKEN_FILE` above with the same group/mode as the Unix socket (see `DENDRITE_SOCKET_GROUP`/`DENDRITE_SOCKET_MODE`). It's deliberately **not** served automatically over the HTTP API itself, since that's the port with the no-auth-for-non-browser-clients problem this closes — the only way to retrieve it is over the Unix socket, via `dendrite-cli http-token` (see `crates/dendrite-cli/README.md`).
+
+A request authenticates with either:
+- an `Authorization: Bearer <token>` header, for ordinary HTTP requests, or
+- a `?token=<token>` query parameter, for the WebSocket handshake, since a browser can't set custom headers on it, and for the packaged UI's cross-origin requests generally — a custom header would force a CORS preflight, and this server intentionally has no `OPTIONS`/preflight handling (see `crates/dendrited/src/http.rs`), so a query parameter keeps every request "simple" under the CORS spec.
+
+Neither UI build ever requires copy-pasting the token in by hand more than once, if at all:
+- **Local dev** (`npm run dev`): the Vite dev-proxy (`ui/vite.config.ts`) reads the token file directly off disk (it runs in Node, on the same machine as `dendrited`) and injects the `Authorization` header into every proxied request itself. Nothing in the browser ever needs the token.
+- **Packaged/production** (`ui/dist`, served by `dendrite-ui-server`): the browser has no such proxy, so the UI shows a one-time token-entry prompt the first time it gets a `401` (`ui/src/components/TokenGate.tsx`), then keeps the token in `localStorage` and appends it as `?token=` to every request/WebSocket URL from then on (`ui/src/api/token.ts`).
 
 ### The UI, and its own process
 
