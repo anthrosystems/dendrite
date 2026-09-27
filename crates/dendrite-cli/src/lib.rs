@@ -294,8 +294,15 @@ impl Command {
             }
             [command, id]
                 if command == "vulnerability"
-                    && !["manual", "authorise", "update", "ignore", "delete", "import"]
-                        .contains(&id.as_str()) =>
+                    && ![
+                        "manual",
+                        "authorise",
+                        "update",
+                        "ignore",
+                        "delete",
+                        "import",
+                    ]
+                    .contains(&id.as_str()) =>
             {
                 Self::Vulnerability(id.clone())
             }
@@ -1358,7 +1365,14 @@ mod tests {
         // same reason: "manual"/"authorise"/"update"/"ignore"/"delete"/"import"
         // typed without their required argument used to silently match the
         // generic `vulnerability <ID>` pattern instead of showing help.
-        for subcommand in ["manual", "authorise", "update", "ignore", "delete", "import"] {
+        for subcommand in [
+            "manual",
+            "authorise",
+            "update",
+            "ignore",
+            "delete",
+            "import",
+        ] {
             assert_eq!(
                 Command::parse(&args(&["vulnerability", subcommand])),
                 Command::Help(HelpTopic::Vulnerability),
