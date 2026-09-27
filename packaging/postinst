@@ -6,13 +6,17 @@
 # gets replaced with the generated enable/start logic verbatim by a
 # whole-file string substitution, so that exact marker string must appear
 # nowhere else in this file, not even in a comment): this script only has
-# to make sure the `dendrite` system account exists *before* that fragment
-# tries to enable+start dendrited.service, because the unit runs as
-# User=dendrite/Group=dendrite (packaging/dendrited.service) and systemd's
+# to make sure the `dendrite`/`dendrite-guard` system accounts exist
+# *before* that fragment tries to enable+start the four units, because
+# dendrited/dendrite-magi run as User=dendrite/Group=dendrite and
+# dendrite-guard runs as its own User=dendrite-guard/Group=dendrite
+# (packaging/*.service — see crates/dendrite-guard/README.md's "Privilege
+# separation" section for why dendrite-guard gets a dedicated account
+# rather than sharing dendrite's) and systemd's
 # StateDirectory=/RuntimeDirectory=/ConfigurationDirectory= directives
-# create and chown /var/lib/dendrite, /run/dendrite and /etc/dendrite for
-# that account automatically on first start — this script does not need to
-# (and should not) create or chown those itself.
+# create and chown their respective directories for those accounts
+# automatically on first start — this script does not need to (and should
+# not) create or chown those itself.
 set -e
 
 case "$1" in
@@ -24,6 +28,23 @@ case "$1" in
             adduser --system --ingroup dendrite --no-create-home \
                 --home /var/lib/dendrite --shell /usr/sbin/nologin \
                 --gecos "Dendrite endpoint security daemon" dendrite
+        fi
+
+        # dendrite-guard's own account, distinct from `dendrite` — its whole
+        # point is that a compromised dendrited (running as `dendrite`) must
+        # not be able to reach dendrite-guard's on-disk state. Its own
+        # primary group only matters for files it owns outright
+        # (StateDirectory=dendrite-guard, mode 0700 — see
+        # packaging/dendrite-guard.service); the unit's Group=dendrite is
+        # what actually lets dendrited reach its socket, set at the unit
+        # level rather than via this account's own group membership.
+        if ! getent group dendrite-guard >/dev/null; then
+            addgroup --system dendrite-guard
+        fi
+        if ! getent passwd dendrite-guard >/dev/null; then
+            adduser --system --ingroup dendrite-guard --no-create-home \
+                --home /var/lib/dendrite-guard --shell /usr/sbin/nologin \
+                --gecos "Dendrite trust/integrity boundary (Guard)" dendrite-guard
         fi
 
         # /run/dendrite is shared across dendrited.service, dendrite-magi.service

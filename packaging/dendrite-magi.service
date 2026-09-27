@@ -34,13 +34,17 @@ NoNewPrivileges=yes
 # on the socket path without a second directory to keep in sync; this unit
 # only ever creates the one socket file in it. Deliberately NOT declared as
 # a RuntimeDirectory= here: systemd removes a RuntimeDirectory= when the
-# first unit referencing it stops, even while sibling units sharing the
-# same name (dendrited.service, dendrite-guard.service) are still running
+# first unit referencing it stops, even while a sibling unit sharing the
+# same name (dendrited.service) is still running
 # (https://github.com/systemd/systemd/issues/5394) — restarting this unit
-# alone would delete dendrited's and dendrite-guard's still-listening
-# sockets out from under them. /run/dendrite is provisioned instead by
-# packaging/dendrite.tmpfiles, applied once at install time (see
-# packaging/postinst) and independent of any one unit's lifecycle.
+# alone would delete dendrited's still-listening socket out from under it.
+# /run/dendrite is provisioned instead by packaging/dendrite.tmpfiles,
+# applied once at install time (see packaging/postinst) and independent of
+# any one unit's lifecycle. dendrite-guard.service is not part of this
+# sharing any more — it has its own uniquely-named /run/dendrite-guard,
+# declared directly as its own RuntimeDirectory= (see
+# packaging/dendrite-guard.service and crates/dendrite-guard/README.md's
+# "Privilege separation" section).
 
 Environment=DENDRITE_MAGI_SOCKET=/run/dendrite/dendrite-magi.sock
 # DENDRITE_MAGI_HOST_SOURCE / _USER_SOURCE / _ENVIRONMENT_SOURCE default to

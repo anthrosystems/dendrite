@@ -32,13 +32,16 @@ StateDirectory=dendrite
 StateDirectoryMode=0750
 ConfigurationDirectory=dendrite
 # /run/dendrite (the socket directory) is deliberately NOT declared here as
-# a RuntimeDirectory=: this unit shares it with dendrite-magi.service and
-# dendrite-guard.service, and systemd removes a RuntimeDirectory= when the
-# first unit referencing it stops even while siblings sharing the same name
-# are still running (https://github.com/systemd/systemd/issues/5394). It's
-# provisioned instead by packaging/dendrite.tmpfiles, applied once at
-# install time (see packaging/postinst) and independent of any one unit's
-# lifecycle.
+# a RuntimeDirectory=: this unit shares it with dendrite-magi.service, and
+# systemd removes a RuntimeDirectory= when the first unit referencing it
+# stops even while a sibling sharing the same name is still running
+# (https://github.com/systemd/systemd/issues/5394). It's provisioned
+# instead by packaging/dendrite.tmpfiles, applied once at install time (see
+# packaging/postinst) and independent of any one unit's lifecycle.
+# dendrite-guard.service is not part of this sharing any more — it has its
+# own uniquely-named /run/dendrite-guard, declared directly as its own
+# RuntimeDirectory= (see packaging/dendrite-guard.service and
+# crates/dendrite-guard/README.md's "Privilege separation" section).
 
 Environment=DENDRITE_SELF_DB=/var/lib/dendrite/self.sqlite3
 Environment=DENDRITE_STM_DB=/var/lib/dendrite/stm.sqlite3
@@ -47,7 +50,7 @@ Environment=DENDRITE_INCIDENT_DB=/var/lib/dendrite/incidents.sqlite3
 Environment=DENDRITE_CVE_SNAPSHOT=/etc/dendrite/cve-snapshot.json
 Environment=DENDRITE_SOCKET=/run/dendrite/dendrited.sock
 Environment=DENDRITE_MAGI_SOCKET=/run/dendrite/dendrite-magi.sock
-Environment=DENDRITE_GUARD_SOCKET=/run/dendrite/dendrite-guard.sock
+Environment=DENDRITE_GUARD_SOCKET=/run/dendrite-guard/dendrite-guard.sock
 Environment=DENDRITE_HTTP_TOKEN_FILE=/run/dendrite/http.token
 Environment=DENDRITE_SOCKET_GROUP=dendrite
 Environment=DENDRITE_SOCKET_MODE=0660

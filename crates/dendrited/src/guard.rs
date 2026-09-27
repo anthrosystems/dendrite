@@ -53,7 +53,7 @@ pub trait GuardEvaluator: Send {
 
 /// Default `dendrite-guard` socket path for local dev — packaged installs
 /// override this via `DENDRITE_GUARD_SOCKET`
-/// (`/run/dendrite/dendrite-guard.sock`, set in `packaging/dendrited.service`).
+/// (`/run/dendrite-guard/dendrite-guard.sock`, set in `packaging/dendrited.service`).
 pub const DEFAULT_GUARD_SOCKET_PATH: &str = "/tmp/dendrite-guard.sock";
 
 /// Short — like the MAGI call, this sits on the request-handling path, and

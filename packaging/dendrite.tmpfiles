@@ -1,23 +1,29 @@
 # /usr/lib/tmpfiles.d/dendrite.conf
 #
 # Provisions /run/dendrite independently of any single systemd unit's
-# lifecycle. dendrited.service, dendrite-magi.service and dendrite-guard.service
-# all put their Unix sockets here and used to each declare their own
-# `RuntimeDirectory=dendrite` pointing at the same shared name — but systemd
-# removes a RuntimeDirectory= when the *first* unit referencing it stops,
-# even while sibling units using the same directory are still running (see
+# lifecycle. dendrited.service and dendrite-magi.service both put their Unix
+# sockets here and used to each declare their own `RuntimeDirectory=dendrite`
+# pointing at the same shared name — but systemd removes a
+# RuntimeDirectory= when the *first* unit referencing it stops, even while
+# sibling units using the same directory are still running (see
 # https://github.com/systemd/systemd/issues/5394, still open). In practice
-# that meant `systemctl restart dendrite-guard` alone would delete
-# `/run/dendrite` out from under `dendrited` and `dendrite-magi`, unlinking
-# their still-listening sockets and leaving `dendrite-cli` (and the other
-# two processes' peers) unable to reconnect until *every* unit sharing the
-# directory happened to restart too.
+# that meant `systemctl restart dendrite-magi` alone would delete
+# `/run/dendrite` out from under `dendrited`, unlinking its still-listening
+# socket and leaving `dendrite-cli` unable to reconnect until every unit
+# sharing the directory happened to restart too.
 #
 # A tmpfiles.d-provisioned directory has no such lifecycle tie to any one
 # unit: it's created once at boot (and re-created if missing whenever
 # `systemd-tmpfiles --create` runs, e.g. via postinst on install/upgrade),
-# and none of the three services' own start/stop cycles touch it. See
+# and neither service's own start/stop cycle touches it. See
 # packaging/postinst for the `systemd-tmpfiles --create` call that applies
-# this on install, and the three .service files' own comments for why they
-# no longer declare `RuntimeDirectory=`.
+# this on install, and dendrited.service/dendrite-magi.service's own
+# comments for why they no longer declare `RuntimeDirectory=`.
+#
+# dendrite-guard.service is NOT one of these any more: it now runs as its
+# own dedicated user (see crates/dendrite-guard/README.md's "Privilege
+# separation" section) with its own uniquely-named
+# `RuntimeDirectory=dendrite-guard` (/run/dendrite-guard) declared directly
+# on that unit — safe there specifically because nothing else references
+# that name, so the shared-directory teardown bug above doesn't apply.
 d /run/dendrite 0750 dendrite dendrite -

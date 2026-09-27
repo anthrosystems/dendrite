@@ -40,10 +40,12 @@ Two different things, don't conflate them:
 
 ## What the package installs
 
-A dedicated `dendrite` system user/group, and four independent systemd
-units: `dendrited.service` (the daemon), `dendrite-ui.service`
-(`dendrite-ui-server`, a minimal unprivileged static-file server for the UI
-— see `crates/dendrite-ui-server/README.md`), `dendrite-magi.service`
+Two dedicated system users — `dendrite` (`dendrited`, `dendrite-magi`,
+`dendrite-ui-server`) and `dendrite-guard` (`dendrite-guard` alone, not
+shared — see below) — and four independent systemd units:
+`dendrited.service` (the daemon), `dendrite-ui.service` (`dendrite-ui-server`,
+a minimal unprivileged static-file server for the UI — see
+`crates/dendrite-ui-server/README.md`), `dendrite-magi.service`
 (`dendrite-magi`, MAGI quorum evaluation — see `crates/dendrite-magi/README.md`),
 and `dendrite-guard.service` (`dendrite-guard`, the trust/integrity process —
 see `crates/dendrite-guard/README.md`). Each unit can be enabled/disabled
@@ -51,13 +53,22 @@ independently (`systemctl disable --now dendrite-ui`/`dendrite-magi`/
 `dendrite-guard`) — see each crate's own README for what happens to
 `dendrited` when one of the other three is unreachable.
 
-Config lives in `/etc/dendrite/dendrited.env`/`dendrite-magi.env`/
-`dendrite-guard.env` (conffiles — survive upgrades/removal, only `purge`
-deletes them), state in `/var/lib/dendrite` (via systemd's
-`StateDirectory=`, same survival rules). The intended native layout
-converges on `/usr/bin`, `/usr/lib/dendrite`, `/usr/share/dendrite`,
-`/etc/dendrite`, and `/var/lib/dendrite`, with an Anthrosystems-owned
-signed APT repository as the long-term distribution target.
+`dendrite-guard` gets its own user rather than sharing `dendrite`
+specifically so a compromised `dendrited` can't reach Guard's state by
+writing to a directory both processes' user could otherwise touch — see
+`crates/dendrite-guard/README.md`'s "Privilege separation" section. Its
+state (`/var/lib/dendrite-guard`, mode `0700`) and runtime socket directory
+(`/run/dendrite-guard`) are both its own, separate from `dendrited`'s.
+
+Config lives in `/etc/dendrite/dendrited.env`/`dendrite-magi.env` (conffiles
+— survive upgrades/removal, only `purge` deletes them; `dendrite-guard`
+doesn't have one of its own yet), state in `/var/lib/dendrite` for
+`dendrited`/`dendrite-magi` and `/var/lib/dendrite-guard` for
+`dendrite-guard` (both via systemd's `StateDirectory=`, same survival
+rules). The intended native layout converges on `/usr/bin`,
+`/usr/lib/dendrite`, `/usr/share/dendrite`, `/etc/dendrite`, and
+`/var/lib/dendrite`, with an Anthrosystems-owned signed APT repository as
+the long-term distribution target.
 
 ## What packaging is expected to provide
 
@@ -310,10 +321,14 @@ Confirm all four services start (four independent systemd units, one
 package — see `crates/dendrite-ui-server/README.md` for why the UI is
 split out, and `crates/dendrite-magi/README.md`/`crates/dendrite-guard/README.md`
 for MAGI/Guard), that disabling `dendrite-ui`/`dendrite-magi`/
-`dendrite-guard` doesn't affect `dendrited` or vice versa, the
-user/group exist, `/etc/dendrite/dendrited.env` is preserved across a plain
-removal and only deleted on purge, and (if your
-test environment has a real `bpf-linker`/nightly toolchain, unlike a sandbox
+`dendrite-guard` doesn't affect `dendrited` or vice versa, that **both**
+the `dendrite` and `dendrite-guard` users/groups exist (`getent passwd
+dendrite dendrite-guard`) and that `/var/lib/dendrite-guard` is owned by
+`dendrite-guard` and mode `0700` — not readable by `dendrite` — confirming
+the privilege separation actually took (see `crates/dendrite-guard/README.md`'s
+"Privilege separation" section), `/etc/dendrite/dendrited.env` is preserved
+across a plain removal and only deleted on purge, and (if your test
+environment has a real `bpf-linker`/nightly toolchain, unlike a sandbox
 without one) that the packaged eBPF object actually loads rather than
 falling back to `/proc` polling.
 

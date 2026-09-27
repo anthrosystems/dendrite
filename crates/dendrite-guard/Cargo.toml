@@ -11,3 +11,4 @@ repository = "https://github.com/anthrosystems/dendrite"
 dendrite-protocol = { path = "../dendrite-protocol" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
+libc = "0.2"

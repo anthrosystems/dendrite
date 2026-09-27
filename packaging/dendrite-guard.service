@@ -22,44 +22,66 @@ Restart=on-failure
 RestartSec=2
 
 # --- Identity ---
-# Same dedicated non-root account as dendrited (created by the package's
-# postinst). This process holds real security state (trust state, integrity
-# findings) but needs none of dendrited's telemetry capabilities — it runs
-# as its own process specifically so a compromise of dendrited itself
-# cannot reach that state directly (see crates/dendrite-guard/README.md and
-# docs/ROADMAP.md).
-User=dendrite
+# Its OWN dedicated account, distinct from dendrited's/dendrite-magi's
+# `dendrite` user (both created by the package's postinst) — not shared.
+# "Compromise can remove authority, but cannot create authority" only holds
+# if a compromised dendrited can't reach Guard's *on-disk* state either:
+# until this change, dendrite-guard ran as the same `dendrite` user as
+# dendrited and shared its /var/lib/dendrite state directory, so a
+# compromised dendrited (same user, same writable directory) could edit
+# guard.sqlite3 directly — bypassing the socket, the process boundary, and
+# every fail-closed check in dendrite_guard's own code entirely. See
+# crates/dendrite-guard/README.md's "Privilege separation" section.
+#
+# Group=dendrite (not dendrite-guard's own group) is deliberate: it's the
+# group systemd applies to files/directories this unit's State/Runtime
+# directives create (below), and it's what lets dendrited (a member of
+# `dendrite`) reach this process's *socket* — the one thing it's still
+# meant to reach. StateDirectoryMode=0700 below means that same group gets
+# no access at all to guard.sqlite3's directory, even though the group is
+# nominally shared.
+User=dendrite-guard
 Group=dendrite
 NoNewPrivileges=yes
 
 # --- Filesystem layout ---
-# Shares dendrited's /var/lib/dendrite state directory for its own
-# guard.sqlite3 (a distinct file, not shared access to dendrited's other
-# databases) and its /run/dendrite runtime directory for the socket, so
-# both processes agree on paths without a second directory to keep in sync.
-# StateDirectory= is safe to share (systemd never removes it on a unit
-# stop, unlike RuntimeDirectory=), but /run/dendrite is deliberately NOT
-# declared as a RuntimeDirectory= here: systemd removes a RuntimeDirectory=
-# when the first unit referencing it stops, even while sibling units
-# sharing the same name (dendrited.service, dendrite-magi.service) are
-# still running (https://github.com/systemd/systemd/issues/5394) —
-# restarting this unit alone would delete dendrited's and dendrite-magi's
-# still-listening sockets out from under them (this is exactly what a real
-# Checkpoint-B install hit). /run/dendrite is provisioned instead by
-# packaging/dendrite.tmpfiles, applied once at install time (see
-# packaging/postinst) and independent of any one unit's lifecycle.
-StateDirectory=dendrite
-StateDirectoryMode=0750
+# Both directories are now uniquely named to this unit — dendrited.service
+# and dendrite-magi.service don't reference either one — so the shared-
+# RuntimeDirectory= teardown bug that ruled out RuntimeDirectory= for
+# /run/dendrite (https://github.com/systemd/systemd/issues/5394, see
+# packaging/dendrite.tmpfiles) doesn't apply here: nothing else stopping
+# would tear these down, and nothing else stops when *this* unit restarts.
+#
+# StateDirectoryMode=0700 is the actual privilege-separation boundary:
+# owned by dendrite-guard, mode rwx------, so group `dendrite` (i.e.
+# dendrited) gets no access whatsoever to guard.sqlite3 or anything else
+# placed here — not even read. RuntimeDirectoryMode=0750 is deliberately
+# looser (owner rwx, group r-x) so dendrited can still traverse into
+# /run/dendrite-guard and reach the socket file itself; the socket file's
+# own permissions (DENDRITE_GUARD_SOCKET_GROUP/_MODE below) are what
+# actually grant dendrited connect access to it.
+StateDirectory=dendrite-guard
+StateDirectoryMode=0700
+RuntimeDirectory=dendrite-guard
+RuntimeDirectoryMode=0750
 
-Environment=DENDRITE_GUARD_DB=/var/lib/dendrite/guard.sqlite3
-Environment=DENDRITE_GUARD_SOCKET=/run/dendrite/dendrite-guard.sock
+Environment=DENDRITE_GUARD_DB=/var/lib/dendrite-guard/guard.sqlite3
+Environment=DENDRITE_GUARD_SOCKET=/run/dendrite-guard/dendrite-guard.sock
+# The socket itself needs its own explicit group/mode (dendrite-guard's own
+# code chowns/chmods it after bind — see crates/dendrite-guard/src/main.rs)
+# since it's created by the dendrite-guard user but dendrited (a different
+# user, member of the dendrite group) must still be able to connect to it.
+Environment=DENDRITE_GUARD_SOCKET_GROUP=dendrite
+Environment=DENDRITE_GUARD_SOCKET_MODE=0660
 
 # --- Sandboxing / hardening ---
 # No telemetry, no eBPF, no network beyond its own socket — lock this down
-# harder than dendrited can be today.
+# harder than dendrited can be today. No explicit ReadWritePaths= needed:
+# StateDirectory=/RuntimeDirectory= above already grant write access to
+# their own directories, and (unlike the old shared /var/lib/dendrite)
+# there is deliberately nothing else this unit needs write access to.
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/dendrite /run/dendrite
 PrivateTmp=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes

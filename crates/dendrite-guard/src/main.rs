@@ -6,15 +6,26 @@
 use dendrite_guard::GuardStore;
 use dendrite_protocol::{GuardRequest, GuardResponse};
 use std::env;
+use std::ffi::CString;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 #[cfg(debug_assertions)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/dendrite-guard.sock";
 const DEFAULT_DB_PATH: &str = "data/guard.sqlite3";
+/// Same default as `dendrited`'s own `RuntimeConfig::socket_mode` — see
+/// `crates/dendrited/src/runtime.rs`. Dev mode leaves `DENDRITE_GUARD_SOCKET_GROUP`
+/// unset (no chown attempted), which is fine when both processes run as the
+/// same local user; a packaged install sets it explicitly (see
+/// `packaging/dendrite-guard.service`) since `dendrite-guard` now runs as its
+/// own dedicated user, distinct from `dendrited`'s (see `README.md`'s
+/// "Privilege separation" section).
+const DEFAULT_SOCKET_MODE: u32 = 0o660;
 
 /// Only the `#[cfg(debug_assertions)]` debug handlers below need a
 /// timestamp to record, so this would otherwise be dead code in a release
@@ -31,6 +42,23 @@ fn main() {
     let socket_path = env::var("DENDRITE_GUARD_SOCKET")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SOCKET_PATH));
+
+    let socket_mode = match env::var("DENDRITE_GUARD_SOCKET_MODE") {
+        Ok(value) => match u32::from_str_radix(value.trim().trim_start_matches("0o"), 8) {
+            Ok(mode) => mode,
+            Err(_) => {
+                eprintln!(
+                    "dendrite-guard: invalid DENDRITE_GUARD_SOCKET_MODE `{value}`; expected octal like 0660"
+                );
+                std::process::exit(2);
+            }
+        },
+        Err(_) => DEFAULT_SOCKET_MODE,
+    };
+    let socket_group = env::var("DENDRITE_GUARD_SOCKET_GROUP")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
 
     if let Some(parent) = std::path::Path::new(&db_path).parent()
         && !parent.as_os_str().is_empty()
@@ -78,6 +106,22 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(error) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(socket_mode)) {
+        eprintln!(
+            "dendrite-guard: failed to set permissions on {}: {error}",
+            socket_path.display()
+        );
+        std::process::exit(1);
+    }
+    if let Some(group) = socket_group.as_deref()
+        && let Err(error) = set_socket_group(&socket_path, group)
+    {
+        eprintln!(
+            "dendrite-guard: failed to chown {} to group `{group}`: {error}",
+            socket_path.display()
+        );
+        std::process::exit(1);
+    }
     println!(
         "dendrite-guard: listening on {} ({db_path})",
         socket_path.display()
@@ -89,6 +133,43 @@ fn main() {
             eprintln!("dendrite-guard: request failed: {error}");
         }
     }
+}
+
+/// Chowns the socket file's group (not owner — `u32::MAX` to `chown(2)`
+/// means "leave the owner unchanged") to the named group, so a caller that
+/// isn't `dendrite-guard`'s own user but *is* a member of that group (e.g.
+/// `dendrited`, running as its own dedicated user in a packaged install —
+/// see `README.md`'s "Privilege separation" section) can still connect.
+/// Mirrors `dendrited`'s own `set_socket_group` in `crates/dendrited/src/runtime.rs`
+/// verbatim; duplicated rather than shared since it's a handful of lines of
+/// direct libc use, not worth a shared crate for.
+fn set_socket_group(path: &Path, group: &str) -> std::io::Result<()> {
+    let group_name =
+        CString::new(group).map_err(|_| std::io::Error::other("socket group contains NUL byte"))?;
+
+    // SAFETY: getgrnam reads the provided NUL-terminated group name and
+    // returns a pointer to libc-managed storage valid until the next group
+    // lookup.
+    let entry = unsafe { libc::getgrnam(group_name.as_ptr()) };
+    if entry.is_null() {
+        return Err(std::io::Error::other(format!(
+            "socket group `{group}` does not exist"
+        )));
+    }
+
+    // SAFETY: entry was checked for null above.
+    let gid = unsafe { (*entry).gr_gid };
+    let path = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| std::io::Error::other("socket path contains NUL byte"))?;
+
+    // uid_t::MAX means "do not change owner" for chown.
+    // SAFETY: path is NUL-terminated and points to the bound socket path.
+    let result = unsafe { libc::chown(path.as_ptr(), u32::MAX as libc::uid_t, gid) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 fn handle_connection(mut stream: UnixStream, store: &Mutex<GuardStore>) -> std::io::Result<()> {
