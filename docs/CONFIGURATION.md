@@ -52,16 +52,15 @@ Neither UI build ever requires copy-pasting the token in by hand more than once,
 
 ### The UI, and its own process
 
-`dendrited` itself never serves the UI. The built UI (`ui/dist`) is served by a separate binary/systemd unit, `dendrite-ui-server`/`dendrite-ui.service` — a small, unprivileged static-file server with no dependency on `dendrited` being up to start, so an operator can `systemctl disable --now dendrite-ui` independently of the daemon. See `crates/dendrite-ui-server/README.md` for its own two environment variables (`DENDRITE_UI_DIR`, `DENDRITE_UI_ADDR`).
+`dendrited` itself never serves the UI. The built UI (`ui/dist`) is served by a separate binary/systemd unit, `dendrite-ui-server`/`dendrite-ui.service` — a small, unprivileged static-file server with no dependency on `dendrited` being up to start, so an operator can `systemctl disable --now dendrite-ui` independently of the daemon. See `crates/dendrite-ui-server/README.md` for its own environment variables (`DENDRITE_UI_DIR`, `DENDRITE_UI_ADDR`, `DENDRITE_UI_API_ORIGIN`).
 
-Because the UI's static assets and `dendrited`'s API/WebSocket now live on different origins/ports, the UI's own JS talks to `dendrited` cross-origin — that's what the CORS allowlist above is for. The UI is built with two Vite env vars baking in `dendrited`'s absolute origin:
+Because the UI's static assets and `dendrited`'s API/WebSocket can live on different origins/ports, the UI's own JS talks to `dendrited` cross-origin — that's what the CORS allowlist above is for. Where that origin lives is **not** baked into the JS bundle at build time any more: `dendrite-ui-server` serves a small runtime config document, `/dendrite-config.json`, generated from its own `DENDRITE_UI_API_ORIGIN` env var, and the UI fetches it once on load (`ui/src/api/runtimeConfig.ts`) before rendering. This means the same build of `ui/dist` works for every deployment topology — same-origin behind a reverse proxy, split-origin with `dendrited` on another host or port, or a future multi-host "herd" deployment — and repointing it is a `DENDRITE_UI_API_ORIGIN` change plus a restart of `dendrite-ui.service`, not a rebuild.
 
-| Build-time variable | Default (relative, single-origin) | Set to (packaged, split-origin) |
+| Runtime variable | Default | Set to (packaged, split-origin) |
 |---|---|---|
-| `VITE_DENDRITE_API_BASE` | `/api/v1` | `http://<dendrited-host>:8766/api/v1` |
-| `VITE_DENDRITE_WS_URL` | same-origin `/ws`, derived from `window.location` | `ws://<dendrited-host>:8766/ws` |
+| `DENDRITE_UI_API_ORIGIN` | unset (same-origin as the UI itself) | `http://<dendrited-host>:8766` |
 
-Local dev (`npm run dev`) leaves both unset — Vite's own dev-proxy (`ui/vite.config.ts`) forwards `/api`/`/ws` to `dendrited` on the same apparent origin, so no cross-origin call ever happens there. `scripts/build-deb.sh` sets both explicitly when building `ui/dist` for packaging (see `DENDRITE_PACKAGED_HTTP_ORIGIN` in that script if `dendrited`'s HTTP API will be reachable somewhere other than `127.0.0.1:8766` on the target host).
+Set it in `/etc/dendrite/dendrite-ui.env` (installed from `packaging/dendrite-ui.env.example`, a conffile — see `packaging/dendrite-ui.service`'s `EnvironmentFile=`). Local dev (`npm run dev`) leaves it unset — `ui/public/dendrite-config.json` (served verbatim by Vite) reports `apiOrigin: null`, and Vite's own dev-proxy (`ui/vite.config.ts`) forwards `/api`/`/ws` to `dendrited` on the same apparent origin, so no cross-origin call ever happens there either. This isn't a security boundary in either form — whoever can write to the served directory, or set the unit's environment, already controls everything the UI does — just an ergonomics fix over the old build-time-baked approach.
 
 ### MAGI, and its own process
 

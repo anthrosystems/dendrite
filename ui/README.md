@@ -28,6 +28,6 @@ Vite proxies `/api` and `/ws` to `http://127.0.0.1:8766`, so browser development
 npm run build
 ```
 
-The build output (`dist/`) is served by the separate `dendrite-ui-server` process/systemd unit, not by `dendrited` itself — see `crates/dendrite-ui-server/README.md` and `docs/CONFIGURATION.md`'s "The UI, and its own process" section for why it's split out and how the built UI's cross-origin API/WebSocket calls are configured (`VITE_DENDRITE_API_BASE`/`VITE_DENDRITE_WS_URL`). `scripts/build-deb.sh` sets both automatically when building for packaging.
+The build output (`dist/`) is served by the separate `dendrite-ui-server` process/systemd unit, not by `dendrited` itself — see `crates/dendrite-ui-server/README.md` and `docs/CONFIGURATION.md`'s "The UI, and its own process" section for why it's split out. Where `dendrited`'s API/WebSocket lives isn't baked into this build at all: `dendrite-ui-server` serves it at runtime from its own `DENDRITE_UI_API_ORIGIN` env var (`/dendrite-config.json`), which the UI fetches once on load (`src/api/runtimeConfig.ts`) — so the same `dist/` works unmodified for any deployment topology, and `scripts/build-deb.sh` needs no build-time origin at all.
 
 Copyright 2026 Anthrosystems

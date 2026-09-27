@@ -1,3 +1,4 @@
+import { getApiOrigin } from '../api/runtimeConfig'
 import { withToken } from '../api/token'
 
 export type LiveEvent = {
@@ -11,9 +12,10 @@ let reconnectTimer: number | null = null
 let started = false
 
 function websocketUrl() {
-  const configured = import.meta.env.VITE_DENDRITE_WS_URL as string | undefined
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const base = configured ?? `${protocol}//${window.location.host}/ws`
+  const origin = getApiOrigin()
+  const base = origin
+    ? `${origin.replace(/^http/, 'ws')}/ws`
+    : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
   return withToken(base)
 }
 

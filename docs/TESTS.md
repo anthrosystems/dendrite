@@ -62,21 +62,23 @@ Confirm:
   WebSocket client talking to the daemon's real upgrade handshake, not a
   raw socket script.
 
-For a packaged-style build (the UI's own separate process), build it with
-an absolute `dendrited` origin baked in, then run `dendrite-ui-server`
-against the result:
+For a packaged-style build (the UI's own separate process), build it plain
+(no build-time origin to set any more — see `docs/CONFIGURATION.md`'s "The
+UI, and its own process" section) and point `dendrite-ui-server` at
+`dendrited` via its own runtime env var:
 
 ```bash
-cd ui && VITE_DENDRITE_API_BASE="http://127.0.0.1:8766/api/v1" \
-  VITE_DENDRITE_WS_URL="ws://127.0.0.1:8766/ws" npm run build
+cd ui && npm run build
 DENDRITE_UI_DIR=ui/dist DENDRITE_UI_ADDR=127.0.0.1:8767 \
+  DENDRITE_UI_API_ORIGIN="http://127.0.0.1:8766" \
   /path/to/target/debug/dendrite-ui-server
 ```
 
 Open `http://127.0.0.1:8767` and confirm the same things as above, plus that
 this is genuinely a separate process from `dendrited` — stopping
 `dendrite-ui-server` should leave `dendrited`'s API/CLI/telemetry entirely
-unaffected, and vice versa.
+unaffected, and vice versa — and that `curl http://127.0.0.1:8767/dendrite-config.json`
+returns `{"apiOrigin":"http://127.0.0.1:8766"}`.
 
 ## 4. MAGI, as its own process
 

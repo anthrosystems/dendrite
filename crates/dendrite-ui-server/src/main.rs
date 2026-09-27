@@ -9,12 +9,20 @@
 //! telemetry collection, Memory Graph ingestion, or action authorisation at
 //! all.
 //!
-//! The served UI talks to `dendrited`'s own HTTP/WebSocket port directly,
-//! cross-origin, via the `VITE_DENDRITE_API_BASE`/`VITE_DENDRITE_WS_URL`
-//! build-time values baked into `ui/dist` (see `scripts/build-deb.sh` and
-//! `docs/CONFIGURATION.md`) — `dendrited`'s existing `Origin` allowlist in
-//! `http.rs` is what authorises that cross-origin access, the same
-//! mechanism that already covers the `npm run dev` Vite server today.
+//! The served UI talks to `dendrited`'s own HTTP/WebSocket port, same-origin
+//! by default or cross-origin when `DENDRITE_UI_API_ORIGIN` is set (see
+//! below) — `dendrited`'s existing `Origin` allowlist in `http.rs` is what
+//! authorises cross-origin access, the same mechanism that already covers
+//! the `npm run dev` Vite server today.
+//!
+//! Unlike the old build-time `VITE_DENDRITE_API_BASE`/`VITE_DENDRITE_WS_URL`
+//! approach (baked into the JS bundle, so changing it meant rebuilding
+//! `ui/dist`), this process serves a small runtime config JSON
+//! (`RUNTIME_CONFIG_PATH`) that the UI fetches once on load — so
+//! repointing the UI at a different `dendrited` origin is an env var change
+//! plus a restart of this unit, not a rebuild. This isn't a security
+//! boundary either way: whoever can write to the served directory already
+//! controls everything the UI does, build-time constant or not.
 
 use std::env;
 use std::fs;
@@ -25,6 +33,12 @@ use std::thread;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8767";
 const MAX_HEADER_LINES: usize = 64;
+
+/// Path the UI fetches at startup for its runtime config. Intercepted here
+/// rather than served from `ui_dir`, so it's always this process's live env
+/// var, never whatever `ui/dist` happened to ship (see `ui/public/dendrite-config.json`,
+/// the dev-mode placeholder Vite serves verbatim).
+const RUNTIME_CONFIG_PATH: &str = "/dendrite-config.json";
 
 fn main() {
     let ui_dir = match env::var("DENDRITE_UI_DIR") {
@@ -43,6 +57,18 @@ fn main() {
     }
 
     let addr = env::var("DENDRITE_UI_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
+    // `dendrited`'s HTTP/WebSocket origin, e.g. "http://192.168.1.50:8766",
+    // when it's reachable somewhere other than this same origin. Unset
+    // (the packaged default) means the UI assumes same-origin `/api`/`/ws`
+    // — only true if something else (a reverse proxy) puts both behind one
+    // address; the out-of-the-box packaged layout is cross-origin, so a
+    // real deployment normally does set this.
+    let api_origin = env::var("DENDRITE_UI_API_ORIGIN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let runtime_config_body = runtime_config_json(api_origin.as_deref());
+
     let listener = match TcpListener::bind(&addr) {
         Ok(listener) => listener,
         Err(error) => {
@@ -55,15 +81,46 @@ fn main() {
     for incoming in listener.incoming() {
         let Ok(stream) = incoming else { continue };
         let ui_dir = ui_dir.clone();
+        let runtime_config_body = runtime_config_body.clone();
         thread::spawn(move || {
             let mut stream = stream;
-            if let Err(error) = handle_connection(&mut stream, &ui_dir)
+            if let Err(error) = handle_connection(&mut stream, &ui_dir, &runtime_config_body)
                 && !is_peer_disconnect(&error)
             {
                 eprintln!("dendrite-ui-server: request failed: {error}");
             }
         });
     }
+}
+
+/// `apiOrigin: null` (JSON serialisation of `None`) tells the UI to use
+/// same-origin relative paths, same as leaving it unset always has today.
+fn runtime_config_json(api_origin: Option<&str>) -> String {
+    match api_origin {
+        Some(origin) => format!("{{\"apiOrigin\":{}}}", json_string(origin)),
+        None => "{\"apiOrigin\":null}".to_owned(),
+    }
+}
+
+/// Minimal JSON string escaping — `api_origin` is an operator-configured
+/// env var (a URL origin), not untrusted request input, but this is cheap
+/// enough to just always do correctly rather than assume it never contains
+/// a `"` or `\`.
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            control if control.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", control as u32));
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn is_peer_disconnect(error: &io::Error) -> bool {
@@ -78,7 +135,11 @@ fn is_peer_disconnect(error: &io::Error) -> bool {
 /// plain-text error. Deliberately minimal compared to `dendrited::http`'s
 /// full request parser: this process has no API routes, no JSON, no
 /// WebSocket upgrade, and no request body to speak of.
-fn handle_connection(stream: &mut TcpStream, ui_dir: &Path) -> io::Result<()> {
+fn handle_connection(
+    stream: &mut TcpStream,
+    ui_dir: &Path,
+    runtime_config_body: &str,
+) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -100,6 +161,10 @@ fn handle_connection(stream: &mut TcpStream, ui_dir: &Path) -> io::Result<()> {
 
     if method != "GET" && method != "HEAD" {
         return write_plain_text(stream, 405, "only GET/HEAD are supported");
+    }
+
+    if path == RUNTIME_CONFIG_PATH {
+        return write_json(stream, runtime_config_body);
     }
 
     serve_static_file(stream, ui_dir, path)
@@ -176,6 +241,19 @@ fn write_plain_text(stream: &mut TcpStream, status: u16, body: &str) -> io::Resu
     stream.flush()
 }
 
+/// Serves the runtime config JSON — deliberately `no-store`, since it's
+/// cheap to regenerate and a stale cached copy would defeat the entire
+/// point of making this runtime-configurable rather than build-time baked.
+fn write_json(stream: &mut TcpStream, body: &str) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )?;
+    stream.flush()
+}
+
 fn write_static_bytes(stream: &mut TcpStream, body: &[u8], content_type: &str) -> io::Result<()> {
     write!(
         stream,
@@ -184,4 +262,27 @@ fn write_static_bytes(stream: &mut TcpStream, body: &[u8], content_type: &str) -
     )?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_config_json_omits_origin_when_unset() {
+        assert_eq!(runtime_config_json(None), r#"{"apiOrigin":null}"#);
+    }
+
+    #[test]
+    fn runtime_config_json_includes_origin_when_set() {
+        assert_eq!(
+            runtime_config_json(Some("http://192.168.1.50:8766")),
+            r#"{"apiOrigin":"http://192.168.1.50:8766"}"#
+        );
+    }
+
+    #[test]
+    fn json_string_escapes_quotes_and_backslashes() {
+        assert_eq!(json_string(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
 }

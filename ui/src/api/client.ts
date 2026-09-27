@@ -1,4 +1,5 @@
 import { emitLocalLive } from '../hooks/live'
+import { getApiOrigin } from './runtimeConfig'
 import { reportAuthResult, withToken } from './token'
 import type {
   ActionDetail,
@@ -32,7 +33,15 @@ import type {
   VulnerabilityCandidateRequest,
 } from './types'
 
-const API_BASE = import.meta.env.VITE_DENDRITE_API_BASE ?? '/api/v1'
+/** Same-origin `/api/v1` unless the runtime config (see `runtimeConfig.ts`)
+ * names a different `dendrited` origin. Read live rather than cached in a
+ * module-level constant, since `main.tsx` resolves the runtime config
+ * before rendering but this stays correct even if that ordering ever
+ * changes. */
+function apiBase(): string {
+  const origin = getApiOrigin()
+  return origin ? `${origin}/api/v1` : '/api/v1'
+}
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -41,7 +50,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(withToken(`${API_BASE}${path}`), {
+  const response = await fetch(withToken(`${apiBase()}${path}`), {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -83,7 +92,7 @@ const del = async <T,>(path: string) => {
 }
 
 async function uploadAntiserum(file: File): Promise<AntiserumPackageSummary> {
-  const response = await fetch(withToken(`${API_BASE}/analysis/import`), {
+  const response = await fetch(withToken(`${apiBase()}/analysis/import`), {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/vnd.dendrite.antiserum' },
     body: file,
@@ -160,5 +169,5 @@ export const api = {
   unloadAnalysisReview: (reviewId: string) =>
     del<{ unloaded: boolean; review_id: string }>(`/analysis/reviews/${encodeURIComponent(reviewId)}`),
   antiserumDownloadUrl: (id: string) =>
-    withToken(`${API_BASE}/analysis/packages/${encodeURIComponent(id)}/download`),
+    withToken(`${apiBase()}/analysis/packages/${encodeURIComponent(id)}/download`),
 }

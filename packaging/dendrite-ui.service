@@ -28,6 +28,10 @@ NoNewPrivileges=yes
 
 Environment=DENDRITE_UI_DIR=/usr/share/dendrite/ui
 Environment=DENDRITE_UI_ADDR=127.0.0.1:8767
+# DENDRITE_UI_API_ORIGIN (where the UI's JS should reach dendrited) is
+# deployment-specific; set via EnvironmentFile below rather than hardcoded
+# here — unset means "same origin as the UI itself", the common case.
+EnvironmentFile=-/etc/dendrite/dendrite-ui.env
 
 # --- Sandboxing / hardening ---
 # This process never writes anywhere and needs no special kernel access —

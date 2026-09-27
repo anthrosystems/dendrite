@@ -10,6 +10,7 @@ It serves real files under `DENDRITE_UI_DIR` as-is, and falls back to `index.htm
 |---|---|---|
 | `DENDRITE_UI_DIR` | required, no default | Directory containing the built UI (`ui/dist`). The process refuses to start if this isn't set or doesn't exist |
 | `DENDRITE_UI_ADDR` | `127.0.0.1:8767` | Bind address for the static file server |
+| `DENDRITE_UI_API_ORIGIN` | unset (same-origin) | Where `dendrited`'s HTTP/WebSocket API lives, from the browser's point of view. Served to the UI at runtime as `/dendrite-config.json` (`{"apiOrigin": ...}`) rather than baked into the JS bundle — see below |
 
 ## Why a separate process from `dendrited`
 
@@ -19,7 +20,7 @@ The UI is stateless, unprivileged, and has no security boundary of its own to pr
 - it needs zero Linux capabilities and can be sandboxed harder than `dendrited` can be today (see `packaging/dendrite-ui.service`);
 - `dendrited` doesn't need a `DENDRITE_UI_DIR` config option or static-file-serving code path at all.
 
-The trade-off: the UI's JS now talks to `dendrited`'s HTTP/WebSocket port cross-origin rather than same-origin. See `docs/CONFIGURATION.md`'s "The UI, and its own process" section for how that's wired (`VITE_DENDRITE_API_BASE`/`VITE_DENDRITE_WS_URL` at UI build time, and `dendrited`'s own CORS origin allowlist in `http.rs`).
+The trade-off: the UI's JS may now need to talk to `dendrited`'s HTTP/WebSocket port cross-origin rather than same-origin. See `docs/CONFIGURATION.md`'s "The UI, and its own process" section for how that's wired: `dendrite-ui-server` reads `DENDRITE_UI_API_ORIGIN` once at startup and serves it to the browser as `/dendrite-config.json`, which the UI fetches once on load (`ui/src/api/runtimeConfig.ts`) — a deployment repointing the UI at a different `dendrited` origin is an env var change and a unit restart, not a rebuild of `ui/dist`. `dendrited`'s own CORS origin allowlist (`http.rs`) is the other half of making cross-origin calls actually work.
 
 ## Testing
 
