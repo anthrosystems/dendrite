@@ -61,6 +61,7 @@ assets = [
     ["../../ui/dist/**/*", "usr/share/dendrite/ui/", "644"],
     ["../../packaging/dendrited.env.example", "etc/dendrite/dendrited.env", "644"],
     ["../../packaging/dendrite-magi.env.example", "etc/dendrite/dendrite-magi.env", "644"],
+    ["../../packaging/dendrite.tmpfiles", "usr/lib/tmpfiles.d/dendrite.conf", "644"],
 ]
 
 # Four independent systemd units, one package: dendrited (the security

@@ -31,8 +31,14 @@ NoNewPrivileges=yes
 StateDirectory=dendrite
 StateDirectoryMode=0750
 ConfigurationDirectory=dendrite
-RuntimeDirectory=dendrite
-RuntimeDirectoryMode=0750
+# /run/dendrite (the socket directory) is deliberately NOT declared here as
+# a RuntimeDirectory=: this unit shares it with dendrite-magi.service and
+# dendrite-guard.service, and systemd removes a RuntimeDirectory= when the
+# first unit referencing it stops even while siblings sharing the same name
+# are still running (https://github.com/systemd/systemd/issues/5394). It's
+# provisioned instead by packaging/dendrite.tmpfiles, applied once at
+# install time (see packaging/postinst) and independent of any one unit's
+# lifecycle.
 
 Environment=DENDRITE_SELF_DB=/var/lib/dendrite/self.sqlite3
 Environment=DENDRITE_STM_DB=/var/lib/dendrite/stm.sqlite3

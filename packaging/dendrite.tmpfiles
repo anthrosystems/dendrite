@@ -1,0 +1,23 @@
+# /usr/lib/tmpfiles.d/dendrite.conf
+#
+# Provisions /run/dendrite independently of any single systemd unit's
+# lifecycle. dendrited.service, dendrite-magi.service and dendrite-guard.service
+# all put their Unix sockets here and used to each declare their own
+# `RuntimeDirectory=dendrite` pointing at the same shared name — but systemd
+# removes a RuntimeDirectory= when the *first* unit referencing it stops,
+# even while sibling units using the same directory are still running (see
+# https://github.com/systemd/systemd/issues/5394, still open). In practice
+# that meant `systemctl restart dendrite-guard` alone would delete
+# `/run/dendrite` out from under `dendrited` and `dendrite-magi`, unlinking
+# their still-listening sockets and leaving `dendrite-cli` (and the other
+# two processes' peers) unable to reconnect until *every* unit sharing the
+# directory happened to restart too.
+#
+# A tmpfiles.d-provisioned directory has no such lifecycle tie to any one
+# unit: it's created once at boot (and re-created if missing whenever
+# `systemd-tmpfiles --create` runs, e.g. via postinst on install/upgrade),
+# and none of the three services' own start/stop cycles touch it. See
+# packaging/postinst for the `systemd-tmpfiles --create` call that applies
+# this on install, and the three .service files' own comments for why they
+# no longer declare `RuntimeDirectory=`.
+d /run/dendrite 0750 dendrite dendrite -

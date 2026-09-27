@@ -25,6 +25,33 @@ case "$1" in
                 --home /var/lib/dendrite --shell /usr/sbin/nologin \
                 --gecos "Dendrite endpoint security daemon" dendrite
         fi
+
+        # /run/dendrite is shared across dendrited.service, dendrite-magi.service
+        # and dendrite-guard.service, and systemd deletes a RuntimeDirectory=
+        # entirely when the first unit referencing it stops, even while
+        # siblings sharing that name are still running
+        # (https://github.com/systemd/systemd/issues/5394) - so none of those
+        # three units declare RuntimeDirectory= any more. Provision it here via
+        # the tmpfiles.d snippet in packaging/dendrite.tmpfiles instead, which
+        # has no such per-unit lifecycle; this also means a fresh install's
+        # first `systemctl start` doesn't have to wait for the next boot.
+        if command -v systemd-tmpfiles >/dev/null 2>&1; then
+            systemd-tmpfiles --create /usr/lib/tmpfiles.d/dendrite.conf || true
+        fi
+
+        # dendrite-cli talks to dendrited over a socket that's 0660 and
+        # group-owned `dendrite` (see docs/CONFIGURATION.md); without this,
+        # the person who just ran `apt install` has no way to use the CLI
+        # against a packaged install without sudo. Best-effort: only when we
+        # can tell who invoked us (via sudo) and it isn't root already.
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] \
+            && getent passwd "$SUDO_USER" >/dev/null; then
+            if ! id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx dendrite; then
+                if adduser "$SUDO_USER" dendrite >/dev/null 2>&1; then
+                    echo "dendrited: added '$SUDO_USER' to the 'dendrite' group so dendrite-cli can reach the daemon without sudo - log out and back in (or run 'newgrp dendrite') for this to take effect." >&2
+                fi
+            fi
+        fi
         ;;
 esac
 

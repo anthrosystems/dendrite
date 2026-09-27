@@ -37,10 +37,19 @@ NoNewPrivileges=yes
 # guard.sqlite3 (a distinct file, not shared access to dendrited's other
 # databases) and its /run/dendrite runtime directory for the socket, so
 # both processes agree on paths without a second directory to keep in sync.
+# StateDirectory= is safe to share (systemd never removes it on a unit
+# stop, unlike RuntimeDirectory=), but /run/dendrite is deliberately NOT
+# declared as a RuntimeDirectory= here: systemd removes a RuntimeDirectory=
+# when the first unit referencing it stops, even while sibling units
+# sharing the same name (dendrited.service, dendrite-magi.service) are
+# still running (https://github.com/systemd/systemd/issues/5394) —
+# restarting this unit alone would delete dendrited's and dendrite-magi's
+# still-listening sockets out from under them (this is exactly what a real
+# Checkpoint-B install hit). /run/dendrite is provisioned instead by
+# packaging/dendrite.tmpfiles, applied once at install time (see
+# packaging/postinst) and independent of any one unit's lifecycle.
 StateDirectory=dendrite
 StateDirectoryMode=0750
-RuntimeDirectory=dendrite
-RuntimeDirectoryMode=0750
 
 Environment=DENDRITE_GUARD_DB=/var/lib/dendrite/guard.sqlite3
 Environment=DENDRITE_GUARD_SOCKET=/run/dendrite/dendrite-guard.sock
