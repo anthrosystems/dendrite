@@ -61,6 +61,24 @@ done
 
 echo "== Dendrite local bootstrap =="
 
+# cargo install/cargo binstall always place user-level tool binaries (like
+# cargo-binstall itself, and bpf-linker below) in $CARGO_HOME/bin regardless
+# of how the toolchain itself got installed. The rustup.rs shell installer
+# adds this to PATH via ~/.cargo/env, sourced below right after installing
+# it — but that only runs when this script is the one installing rustup. A
+# system that already has a working `cargo` (e.g. a distro-packaged rustup,
+# which some recent Ubuntu releases ship system-wide under /usr/bin) skips
+# that branch entirely, and this directory is then silently missing from
+# PATH for the rest of this script — breaking cargo-binstall's own
+# --self-install (it warns and exits rather than failing loudly) and
+# `command -v cargo-binstall` right after it, which together send the eBPF
+# section down its from-source `cargo install bpf-linker` fallback instead
+# — a path that needs a matching local LLVM/llvm-config and is exactly the
+# failure this line prevents. Harmless no-op if the directory doesn't exist
+# yet; `source "$HOME/.cargo/env"` below still runs too when applicable, it
+# just has nothing left to add at that point.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 APT_UPDATED=0
 ensure_apt_packages() {
     if ! command -v apt-get >/dev/null 2>&1; then
