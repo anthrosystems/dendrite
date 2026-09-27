@@ -14,6 +14,7 @@ pub enum Command {
     Incident(String),
     MemoryNodes {
         kind: Option<String>,
+        limit: usize,
     },
     MemoryRecent {
         limit: usize,
@@ -144,13 +145,34 @@ impl Command {
                 Self::Incident(id.clone())
             }
             [command, subcommand] if command == "memory" && subcommand == "nodes" => {
-                Self::MemoryNodes { kind: None }
+                Self::MemoryNodes {
+                    kind: None,
+                    limit: DEFAULT_RECENT_LIMIT,
+                }
+            }
+            [command, subcommand, limit] if command == "memory" && subcommand == "nodes" => {
+                match limit.parse::<usize>() {
+                    Ok(limit) => Self::MemoryNodes { kind: None, limit },
+                    Err(_) => Self::Help(HelpTopic::Memory),
+                }
             }
             [command, subcommand, flag, kind]
                 if command == "memory" && subcommand == "nodes" && flag == "--kind" =>
             {
                 Self::MemoryNodes {
                     kind: Some(kind.clone()),
+                    limit: DEFAULT_RECENT_LIMIT,
+                }
+            }
+            [command, subcommand, flag, kind, limit]
+                if command == "memory" && subcommand == "nodes" && flag == "--kind" =>
+            {
+                match limit.parse::<usize>() {
+                    Ok(limit) => Self::MemoryNodes {
+                        kind: Some(kind.clone()),
+                        limit,
+                    },
+                    Err(_) => Self::Help(HelpTopic::Memory),
                 }
             }
             [command, subcommand] if command == "memory" && subcommand == "recent" => {
@@ -297,7 +319,7 @@ impl Command {
             Self::Status => Some(IpcRequest::Status),
             Self::Incidents => Some(IpcRequest::Incidents),
             Self::Incident(id) => Some(IpcRequest::Incident { id: id.clone() }),
-            Self::MemoryNodes { kind } => Some(IpcRequest::MemoryNodes { kind: kind.clone() }),
+            Self::MemoryNodes { kind, .. } => Some(IpcRequest::MemoryNodes { kind: kind.clone() }),
             Self::MemoryRecent { limit } => Some(IpcRequest::MemoryRecent { limit: *limit }),
             Self::MemoryNeighbours(node_id) => Some(IpcRequest::MemoryNeighbours {
                 node_id: node_id.clone(),
@@ -394,6 +416,16 @@ pub fn execute(command: &Command, socket_path: &Path) -> Result<String, ClientEr
     match command {
         Command::Version => Ok(format!("dendrite {}", env!("CARGO_PKG_VERSION"))),
         Command::Help(topic) => Ok(help(*topic)),
+        Command::MemoryNodes { limit, .. } => {
+            let response = send(
+                socket_path,
+                command.request().expect("IPC command has request"),
+            )?;
+            match response {
+                IpcResponse::MemoryNodes { nodes } => Ok(render_memory_nodes(&nodes, *limit)),
+                other => Ok(render_response(&other)),
+            }
+        }
         _ => {
             let response = send(
                 socket_path,
@@ -799,6 +831,28 @@ fn render_nodes(nodes: &[MemoryNodeDto]) -> String {
         .join("\n")
 }
 
+/// Unlike `memory recent`/`memory graph`, the daemon's `MemoryNodes` IPC
+/// response is unbounded by design (it feeds the HTTP API's own node
+/// listing too, which the UI paginates/searches itself) — so `memory
+/// nodes` must cap what actually gets printed to the terminal itself,
+/// rather than dumping every node in the graph. `limit == 0` means
+/// unlimited, matching the `limit == 0` convention `memory_graph` already
+/// uses elsewhere in the daemon.
+fn render_memory_nodes(nodes: &[MemoryNodeDto], limit: usize) -> String {
+    if nodes.is_empty() {
+        return "No memory nodes.".into();
+    }
+    if limit == 0 || nodes.len() <= limit {
+        return render_nodes(nodes);
+    }
+    let shown = render_nodes(&nodes[..limit]);
+    format!(
+        "{shown}\n... and {} more (raise the limit, e.g. `memory nodes {}`, add `--kind` to narrow, or pass `0` for no limit)",
+        nodes.len() - limit,
+        nodes.len(),
+    )
+}
+
 fn help(topic: HelpTopic) -> String {
     match topic {
         HelpTopic::General => help_general(),
@@ -826,7 +880,7 @@ fn help_incidents() -> String {
 
 fn help_memory() -> String {
     format!(
-        "Usage:\n  dendrite memory nodes [--kind <KIND>]\n  dendrite memory recent [LIMIT]\n  dendrite memory neighbours <NODE>\n  dendrite memory path <SOURCE> <TARGET>\n\n  memory nodes                   List known Memory Graph nodes\n  memory nodes --kind <KIND>     Filter nodes by kind\n  memory recent [LIMIT]          Show recently seen nodes (default: {})\n  memory neighbours <NODE>       List neighbouring node IDs\n  memory path <SOURCE> <TARGET>  Find a graph path\n\nNode kinds:\n  process, file, user, host, network_endpoint, service, container, incident, threat",
+        "Usage:\n  dendrite memory nodes [--kind <KIND>] [LIMIT]\n  dendrite memory recent [LIMIT]\n  dendrite memory neighbours <NODE>\n  dendrite memory path <SOURCE> <TARGET>\n\n  memory nodes                       List known Memory Graph nodes (default: first {0}, 0 for no limit)\n  memory nodes --kind <KIND> [LIMIT]  Filter nodes by kind, and/or set the limit\n  memory recent [LIMIT]              Show recently seen nodes (default: {0})\n  memory neighbours <NODE>           List neighbouring node IDs\n  memory path <SOURCE> <TARGET>      Find a graph path\n\nNode kinds:\n  process, file, user, host, network_endpoint, service, container, incident, threat",
         DEFAULT_RECENT_LIMIT
     )
 }
@@ -884,7 +938,48 @@ mod tests {
         assert_eq!(
             Command::parse(&args(&["memory", "nodes", "--kind", "process"])),
             Command::MemoryNodes {
-                kind: Some("process".into())
+                kind: Some("process".into()),
+                limit: DEFAULT_RECENT_LIMIT,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_memory_nodes_with_no_arguments_using_the_default_limit() {
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes"])),
+            Command::MemoryNodes {
+                kind: None,
+                limit: DEFAULT_RECENT_LIMIT,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_memory_nodes_bare_limit() {
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes", "100"])),
+            Command::MemoryNodes {
+                kind: None,
+                limit: 100,
+            }
+        );
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes", "0"])),
+            Command::MemoryNodes {
+                kind: None,
+                limit: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_memory_nodes_kind_filter_with_limit() {
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes", "--kind", "process", "5"])),
+            Command::MemoryNodes {
+                kind: Some("process".into()),
+                limit: 5,
             }
         );
     }
@@ -1025,6 +1120,20 @@ mod tests {
         assert_eq!(
             Command::parse(&args(&["telemetry", "recent", "not-a-number"])),
             Command::Help(HelpTopic::Telemetry)
+        );
+        assert_eq!(
+            Command::parse(&args(&["memory", "nodes", "not-a-number"])),
+            Command::Help(HelpTopic::Memory)
+        );
+        assert_eq!(
+            Command::parse(&args(&[
+                "memory",
+                "nodes",
+                "--kind",
+                "process",
+                "not-a-number"
+            ])),
+            Command::Help(HelpTopic::Memory)
         );
     }
 

@@ -24,7 +24,7 @@ http-token
 version
 incidents
 incidents <id>
-memory nodes [--kind <kind>]
+memory nodes [--kind <kind>] [limit]
 memory recent [limit]
 memory neighbours <node-id>
 memory path <source-id> <target-id>
@@ -65,6 +65,7 @@ debug guard-finding <target> <severity> <description>
 - `vulnerability import` validates behaviour conditions strictly and rejects the whole import on the first invalid one (see "CVE knowledge bundle format" below) rather than importing partial/best-effort data.
 - Debug commands are development-only surfaces and should not be treated as production operator APIs.
 - `http-token` prints the bearer token that gates `dendrited`'s HTTP API and `/ws` WebSocket upgrade (see `docs/CONFIGURATION.md`'s "HTTP API authentication" section). It's deliberately the only way to retrieve it — the HTTP API never serves it over itself. The local dev UI (`npm run dev`) never needs this pasted in by hand; it's only for the packaged UI's one-time token-entry prompt, or for a manual `curl`/script against the HTTP API.
+- `memory nodes` caps what it prints to the terminal at 20 by default (the daemon's own `MemoryNodes` query is unbounded, since it also backs the HTTP API's node listing, which the UI paginates/searches itself) — pass an explicit `[limit]` to see more, or `0` for no limit at all.
 
 Analysis/Antiserum and Vulnerability Candidate management currently live in the HTTP/UI surface rather than the CLI. A later CLI update should add feature parity deliberately rather than exposing raw file/database primitives.
 
