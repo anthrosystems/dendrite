@@ -270,14 +270,11 @@ Possible future stopping criteria include no novel behaviour for N runs, no newl
 
 ## Future: Obsidian plugin
 
-Either:
-
-- export selected Dendrite knowledge to Obsidian; or
-- provide a live **one-way** Dendrite → Obsidian connection.
+Export-only, deliberately: a plugin/script that exports selected Dendrite knowledge into an Obsidian vault as Markdown notes. No live sync is planned — each export is a one-shot snapshot the operator re-runs by hand (or schedules themselves), not an ongoing background connection Dendrite maintains to Obsidian.
 
 This must remain an observation/export integration and must not grant Obsidian execution authority over Dendrite.
 
-**Realistic beyond novelty, if scoped as a living export rather than a one-off dump.** Dendrite already has the raw material a plugin like this would need — persistent incidents/evidence, a Memory Graph with real relationships, correlation keys, and the existing Antiserum export format as a template for "here is a consistent, signed snapshot of what I know." A plugin that periodically (or on `/ws` events) writes one Markdown note per incident/node, cross-linked via `[[wikilinks]]` from the graph's own relationships, would give an operator a genuinely useful, searchable, linkable security journal inside a tool they already use for notes — closer to a read-only mirror than a gimmick. What would make it a novelty instead: trying to replicate the Memory Graph's live interactivity inside Obsidian (fighting the tool rather than using it), or scoping it as a one-time export rather than an ongoing sync. Lower priority than Batch 7/8 core work either way.
+**Realistic beyond novelty even scoped this way.** Dendrite already has the raw material a plugin like this would need — persistent incidents/evidence, a Memory Graph with real relationships, correlation keys, and the existing Antiserum export format as a template for "here is a consistent, signed snapshot of what I know." An export that writes one Markdown note per incident/node, cross-linked via `[[wikilinks]]` from the graph's own relationships, would give an operator a genuinely useful, searchable, linkable security journal inside a tool they already use for notes. Lower priority than Batch 7/8 core work either way.
 
 ## Future: eBPF pre-filtering for file events
 

@@ -97,6 +97,21 @@ Two different things, don't conflate them (see `docs/ROADMAP.md`'s Batch 7):
   `/var/lib/dendrite` (via systemd's `StateDirectory=`, same survival
   rules).
 
+## Keeping scripts compatible with code changes
+
+`scripts/` (`bootstrap.sh`, `build-deb.sh`, `build-ebpf.sh`, `launch_host_a.sh`,
+`launch_host_XYZ.sh`) and the packaging maintainer scripts (`packaging/postinst`,
+`postrm`, the `.service` units) are real consumers of this codebase's env vars,
+paths, socket names, and binary/build layout, not just docs. Whenever a code
+change touches any of those — a new `DENDRITE_*` env var, a renamed/moved
+default path, a new build artifact or output directory, a changed CLI
+subcommand or flag one of these scripts calls, a new systemd unit or
+capability requirement — check every script/unit file that could reference
+the old shape and update it in the same change, not as a follow-up. A script
+that silently drifts out of sync fails at run time on someone else's machine,
+often long after the code change that broke it, which is much more expensive
+to debug than fixing it while the change is still in front of you.
+
 ## Testing
 
 Inline `#[cfg(test)]` modules exist across most `dendrited` source files —
