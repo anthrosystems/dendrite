@@ -36,6 +36,32 @@ type Props = {
   onSelect: (node: MemoryNode | null) => void
 }
 
+// Per-node velocity clamp applied every simulation frame, after all forces
+// for that frame have accumulated but before damping/integration. This is a
+// hard safety net independent of any GraphSettings slider: no reasonable
+// combination of forces should ever be able to fling a node further than
+// this per frame, so a bug or an unusually dense graph produces a capped
+// (if still visibly energetic) settle rather than nodes rocketing off
+// past the visible canvas. See MAX_CLUSTER_SPAWN_RADIUS below for the
+// other half of the fix — this clamp bounds the *symptom*, that bounds
+// the *cause*.
+const MAX_NODE_SPEED = 30
+
+// Upper bound on how far a newly-spawned node can start from its cluster's
+// anchor point. The radius already scales with sqrt(cluster size) so
+// spawn density stays roughly constant as a cluster grows — that's the
+// right shape — but it used to additionally hard-cap at 120px regardless
+// of cluster size, so any cluster past a few hundred nodes packed far
+// more densely than the sqrt scaling intended. At 10k+ nodes concentrated
+// in one or two kind clusters, that meant nearly every node spawned
+// overlapping several others, and the resulting repulsion saturated on
+// nearly every pairwise sample at once — visually, the graph "exploding"
+// outward on first render/reheat before settling. Raising the cap here
+// keeps density roughly constant up to much larger clusters; 480px
+// comfortably covers a single cluster of ~10-11k nodes before the cap
+// would even engage.
+const MAX_CLUSTER_SPAWN_RADIUS = 480
+
 const NODE_COLOURS: Record<string, [number, number, number]> = {
   process: [0.56, 0.85, 0.64],
   file: [0.67, 0.65, 0.86],
@@ -288,7 +314,8 @@ export function WebGLMemoryGraph({
       const seed = hash(node.id)
       const anchor = anchors.get(cluster) ?? { x: 0, y: 0, z: 0 }
       const angle = random01(seed, 2) * Math.PI * 2
-      const radial = 18 + Math.sqrt(random01(seed, 3)) * Math.min(120, 26 + Math.sqrt(clusterCounts.get(cluster) ?? 1) * 4.6)
+      const radial =
+        18 + Math.sqrt(random01(seed, 3)) * Math.min(MAX_CLUSTER_SPAWN_RADIUS, 26 + Math.sqrt(clusterCounts.get(cluster) ?? 1) * 4.6)
       return {
         ...node,
         cluster,
@@ -503,6 +530,11 @@ export function WebGLMemoryGraph({
       let movement = 0
       for (const node of nodes) {
         if (dragRef.current?.node === node) continue
+        const speedSq = node.vx * node.vx + node.vy * node.vy + node.vz * node.vz
+        if (speedSq > MAX_NODE_SPEED * MAX_NODE_SPEED) {
+          const scale = MAX_NODE_SPEED / Math.sqrt(speedSq)
+          node.vx *= scale; node.vy *= scale; node.vz *= scale
+        }
         node.vx *= damping; node.vy *= damping; node.vz *= damping
         node.x += node.vx * speed; node.y += node.vy * speed
         if (mode === '3d') node.z += node.vz * speed

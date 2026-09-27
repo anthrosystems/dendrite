@@ -41,12 +41,19 @@ const retentionDescriptions: Record<string, string> = {
   persistent: 'Authority/system memory intended to survive normal decay.',
 }
 
+// Tuned after a real-world graph reached ~10k nodes and the default
+// repel/centre/separation balance caused a visible "explosion" on
+// render/reheat before settling (see WebGLMemoryGraph.tsx's
+// MAX_CLUSTER_SPAWN_RADIUS/MAX_NODE_SPEED comments for the underlying
+// density-scaling fix — these defaults are the other half: less outward
+// push, more inward pull, so even a dense graph settles calmly instead of
+// relying on the safety-net clamp to catch it).
 const defaultSettings: GraphSettings = {
   nodeScale: 1,
   linkScale: 1,
   labelThreshold: 1.05,
-  centreForce: 0.45,
-  repelForce: 0.8,
+  centreForce: 1.2,
+  repelForce: 0.25,
   linkForce: 1.15,
   linkDistance: 92,
   showArrows: false,
@@ -54,7 +61,7 @@ const defaultSettings: GraphSettings = {
   strengthEncoding: 'both',
   clusterByKind: true,
   groupCohesion: 1.7,
-  groupSeparation: 1.35,
+  groupSeparation: 0.7,
   interGroupAttraction: 0.75,
 }
 
