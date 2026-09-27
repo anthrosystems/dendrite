@@ -26,17 +26,13 @@ const graphSettings: GraphSettings = {
   nodeScale: 1,
   linkScale: 1,
   labelThreshold: 1.05,
-  centreForce: 0.45,
-  repelForce: 0.8,
+  centreForce: 1.2,
+  repelForce: 0.25,
   linkForce: 1.15,
   linkDistance: 92,
   showArrows: false,
   relationshipStrengthMin: 0,
   strengthEncoding: 'both',
-  clusterByKind: true,
-  groupCohesion: 1.7,
-  groupSeparation: 1.35,
-  interGroupAttraction: 0.75,
 }
 
 type TopTab = 'review' | 'import' | 'create' | 'candidate'

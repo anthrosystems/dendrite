@@ -12,10 +12,6 @@ export type GraphSettings = {
   showArrows: boolean
   relationshipStrengthMin: number
   strengthEncoding: 'colour' | 'width' | 'both'
-  clusterByKind: boolean
-  groupCohesion: number
-  groupSeparation: number
-  interGroupAttraction: number
 }
 
 interface Props {

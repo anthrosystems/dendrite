@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MemoryGraph, MemoryNode, MemoryRelationship } from '../api/types'
 import type { GraphSettings } from './ForceGraph'
+import { kindColourRgb01 } from '../utils/nodeColours'
 
 type Mode = '2d' | '3d'
 
@@ -13,7 +14,6 @@ type SimNode = MemoryNode & {
   vz: number
   radius: number
   degree: number
-  cluster: string
 }
 
 type ViewState = {
@@ -42,37 +42,27 @@ type Props = {
 // combination of forces should ever be able to fling a node further than
 // this per frame, so a bug or an unusually dense graph produces a capped
 // (if still visibly energetic) settle rather than nodes rocketing off
-// past the visible canvas. See MAX_CLUSTER_SPAWN_RADIUS below for the
-// other half of the fix — this clamp bounds the *symptom*, that bounds
-// the *cause*.
+// past the visible canvas. See SPAWN_SPACING below for the other half of
+// the fix — this clamp bounds the *symptom*, that bounds the *cause*.
 const MAX_NODE_SPEED = 30
 
-// Upper bound on how far a newly-spawned node can start from its cluster's
-// anchor point. The radius already scales with sqrt(cluster size) so
-// spawn density stays roughly constant as a cluster grows — that's the
-// right shape — but it used to additionally hard-cap at 120px regardless
-// of cluster size, so any cluster past a few hundred nodes packed far
-// more densely than the sqrt scaling intended. At 10k+ nodes concentrated
-// in one or two kind clusters, that meant nearly every node spawned
-// overlapping several others, and the resulting repulsion saturated on
-// nearly every pairwise sample at once — visually, the graph "exploding"
-// outward on first render/reheat before settling. Raising the cap here
-// keeps density roughly constant up to much larger clusters; 480px
-// comfortably covers a single cluster of ~10-11k nodes before the cap
-// would even engage.
-const MAX_CLUSTER_SPAWN_RADIUS = 480
-
-const NODE_COLOURS: Record<string, [number, number, number]> = {
-  process: [0.56, 0.85, 0.64],
-  file: [0.67, 0.65, 0.86],
-  threat: [0.94, 0.52, 0.52],
-  host: [0.87, 0.77, 0.44],
-  network_endpoint: [0.47, 0.73, 0.87],
-  service: [0.84, 0.60, 0.85],
-  user: [0.95, 0.83, 0.37],
-  container: [0.54, 0.78, 0.74],
-  incident: [0.91, 0.53, 0.53],
-}
+// Newly-spawned nodes are placed on a global Vogel/Fibonacci golden-angle
+// spiral (no per-kind grouping — Dendrite previously assigned every node an
+// artificial per-kind/per-label cluster and anchored spirals per-cluster;
+// that's been removed in favour of pure link+repel+centre physics, matching
+// the minimal force model real graph-visualisation tools such as Obsidian's
+// graph view use) sized so density stays roughly constant as the graph
+// grows. This constant is the per-node spacing factor: spawn radius for
+// the node at spiral index i is SPAWN_SPACING * sqrt(i). Previously,
+// nodes spawned inside a hard-capped-at-120px per-kind cluster anchor,
+// which packed far too densely past a few hundred nodes per cluster —
+// at 10k+ nodes concentrated in one or two kind clusters, that meant
+// nearly every node spawned overlapping several others, and the resulting
+// repulsion saturated on nearly every pairwise sample at once — visually,
+// the graph "exploding" outward on first render/reheat before settling.
+// A global spiral with constant per-node spacing avoids that density trap
+// at any node count, with no hard cap needed.
+const SPAWN_SPACING = 14
 
 function hash(value: string) {
   let h = 2166136261
@@ -89,7 +79,7 @@ function random01(seed: number, salt: number) {
 }
 
 function nodeColour(kind: string) {
-  return NODE_COLOURS[kind] ?? [0.59, 0.64, 0.61]
+  return kindColourRgb01(kind)
 }
 
 function lifetimeOpacity(retention: string, createdAt: number, expiresAt: number | null, nowSeconds: number) {
@@ -110,41 +100,6 @@ function strengthColour(strength: number): [number, number, number] {
   const value = Math.max(0, Math.min(100, strength)) / 100
   const level = 0.30 + value * 0.62
   return [level, level, level]
-}
-
-function semanticFamily(node: MemoryNode) {
-  const label = (node.label || node.id).toLowerCase().trim()
-  if (node.kind === 'process') {
-    const token = label.split(/\s+/)[0]?.split('/').pop() || 'process'
-    return token.replace(/[^a-z0-9._+-]/g, '').slice(0, 28) || 'process'
-  }
-  if (node.kind === 'file') {
-    if (label.includes('/.git/') || label.endsWith('/.git')) return 'git'
-    const clean = label.replace(/^file:/, '')
-    const parts = clean.split('/').filter(Boolean)
-    if (parts.length >= 2) return `${parts[0]}/${parts[1]}`.slice(0, 32)
-    return (parts[0] || 'file').slice(0, 32)
-  }
-  if (node.kind === 'network_endpoint') {
-    return label.replace(/^network:/, '').split(':')[0].slice(0, 32) || 'network'
-  }
-  const token = label.split(/[\s:/]/).filter(Boolean)[0]
-  return (token || node.kind).slice(0, 28)
-}
-
-function makeClusterAssignments(nodes: MemoryNode[]) {
-  const raw = new Map<string, number>()
-  for (const node of nodes) {
-    const key = `${node.kind}:${semanticFamily(node)}`
-    raw.set(key, (raw.get(key) ?? 0) + 1)
-  }
-  const assignment = new Map<string, string>()
-  for (const node of nodes) {
-    const rawKey = `${node.kind}:${semanticFamily(node)}`
-    const count = raw.get(rawKey) ?? 0
-    assignment.set(node.id, count >= 4 ? rawKey : `${node.kind}:other`)
-  }
-  return assignment
 }
 
 function createShader(gl: WebGL2RenderingContext, type: number, source: string) {
@@ -277,51 +232,34 @@ export function WebGLMemoryGraph({
       degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1)
     }
 
-    const assignments = makeClusterAssignments(graph.nodes)
-    const clusterCounts = new Map<string, number>()
-    for (const cluster of assignments.values()) clusterCounts.set(cluster, (clusterCounts.get(cluster) ?? 0) + 1)
-    const clusterKeys = [...clusterCounts.keys()].sort((a, b) => {
-      const countDiff = (clusterCounts.get(b) ?? 0) - (clusterCounts.get(a) ?? 0)
-      return countDiff || a.localeCompare(b)
-    })
-
-    const anchors = new Map<string, { x: number; y: number; z: number }>()
+    // Global Vogel/Fibonacci golden-angle spiral: node i sits at radius
+    // SPAWN_SPACING * sqrt(i), angle i * golden-angle. This keeps spawn
+    // density constant regardless of node count (no per-kind anchors, no
+    // hard radius cap) and starting positions already trace a rough ring,
+    // which the link+repel+centre physics below then relaxes into a real
+    // topology-driven layout rather than fighting an artificial grouping.
     const golden = Math.PI * (3 - Math.sqrt(5))
-    const total = Math.max(clusterKeys.length, 1)
-    clusterKeys.forEach((cluster, index) => {
-      const seed = hash(`cluster:${cluster}`)
-      const fraction = total <= 1 ? 0 : index / (total - 1)
-      const radius = 180 + Math.sqrt(fraction) * 720
-      const angle = index * golden + (random01(seed, 7) - 0.5) * 0.22
-      anchors.set(cluster, {
-        x: Math.cos(angle) * radius,
-        y: Math.sin(angle) * radius,
-        z: (random01(seed, 19) - 0.5) * 720,
-      })
-    })
 
     const previous = new Map(nodesRef.current.map(node => [node.id, node]))
+    let spawnIndex = 0
     nodesRef.current = graph.nodes.map(node => {
-      const cluster = assignments.get(node.id) ?? `${node.kind}:other`
       const existing = previous.get(node.id)
       if (existing) return {
         ...existing,
         ...node,
-        cluster,
         degree: degree.get(node.id) ?? 0,
         radius: Math.min(3.1 + Math.sqrt(degree.get(node.id) ?? 0) * 0.72, 11),
       }
       const seed = hash(node.id)
-      const anchor = anchors.get(cluster) ?? { x: 0, y: 0, z: 0 }
-      const angle = random01(seed, 2) * Math.PI * 2
-      const radial =
-        18 + Math.sqrt(random01(seed, 3)) * Math.min(MAX_CLUSTER_SPAWN_RADIUS, 26 + Math.sqrt(clusterCounts.get(cluster) ?? 1) * 4.6)
+      const i = spawnIndex
+      spawnIndex += 1
+      const radius = SPAWN_SPACING * Math.sqrt(i)
+      const angle = i * golden + (random01(seed, 7) - 0.5) * 0.18
       return {
         ...node,
-        cluster,
-        x: anchor.x + Math.cos(angle) * radial,
-        y: anchor.y + Math.sin(angle) * radial,
-        z: anchor.z + (random01(seed, 4) - 0.5) * radial * 1.5,
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+        z: (random01(seed, 19) - 0.5) * radius * 0.6,
         vx: 0,
         vy: 0,
         vz: 0,
@@ -447,65 +385,6 @@ export function WebGLMemoryGraph({
         a.vx += dx / distance * force; a.vy += dy / distance * force
         b.vx -= dx / distance * force; b.vy -= dy / distance * force
         if (mode === '3d') { a.vz += dz / distance * force; b.vz -= dz / distance * force }
-      }
-
-      const clusters = new Map<string, { nodes: SimNode[]; x: number; y: number; z: number }>()
-      for (const node of nodes) {
-        const cluster = clusters.get(node.cluster) ?? { nodes: [], x: 0, y: 0, z: 0 }
-        cluster.nodes.push(node); cluster.x += node.x; cluster.y += node.y; cluster.z += node.z
-        clusters.set(node.cluster, cluster)
-      }
-      for (const cluster of clusters.values()) {
-        const count = Math.max(cluster.nodes.length, 1)
-        cluster.x /= count; cluster.y /= count; cluster.z /= count
-        for (const node of cluster.nodes) {
-          node.vx += (cluster.x - node.x) * settings.groupCohesion * 0.000045 * speed
-          node.vy += (cluster.y - node.y) * settings.groupCohesion * 0.000045 * speed
-          if (mode === '3d') node.vz += (cluster.z - node.z) * settings.groupCohesion * 0.000035 * speed
-        }
-      }
-
-      const aggregate = new Map<string, { sum: number; count: number }>()
-      for (const edge of edges) {
-        const a = index.get(edge.source)!
-        const b = index.get(edge.target)!
-        if (a.cluster === b.cluster) continue
-        const key = a.cluster < b.cluster ? `${a.cluster}\u0000${b.cluster}` : `${b.cluster}\u0000${a.cluster}`
-        const value = aggregate.get(key) ?? { sum: 0, count: 0 }
-        value.sum += edge.effective_strength; value.count += 1
-        aggregate.set(key, value)
-      }
-
-      const clusterEntries = [...clusters.entries()]
-      const clusterForce = new Map(clusterEntries.map(([key]) => [key, { x: 0, y: 0, z: 0 }]))
-      for (let i = 0; i < clusterEntries.length; i += 1) {
-        const [keyA, a] = clusterEntries[i]
-        for (let j = i + 1; j < clusterEntries.length; j += 1) {
-          const [keyB, b] = clusterEntries[j]
-          let dx = b.x - a.x, dy = b.y - a.y, dz = mode === '3d' ? b.z - a.z : 0
-          let distanceSq = dx * dx + dy * dy + dz * dz
-          if (distanceSq < 16) { dx = 4; dy = 0; dz = 0; distanceSq = 16 }
-          const distance = Math.sqrt(distanceSq)
-          const separation = Math.min(0.20, settings.groupSeparation * 8500 / distanceSq) * speed
-          const relationKey = keyA < keyB ? `${keyA}\u0000${keyB}` : `${keyB}\u0000${keyA}`
-          const relation = aggregate.get(relationKey)
-          const attraction = relation
-            ? (relation.sum / relation.count / 100) * Math.min(2.0, 0.7 + Math.log2(relation.count + 1) * 0.18) * settings.interGroupAttraction * 0.055 * speed
-            : 0
-          const net = attraction - separation
-          const fx = dx / distance * net, fy = dy / distance * net, fz = dz / distance * net
-          const fa = clusterForce.get(keyA)!; const fb = clusterForce.get(keyB)!
-          fa.x += fx; fa.y += fy; fa.z += fz
-          fb.x -= fx; fb.y -= fy; fb.z -= fz
-        }
-      }
-      for (const [key, cluster] of clusters) {
-        const force = clusterForce.get(key)!
-        const countScale = 1 / Math.sqrt(Math.max(cluster.nodes.length, 1))
-        for (const node of cluster.nodes) {
-          node.vx += force.x * countScale; node.vy += force.y * countScale
-          if (mode === '3d') node.vz += force.z * countScale
-        }
       }
 
       const samples = nodes.length > 12000 ? 5 : nodes.length > 6000 ? 8 : 14

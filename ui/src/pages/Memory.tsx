@@ -7,31 +7,11 @@ import { Icons } from '../components/Icons'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
 import { usePolling } from '../hooks/usePolling'
+import { KIND_COLOURS_HEX, KIND_ORDER } from '../utils/nodeColours'
 import { instanceLabel, lineageLabel, localObjectId, provenanceBadge } from '../utils/provenance'
 
-const kindOrder = [
-  'process',
-  'file',
-  'host',
-  'network_endpoint',
-  'service',
-  'user',
-  'container',
-  'incident',
-  'threat',
-]
-
-const kindColours: Record<string, string> = {
-  process: '#8fd8a3',
-  file: '#aaa5dc',
-  threat: '#ef8484',
-  host: '#dfc46f',
-  network_endpoint: '#78b9df',
-  service: '#d59ad8',
-  user: '#f2d35f',
-  container: '#89c8bd',
-  incident: '#e88787',
-}
+const kindOrder: readonly string[] = KIND_ORDER
+const kindColours = KIND_COLOURS_HEX
 
 const retentionOrder = ['short_term', 'long_term', 'persistent'] as const
 
@@ -42,12 +22,17 @@ const retentionDescriptions: Record<string, string> = {
 }
 
 // Tuned after a real-world graph reached ~10k nodes and the default
-// repel/centre/separation balance caused a visible "explosion" on
-// render/reheat before settling (see WebGLMemoryGraph.tsx's
-// MAX_CLUSTER_SPAWN_RADIUS/MAX_NODE_SPEED comments for the underlying
-// density-scaling fix — these defaults are the other half: less outward
-// push, more inward pull, so even a dense graph settles calmly instead of
-// relying on the safety-net clamp to catch it).
+// repel/centre balance caused a visible "explosion" on render/reheat
+// before settling (see WebGLMemoryGraph.tsx's SPAWN_SPACING/MAX_NODE_SPEED
+// comments for the underlying density-scaling fix — these defaults are
+// the other half: less outward push, more inward pull, so even a dense
+// graph settles calmly instead of relying on the safety-net clamp to catch
+// it). The artificial per-kind clustering forces (group cohesion/
+// separation/inter-group attraction) have since been removed entirely in
+// favour of pure link+repel+centre physics — matching the minimal Forces
+// model real graph tools such as Obsidian's graph view use — so layout now
+// emerges purely from real link topology instead of a kind-based grouping
+// heuristic.
 const defaultSettings: GraphSettings = {
   nodeScale: 1,
   linkScale: 1,
@@ -59,10 +44,6 @@ const defaultSettings: GraphSettings = {
   showArrows: false,
   relationshipStrengthMin: 0,
   strengthEncoding: 'both',
-  clusterByKind: true,
-  groupCohesion: 1.7,
-  groupSeparation: 0.7,
-  interGroupAttraction: 0.75,
 }
 
 
@@ -386,10 +367,6 @@ export function Memory() {
       || key === 'repelForce'
       || key === 'linkForce'
       || key === 'linkDistance'
-      || key === 'clusterByKind'
-      || key === 'groupCohesion'
-      || key === 'groupSeparation'
-      || key === 'interGroupAttraction'
     ) {
       setReheatToken(value => value + 1)
     }
@@ -663,20 +640,6 @@ export function Memory() {
                   open={sections.forces}
                   onToggle={() => toggleSection('forces')}
                 >
-                  <label className="graph-toggle-row">
-                    <span>Cluster related node families</span>
-                    <input
-                      type="checkbox"
-                      checked={settings.clusterByKind}
-                      onChange={event => updateSetting('clusterByKind', event.target.checked)}
-                    />
-                  </label>
-                  <Slider label="Group cohesion" value={settings.groupCohesion} min={0} max={3} step={0.05} onChange={value => updateSetting('groupCohesion', value)} />
-                  <small className="graph-setting-help">Pulls nodes of the same type toward their local centroid. Increase this for tighter process/file/network/etc. islands.</small>
-                  <Slider label="Group separation" value={settings.groupSeparation} min={0} max={3} step={0.05} onChange={value => updateSetting('groupSeparation', value)} />
-                  <small className="graph-setting-help">Repels type-clusters from one another so they form distinct islands instead of one circular cloud.</small>
-                  <Slider label="Inter-group attraction" value={settings.interGroupAttraction} min={0} max={3} step={0.05} onChange={value => updateSetting('interGroupAttraction', value)} />
-                  <small className="graph-setting-help">Moves whole clusters toward related clusters using their aggregate cross-type relationship strength.</small>
                   <Slider label="Centre force" value={settings.centreForce} min={0.05} max={3} step={0.05} onChange={value => updateSetting('centreForce', value)} />
                   <small className="graph-setting-help">Keeps the whole map from drifting away. Too much makes the graph collapse into a round ball.</small>
                   <Slider label="Repel force" value={settings.repelForce} min={0.1} max={3} step={0.05} onChange={value => updateSetting('repelForce', value)} />
