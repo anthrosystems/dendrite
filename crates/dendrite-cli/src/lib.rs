@@ -105,6 +105,7 @@ pub enum HelpTopic {
     Telemetry,
     Debug,
     Culture,
+    Herd,
 }
 
 impl HelpTopic {
@@ -119,6 +120,7 @@ impl HelpTopic {
             "telemetry" => Some(Self::Telemetry),
             "debug" => Some(Self::Debug),
             "culture" => Some(Self::Culture),
+            "herd" => Some(Self::Herd),
             _ => None,
         }
     }
@@ -368,6 +370,7 @@ impl Command {
                     campaign_id: campaign_id.clone(),
                 }
             }
+            [command] if command == "herd" => Self::HerdStatus,
             [command, subcommand] if command == "herd" && subcommand == "status" => {
                 Self::HerdStatus
             }
@@ -441,6 +444,7 @@ impl Command {
             "culture list",
             "culture create",
             "culture discard",
+            "herd",
             "herd status",
             "health",
             "http-token",
@@ -1102,12 +1106,13 @@ fn help(topic: HelpTopic) -> String {
         HelpTopic::Telemetry => help_telemetry(),
         HelpTopic::Debug => help_debug(),
         HelpTopic::Culture => help_culture(),
+        HelpTopic::Herd => help_herd(),
     }
 }
 
 fn help_general() -> String {
     format!(
-        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  health                                      Show subsystem health\n  guard                                       Guard trust state, findings, and integrity manifest (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  incidents                                   List incidents / show details (see: incidents --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  culture <SUBCOMMAND>                        Isolated campaign snapshot workspaces (see: culture --help)\n  herd status                                 Per-peer Herd push status\n  http-token                                  Print the HTTP API bearer token\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
+        "Dendrite {}\n\nUsage:\n  dendrite <COMMAND>\n\nCommands:\n  status                                      Show daemon status\n  health                                      Show subsystem health\n  guard                                       Guard trust state, findings, and integrity manifest (see: guard --help)\n  telemetry                                   Collector status and recent events (see: telemetry --help)\n  memory <SUBCOMMAND>                         Memory Graph queries (see: memory --help)\n  vulnerabilities [--all]                     List vulnerability exposures (see: vulnerabilities --help)\n  vulnerability <SUBCOMMAND>                  CVE/exposure management (see: vulnerability --help)\n  incidents                                   List incidents / show details (see: incidents --help)\n  actions                                     List/inspect/propose/evaluate actions (see: actions --help)\n  culture <SUBCOMMAND>                        Isolated campaign snapshot workspaces (see: culture --help)\n  http-token                                  Print the HTTP API bearer token\n  herd <SUBCOMMAND>                           Fleet Herd status (see: herd --help)\n  version                                     Show CLI version\n  debug <SUBCOMMAND>                          Development-only surfaces (see: debug --help)\n\nRun `dendrite <COMMAND> --help` on any multi-form command above for its full usage.\n\nOptions:\n  -h, --help                                  Show this help\n  -V, --version                               Show CLI version",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -1149,6 +1154,10 @@ fn help_debug() -> String {
 
 fn help_culture() -> String {
     "Culture: isolated snapshot workspaces of the active databases, for future adaptive\nmalware analysis. Snapshotting only — there is no sandboxed execution here yet (see\ncrates/dendrited/src/containment.rs).\n\nUsage:\n  dendrite culture\n  dendrite culture list\n  dendrite culture create [LABEL]\n  dendrite culture discard <CAMPAIGN_ID>\n\n  culture / culture list          List campaigns (workspace snapshots)\n  culture create [LABEL]          Snapshot the active databases into a new campaign\n  culture discard <CAMPAIGN_ID>   Delete a campaign workspace and its snapshots".into()
+}
+
+fn help_herd() -> String {
+    "Herd: per-peer push status for this host's fleet distribution.\n\nUsage:\n  dendrite herd\n  dendrite herd status\n\n  herd / herd status   Show per-peer Herd push status".into()
 }
 
 #[cfg(test)]
@@ -1519,6 +1528,7 @@ mod tests {
 
     #[test]
     fn parses_herd_status() {
+        assert_eq!(Command::parse(&args(&["herd"])), Command::HerdStatus);
         assert_eq!(
             Command::parse(&args(&["herd", "status"])),
             Command::HerdStatus

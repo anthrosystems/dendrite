@@ -204,6 +204,8 @@ export function WebGLMemoryGraph({
   const edgesRef = useRef<MemoryRelationship[]>([])
   const frameRef = useRef<number | null>(null)
   const lastPointerMoveRef = useRef(0)
+  const hoverDebounceRef = useRef<number | null>(null)
+  const pendingHoverIdRef = useRef<string | null>(null)
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number; yaw: number; pitch: number; node: SimNode | null; moved: number; unfocused: boolean } | null>(null)
   const viewRef = useRef<ViewState>({ x: 0, y: 0, zoom: 0.7, yaw: -0.5, pitch: 0.28, camera: 1700 })
   const [hoveredId, setHoveredId] = useState<string | null>(null)
@@ -276,6 +278,10 @@ export function WebGLMemoryGraph({
     edgesRef.current = graph.relationships
     setViewRevision(value => value + 1)
   }, [graph])
+
+  useEffect(() => () => {
+    if (hoverDebounceRef.current !== null) window.clearTimeout(hoverDebounceRef.current)
+  }, [])
 
   useEffect(() => {
     for (const node of nodesRef.current) {
@@ -721,7 +727,20 @@ export function WebGLMemoryGraph({
           const now = performance.now()
           if (now - lastPointerMoveRef.current < 75) return
           lastPointerMoveRef.current = now
-          setHoveredId(hitNode(event.clientX, event.clientY)?.id ?? null)
+          const nextHoverId = hitNode(event.clientX, event.clientY)?.id ?? null
+          // Sample the hit test at the 75ms rate above, but only *commit* it
+          // (setHoveredId, which re-dims every other node) after a short
+          // settle delay. Sweeping the cursor across the canvas otherwise
+          // commits a new hoveredId on nearly every sampled move, and the
+          // whole-graph dim/highlight repaint that follows reads as the
+          // entire graph flashing.
+          if (nextHoverId === pendingHoverIdRef.current) return
+          pendingHoverIdRef.current = nextHoverId
+          if (hoverDebounceRef.current !== null) window.clearTimeout(hoverDebounceRef.current)
+          hoverDebounceRef.current = window.setTimeout(() => {
+            hoverDebounceRef.current = null
+            setHoveredId(pendingHoverIdRef.current)
+          }, 150)
         }}
         onPointerUp={event => {
           const drag = dragRef.current
@@ -733,7 +752,15 @@ export function WebGLMemoryGraph({
           }
           dragRef.current = null
         }}
-        onPointerLeave={() => { dragRef.current = null; setHoveredId(null) }}
+        onPointerLeave={() => {
+          dragRef.current = null
+          if (hoverDebounceRef.current !== null) {
+            window.clearTimeout(hoverDebounceRef.current)
+            hoverDebounceRef.current = null
+          }
+          pendingHoverIdRef.current = null
+          setHoveredId(null)
+        }}
         onWheel={event => {
           event.preventDefault()
           event.stopPropagation()

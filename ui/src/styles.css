@@ -6667,10 +6667,6 @@ body {
 }
 
 /* Full graph stays loaded; far zoom uses visual level-of-detail instead of data truncation. */
-.force-graph-host,
-.force-graph--3d {
-  background: #fafafa !important;
-}
 
 .graph-hud,
 .graph-3d-toolbar,
@@ -7598,10 +7594,14 @@ body {
 }
 
 
-/* Memory Graph live statistics: dense enough to be useful without implying a load/truncation mode. */
+/* Memory Graph live statistics: dense enough to be useful without implying a load/truncation mode.
+   Deliberately a single, non-wrapping row (flex, not grid): a grid that swaps
+   column-count at narrower breakpoints wraps to more rows, which grows the
+   bar's own height along with it — the bar is meant to stay a fixed size and
+   scale its content down instead. See .memory-hud-top's fixed height, above. */
 .memory-graph-summary--stats {
-  display: grid;
-  grid-template-columns: repeat(9, minmax(105px, 1fr));
+  display: flex;
+  flex-wrap: nowrap;
   gap: 0;
   padding: 0;
   border-color: #9e9e9e;
@@ -7610,6 +7610,7 @@ body {
 }
 
 .memory-graph-stat {
+  flex: 1 1 90px;
   min-width: 0;
   padding: 9px 11px 10px;
   border-right: 1px solid #9e9e9e;
@@ -7635,22 +7636,6 @@ body {
   font: 700 12px/1.25 ui-monospace, SFMono-Regular, Consolas, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-@media (max-width: 1450px) {
-  .memory-graph-summary--stats {
-    grid-template-columns: repeat(5, minmax(120px, 1fr));
-  }
-
-  .memory-graph-stat {
-    border-bottom: 1px solid #9e9e9e;
-  }
-}
-
-@media (max-width: 900px) {
-  .memory-graph-summary--stats {
-    grid-template-columns: repeat(3, minmax(110px, 1fr));
-  }
 }
 
 /* Provenance-aware human display ------------------------------------------------ */
@@ -9338,12 +9323,23 @@ tbody tr:hover td {
   top: 0;
   left: 0;
   right: 0;
+  height: 88px;
   display: flex;
   align-items: center;
   gap: 22px;
   padding: 16px 22px;
   background: linear-gradient(to bottom, rgba(4, 7, 6, .78) 0%, rgba(4, 7, 6, .32) 70%, transparent 100%);
   pointer-events: none;
+  overflow: hidden;
+}
+
+/* The graph's own +/-/Fit/Orbit/Focus controls (.graph-hud--top, shared with
+   Analysis's plain, non-full-bleed graph canvas) must sit below this bar on
+   the full-bleed Memory Graph page rather than under the base rule's
+   top: 12px, which only clears a normal page's title bar, not this
+   fixed-height overlay. Scoped here so Analysis's own layout is untouched. */
+.memory-page--fullbleed .graph-hud--top {
+  top: 100px;
 }
 
 .memory-hud-top > * {
@@ -9570,6 +9566,7 @@ tbody tr:hover td {
   }
 
   .memory-hud-top {
+    height: auto;
     flex-wrap: wrap;
     gap: 10px;
   }
