@@ -24,8 +24,9 @@ use dendrite_protocol::{
     EvidenceObjectRef, EvidenceSource, GuardStatusDto, HealthDto, IncidentDetailDto, IncidentId,
     IncidentSummaryDto, InstanceSigningKeyDto, IntegrityFindingDto, IntegrityManifestStatusDto,
     IntegrityVerificationDto, MemoryGraphDto, MemoryNodeDto, MemoryRelationshipDto,
-    ObjectDescriptor, ObjectId, Observation, ObservationKind, Severity, TelemetryEventDto,
-    TelemetryPipelineDto, TelemetrySourceDto, TelemetryStatusDto, VulnerabilityExposureDto,
+    ObjectDescriptor, ObjectId, Observation, ObservationKind, RecoveryBeginDto,
+    RecoveryCompleteDto, Severity, TelemetryEventDto, TelemetryPipelineDto, TelemetrySourceDto,
+    TelemetryStatusDto, VulnerabilityExposureDto,
 };
 use rusqlite::Connection;
 use std::collections::{BTreeMap, VecDeque};
@@ -2052,6 +2053,14 @@ impl DaemonCore {
         Ok(self.guard.verify_integrity()?)
     }
 
+    pub fn guard_begin_recovery(&self) -> Result<RecoveryBeginDto, DaemonError> {
+        Ok(self.guard.begin_recovery()?)
+    }
+
+    pub fn guard_complete_recovery(&self, token: &str) -> Result<RecoveryCompleteDto, DaemonError> {
+        Ok(self.guard.complete_recovery(token)?)
+    }
+
     #[cfg(debug_assertions)]
     pub fn debug_set_guard_state(
         &mut self,
@@ -2719,6 +2728,18 @@ mod tests {
         fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
             Err(GuardStoreError::Protocol(
                 "verify_integrity not supported by TrustedGuardEvaluator".into(),
+            ))
+        }
+
+        fn begin_recovery(&self) -> Result<RecoveryBeginDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "begin_recovery not supported by TrustedGuardEvaluator".into(),
+            ))
+        }
+
+        fn complete_recovery(&self, _token: &str) -> Result<RecoveryCompleteDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "complete_recovery not supported by TrustedGuardEvaluator".into(),
             ))
         }
 

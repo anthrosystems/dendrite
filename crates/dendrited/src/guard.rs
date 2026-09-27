@@ -1,6 +1,7 @@
 use dendrite_protocol::{
     ActionProposal, GuardDecision, GuardRequest, GuardResponse, GuardStatusDto,
-    IntegrityFindingDto, IntegrityManifestStatusDto, IntegrityVerificationDto, TrustState,
+    IntegrityFindingDto, IntegrityManifestStatusDto, IntegrityVerificationDto, RecoveryBeginDto,
+    RecoveryCompleteDto, TrustState,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -48,6 +49,17 @@ pub trait GuardEvaluator: Send {
     /// Triggers a read-only comparison of current watch-path hashes
     /// against the stored baseline.
     fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError>;
+    /// Recovery step 1 of 2 (ROADMAP.md item #5): moves Guard's trust state
+    /// to `Recovering` and has it write a one-time recovery token to its
+    /// own privilege-separated state directory. The token itself never
+    /// reaches this side — see `crates/dendrite-guard/README.md`'s
+    /// "Recovery" section on why.
+    fn begin_recovery(&self) -> Result<RecoveryBeginDto, GuardStoreError>;
+    /// Recovery step 2 of 2: submits the token an operator read directly
+    /// off the host. If it matches what `begin_recovery` issued, Guard
+    /// re-baselines against current content and restores trust to
+    /// `Trusted`.
+    fn complete_recovery(&self, token: &str) -> Result<RecoveryCompleteDto, GuardStoreError>;
     #[cfg(debug_assertions)]
     fn debug_set_state(&self, state: &str) -> Result<(), GuardStoreError>;
     #[cfg(debug_assertions)]
@@ -213,6 +225,30 @@ impl GuardEvaluator for GuardIpcClient {
         }
     }
 
+    fn begin_recovery(&self) -> Result<RecoveryBeginDto, GuardStoreError> {
+        match self.call(&GuardRequest::BeginRecovery) {
+            Ok(GuardResponse::RecoveryBegun { result }) => Ok(result),
+            Ok(GuardResponse::Error { message }) => Err(GuardStoreError::Protocol(message)),
+            Ok(_) => Err(GuardStoreError::Protocol(
+                "unexpected response to begin_recovery".into(),
+            )),
+            Err(error) => Err(GuardStoreError::Unreachable(error)),
+        }
+    }
+
+    fn complete_recovery(&self, token: &str) -> Result<RecoveryCompleteDto, GuardStoreError> {
+        match self.call(&GuardRequest::CompleteRecovery {
+            token: token.to_owned(),
+        }) {
+            Ok(GuardResponse::Recovered { result }) => Ok(result),
+            Ok(GuardResponse::Error { message }) => Err(GuardStoreError::Protocol(message)),
+            Ok(_) => Err(GuardStoreError::Protocol(
+                "unexpected response to complete_recovery".into(),
+            )),
+            Err(error) => Err(GuardStoreError::Unreachable(error)),
+        }
+    }
+
     #[cfg(debug_assertions)]
     fn debug_set_state(&self, state: &str) -> Result<(), GuardStoreError> {
         match self.call(&GuardRequest::DebugSetState {
@@ -292,6 +328,14 @@ impl GuardService {
 
     pub fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
         self.guard.verify_integrity()
+    }
+
+    pub fn begin_recovery(&self) -> Result<RecoveryBeginDto, GuardStoreError> {
+        self.guard.begin_recovery()
+    }
+
+    pub fn complete_recovery(&self, token: &str) -> Result<RecoveryCompleteDto, GuardStoreError> {
+        self.guard.complete_recovery(token)
     }
 
     /// `now` is accepted for call-site compatibility (the CLI's `debug
@@ -388,6 +432,18 @@ mod tests {
         fn verify_integrity(&self) -> Result<IntegrityVerificationDto, GuardStoreError> {
             Err(GuardStoreError::Protocol(
                 "verify_integrity not supported by FixedGuardEvaluator".into(),
+            ))
+        }
+
+        fn begin_recovery(&self) -> Result<RecoveryBeginDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "begin_recovery not supported by FixedGuardEvaluator".into(),
+            ))
+        }
+
+        fn complete_recovery(&self, _token: &str) -> Result<RecoveryCompleteDto, GuardStoreError> {
+            Err(GuardStoreError::Protocol(
+                "complete_recovery not supported by FixedGuardEvaluator".into(),
             ))
         }
 

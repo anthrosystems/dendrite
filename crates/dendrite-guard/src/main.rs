@@ -336,6 +336,26 @@ fn handle_request(
                 message: format!("{error}"),
             },
         },
+        GuardRequest::BeginRecovery => match store.begin_recovery(unix_now()) {
+            Ok(result) => GuardResponse::RecoveryBegun { result },
+            Err(error) => GuardResponse::Error {
+                message: format!("{error}"),
+            },
+        },
+        GuardRequest::CompleteRecovery { token } => {
+            if watch_paths.is_empty() {
+                return GuardResponse::Error {
+                    message: "DENDRITE_GUARD_WATCH_PATHS is empty; nothing configured to baseline"
+                        .into(),
+                };
+            }
+            match store.complete_recovery(&token, watch_paths, unix_now()) {
+                Ok(result) => GuardResponse::Recovered { result },
+                Err(error) => GuardResponse::Error {
+                    message: format!("{error}"),
+                },
+            }
+        }
         GuardRequest::DebugSetState { state } => debug_set_state(&mut store, &state),
         GuardRequest::DebugRecordFinding {
             target,

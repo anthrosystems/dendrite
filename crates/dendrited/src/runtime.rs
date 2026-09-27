@@ -705,6 +705,12 @@ impl DaemonRuntime {
             IpcRequest::GuardVerify => Ok(IpcResponse::GuardVerification(
                 self.core.guard_verify_integrity()?,
             )),
+            IpcRequest::GuardRecoverBegin => Ok(IpcResponse::GuardRecoverBegin(
+                self.core.guard_begin_recovery()?,
+            )),
+            IpcRequest::GuardRecoverComplete { token } => Ok(IpcResponse::GuardRecoverComplete(
+                self.core.guard_complete_recovery(&token)?,
+            )),
             IpcRequest::TelemetryRecent { limit } => Ok(IpcResponse::TelemetryRecent {
                 events: self.core.telemetry_recent(limit),
             }),

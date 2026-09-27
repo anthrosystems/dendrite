@@ -88,6 +88,8 @@ Unlike MAGI (a stateless per-request vote), Guard owns real persistent state —
 
 Verification is not only triggered manually: `dendrite-guard` also runs it automatically, in a background thread that verifies once at startup and then every `DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS` (default `300`) — same env-var-configuration pattern as everything else here. A detected mismatch now has real consequences rather than just being reported: it's recorded as an `IntegrityFinding` (deduplicated, so a persistent unresolved mismatch produces one finding, not one per tick) and escalates trust state, via a monotonic rule that never automatically moves trust back toward `Trusted`. See `crates/dendrite-guard/README.md`'s "Integrity manifest" section for the severity heuristic and escalation rules.
 
+Getting back to `Trusted` is its own explicit, two-step operation: `dendrite guard recover begin` writes a one-time token into Guard's own privilege-separated state directory (never returned over the wire, since a compromised `dendrited` relays every response) and `dendrite guard recover complete <TOKEN>` — with the token read directly off the host, not through `dendrited` — verifies it, re-baselines against current content, and restores `Trusted`. See `crates/dendrite-guard/README.md`'s "Recovery" section for why this needs authentication beyond ordinary socket reachability.
+
 ## Telemetry collectors
 
 | Variable | Default | Description |

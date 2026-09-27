@@ -14,7 +14,7 @@
 
 use crate::{
     ActionProposal, GuardDecision, GuardStatusDto, IntegrityFindingDto, IntegrityManifestStatusDto,
-    IntegrityVerificationDto, TrustState,
+    IntegrityVerificationDto, RecoveryBeginDto, RecoveryCompleteDto, TrustState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,17 @@ pub enum GuardRequest {
     /// Recomputes hashes for the same configured watch paths and compares
     /// them against the stored baseline.
     VerifyIntegrity,
+    /// Recovery step 1 of 2 (ROADMAP.md item #5, `README.md`'s "Recovery"
+    /// section): moves trust state to `Recovering` and writes a one-time
+    /// recovery token into Guard's own privilege-separated state directory.
+    /// The token is never included in the response — see `RecoveryBeginDto`.
+    BeginRecovery,
+    /// Recovery step 2 of 2: submits the token written by `BeginRecovery`.
+    /// If it matches, establishes a fresh baseline against current content
+    /// and restores trust to `Trusted`.
+    CompleteRecovery {
+        token: String,
+    },
     /// Development-only, mirrors `dendrite-cli debug guard-state`.
     /// `dendrite-guard` refuses this request in a release build (see
     /// `crates/dendrite-guard/README.md`) — it is not gated on the wire,
@@ -72,6 +83,12 @@ pub enum GuardResponse {
     },
     Verification {
         result: IntegrityVerificationDto,
+    },
+    RecoveryBegun {
+        result: RecoveryBeginDto,
+    },
+    Recovered {
+        result: RecoveryCompleteDto,
     },
     Ack,
     Error {

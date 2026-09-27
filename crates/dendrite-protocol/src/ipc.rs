@@ -63,11 +63,28 @@ pub enum IpcRequest {
     /// result as the new signed baseline, replacing any previous one.
     GuardBaseline,
     /// Recomputes hashes for the same configured watch paths and compares
-    /// them against the stored baseline, reporting any mismatches. Read-only
-    /// — does not itself record findings or move trust state (see
-    /// `crates/dendrite-guard/README.md`'s "Integrity manifest" section on
-    /// why that's deliberately separate, later work).
+    /// them against the stored baseline, reporting any mismatches. This is
+    /// the same verification pass `dendrite-guard` also runs automatically
+    /// in the background (see `crates/dendrite-guard/README.md`'s
+    /// "Integrity manifest" section): a real mismatch is recorded as an
+    /// `IntegrityFinding` and can escalate trust state, monotonically.
     GuardVerify,
+    /// Recovery step 1 of 2 (`crates/dendrite-guard/README.md`'s
+    /// "Recovery" section, ROADMAP.md item #5): moves trust state to
+    /// `Recovering` and has `dendrite-guard` write a one-time recovery
+    /// token into its own privilege-separated state directory. The token
+    /// itself never travels back over this wire — an operator must read it
+    /// directly off the host.
+    GuardRecoverBegin,
+    /// Recovery step 2 of 2: submits the token written by
+    /// `GuardRecoverBegin`. If it matches, `dendrite-guard` establishes a
+    /// fresh baseline against current content and restores trust to
+    /// `Trusted` — the one deliberate, explicit bypass of the monotonic
+    /// escalation rule, gated on proving host access to a file a
+    /// compromised `dendrited` cannot read.
+    GuardRecoverComplete {
+        token: String,
+    },
     TelemetryRecent {
         limit: usize,
     },
@@ -342,6 +359,27 @@ pub struct IntegrityVerificationDto {
     pub mismatches: Vec<IntegrityMismatchDto>,
 }
 
+/// Result of `GuardRecoverBegin` (ROADMAP.md item #5). Deliberately never
+/// carries the recovery token itself — only its confirmation and the path
+/// an operator must read it from directly on the host, since this response
+/// travels back through `dendrited`'s own IPC relay and a compromised
+/// `dendrited` must not be able to learn the token by relaying its own
+/// operator-looking request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryBeginDto {
+    pub trust_state: String,
+    pub token_path: String,
+}
+
+/// Result of a successful `GuardRecoverComplete` — trust has been restored
+/// to `Trusted` and a fresh baseline was established against current
+/// content as part of the same step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryCompleteDto {
+    pub trust_state: String,
+    pub manifest_status: IntegrityManifestStatusDto,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryEventDto {
     pub id: String,
@@ -499,6 +537,8 @@ pub enum IpcResponse {
     },
     GuardManifest(IntegrityManifestStatusDto),
     GuardVerification(IntegrityVerificationDto),
+    GuardRecoverBegin(RecoveryBeginDto),
+    GuardRecoverComplete(RecoveryCompleteDto),
     TelemetryRecent {
         events: Vec<TelemetryEventDto>,
     },

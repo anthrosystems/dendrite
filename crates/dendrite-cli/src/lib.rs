@@ -33,6 +33,8 @@ pub enum Command {
     GuardFindings,
     GuardBaseline,
     GuardVerify,
+    GuardRecoverBegin,
+    GuardRecoverComplete(String),
     TelemetryStatus,
     TelemetryRecent {
         limit: usize,
@@ -223,6 +225,18 @@ impl Command {
             [command, subcommand] if command == "guard" && subcommand == "verify" => {
                 Self::GuardVerify
             }
+            [command, subcommand, action] if command == "guard" && subcommand == "recover" => {
+                if action == "begin" {
+                    Self::GuardRecoverBegin
+                } else {
+                    Self::Help(HelpTopic::Guard)
+                }
+            }
+            [command, subcommand, action, token]
+                if command == "guard" && subcommand == "recover" && action == "complete" =>
+            {
+                Self::GuardRecoverComplete(token.clone())
+            }
             [command] if command == "telemetry" => Self::TelemetryStatus,
             [command, subcommand] if command == "telemetry" && subcommand == "recent" => {
                 Self::TelemetryRecent { limit: 50 }
@@ -352,6 +366,10 @@ impl Command {
             Self::GuardFindings => Some(IpcRequest::GuardFindings),
             Self::GuardBaseline => Some(IpcRequest::GuardBaseline),
             Self::GuardVerify => Some(IpcRequest::GuardVerify),
+            Self::GuardRecoverBegin => Some(IpcRequest::GuardRecoverBegin),
+            Self::GuardRecoverComplete(token) => Some(IpcRequest::GuardRecoverComplete {
+                token: token.clone(),
+            }),
             Self::TelemetryStatus => Some(IpcRequest::TelemetryStatus),
             Self::TelemetryRecent { limit } => Some(IpcRequest::TelemetryRecent { limit: *limit }),
             Self::DebugSeedIncident { label } => Some(IpcRequest::DebugSeedIncident {
@@ -593,6 +611,18 @@ fn render_response(response: &IpcResponse) -> String {
             }
             lines.join("\n")
         }
+        IpcResponse::GuardRecoverBegin(result) => format!(
+            "recovery started: trust state is now {}\ntoken written to {} — read it directly on the host (not through this CLI) and pass it to `dendrite guard recover complete <TOKEN>`",
+            result.trust_state, result.token_path
+        ),
+        IpcResponse::GuardRecoverComplete(result) => format!(
+            "recovery complete: trust state is now {}\nfresh baseline established: {} entries, key {}, fingerprint {}, recorded at {}",
+            result.trust_state,
+            result.manifest_status.entry_count,
+            result.manifest_status.key_id,
+            result.manifest_status.fingerprint,
+            result.manifest_status.created_at
+        ),
         IpcResponse::TelemetryStatus(status) => status
             .sources
             .iter()
@@ -928,7 +958,7 @@ fn help_actions() -> String {
 }
 
 fn help_guard() -> String {
-    "Usage:\n  dendrite guard\n  dendrite guard findings\n  dendrite guard baseline\n  dendrite guard verify\n\n  guard            Show Guard trust state and authority\n  guard findings   List Guard integrity findings\n  guard baseline   (Re)establish the signed integrity manifest baseline\n  guard verify     Compare current file hashes against the stored baseline\n\n`guard baseline`/`guard verify` hash the paths `dendrite-guard` is itself configured\nto watch (its own DENDRITE_GUARD_WATCH_PATHS, not anything supplied here) — see\ncrates/dendrite-guard/README.md's \"Integrity manifest\" section. `guard verify` triggers\nthe same verification pass dendrite-guard also runs automatically in the background\n(every DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS, default 300s): a detected mismatch is\nrecorded as a finding (deduplicated across repeated checks) and escalates trust state,\nvia a monotonic rule that never auto-improves trust back toward trusted.\n\nTrust states:\n  trusted, degraded, suspected, quarantined, compromised, recovering".into()
+    "Usage:\n  dendrite guard\n  dendrite guard findings\n  dendrite guard baseline\n  dendrite guard verify\n  dendrite guard recover begin\n  dendrite guard recover complete <TOKEN>\n\n  guard                       Show Guard trust state and authority\n  guard findings               List Guard integrity findings\n  guard baseline               (Re)establish the signed integrity manifest baseline\n  guard verify                 Compare current file hashes against the stored baseline\n  guard recover begin           Start recovery: moves trust to `recovering` and has\n                                dendrite-guard write a one-time token to its own state\n                                directory (not printed here — read it directly on the\n                                host, e.g. `sudo cat <path>`)\n  guard recover complete <TOKEN>  Submit that token; on a match, re-baselines against\n                                current content and restores trust to `trusted`\n\n`guard baseline`/`guard verify` hash the paths `dendrite-guard` is itself configured\nto watch (its own DENDRITE_GUARD_WATCH_PATHS, not anything supplied here) — see\ncrates/dendrite-guard/README.md's \"Integrity manifest\" section. `guard verify` triggers\nthe same verification pass dendrite-guard also runs automatically in the background\n(every DENDRITE_GUARD_VERIFY_INTERVAL_SECONDS, default 300s): a detected mismatch is\nrecorded as a finding (deduplicated across repeated checks) and escalates trust state,\nvia a monotonic rule that never auto-improves trust back toward trusted.\n\n`guard recover` is the one deliberate, explicit way back to `trusted` (see\ncrates/dendrite-guard/README.md's \"Recovery\" section): `recover begin`'s response never\ncontains the token, since it travels back through dendrited's own IPC relay, which a\ncompromised dendrited could read — only `recover complete` proves you could read the\ntoken file yourself.\n\nTrust states:\n  trusted, degraded, suspected, quarantined, compromised, recovering".into()
 }
 
 fn help_vulnerabilities() -> String {
@@ -1077,6 +1107,30 @@ mod tests {
         assert_eq!(
             Command::parse(&args(&["guard", "verify"])),
             Command::GuardVerify
+        );
+    }
+
+    #[test]
+    fn parses_guard_recover_begin() {
+        assert_eq!(
+            Command::parse(&args(&["guard", "recover", "begin"])),
+            Command::GuardRecoverBegin
+        );
+    }
+
+    #[test]
+    fn parses_guard_recover_complete() {
+        assert_eq!(
+            Command::parse(&args(&["guard", "recover", "complete", "abc123"])),
+            Command::GuardRecoverComplete("abc123".into())
+        );
+    }
+
+    #[test]
+    fn guard_recover_unknown_action_falls_back_to_guard_help() {
+        assert_eq!(
+            Command::parse(&args(&["guard", "recover", "nonsense"])),
+            Command::Help(HelpTopic::Guard)
         );
     }
 

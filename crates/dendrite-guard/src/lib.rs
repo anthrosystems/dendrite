@@ -15,7 +15,7 @@
 use dendrite_protocol::{
     ActionProposal, GuardDecision, GuardStatusDto, IntegrityFinding, IntegrityFindingDto,
     IntegrityManifestEntryDto, IntegrityManifestStatusDto, IntegrityMismatchDto, IntegritySeverity,
-    IntegrityVerificationDto, ObjectId, TrustState,
+    IntegrityVerificationDto, ObjectId, RecoveryBeginDto, RecoveryCompleteDto, TrustState,
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -91,6 +91,10 @@ pub enum GuardStoreError {
     /// a state that can't be trusted (wrong file mode, unknown key
     /// reference, no baseline established yet).
     InvalidKeyState(String),
+    /// A recovery step (`begin_recovery`/`complete_recovery`) was called
+    /// out of order, or the submitted token didn't match the one issued —
+    /// see `README.md`'s "Recovery" section.
+    Recovery(String),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -103,6 +107,7 @@ impl std::fmt::Display for GuardStoreError {
             Self::InvalidSeverity(severity) => write!(formatter, "invalid severity: {severity}"),
             Self::Crypto(message) => write!(formatter, "crypto error: {message}"),
             Self::InvalidKeyState(message) => write!(formatter, "invalid key state: {message}"),
+            Self::Recovery(message) => write!(formatter, "recovery error: {message}"),
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Json(error) => write!(formatter, "JSON error: {error}"),
         }
@@ -152,6 +157,14 @@ pub struct GuardStore {
     /// separation" section). Never derived from anything `dendrited` can
     /// influence.
     key_dir: PathBuf,
+    /// Where `begin_recovery` writes the one-time recovery token — next to
+    /// `guard.sqlite3`, inside the same privilege-separated
+    /// `StateDirectory=` as `key_dir`. `dendrited`'s own user has no access
+    /// to this directory at all (see `README.md`'s "Privilege separation"
+    /// section), which is exactly what makes reading this file proof of
+    /// real host access rather than just IPC reachability — see
+    /// `README.md`'s "Recovery" section.
+    recovery_token_path: PathBuf,
 }
 
 impl GuardStore {
@@ -194,6 +207,11 @@ impl GuardStore {
                 severity TEXT NOT NULL,
                 first_detected_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS guard_recovery (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                token_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
             INSERT OR IGNORE INTO guard_state(singleton, trust_state, updated_at)
             VALUES (1, 'trusted', 0);
             ",
@@ -207,16 +225,21 @@ impl GuardStore {
         let trust_state =
             TrustState::from_str(&state).map_err(|_| GuardStoreError::InvalidTrustState(state))?;
 
-        let key_dir = Path::new(path)
+        let db_parent = Path::new(path)
             .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
+            .filter(|parent| !parent.as_os_str().is_empty());
+        let key_dir = db_parent
             .map(|parent| parent.join("keys"))
             .unwrap_or_else(|| PathBuf::from("keys"));
+        let recovery_token_path = db_parent
+            .map(|parent| parent.join("recovery_token"))
+            .unwrap_or_else(|| PathBuf::from("recovery_token"));
 
         Ok(Self {
             connection,
             guard: Guard::new(trust_state),
             key_dir,
+            recovery_token_path,
         })
     }
 
@@ -287,8 +310,8 @@ impl GuardStore {
     /// Moves trust state to `candidate` only if that's *worse* than the
     /// current state (see `trust_rank`) — real verification findings only
     /// ever degrade trust automatically, never restore it. Recovering back
-    /// to `Trusted` after a legitimate fix is deliberately not handled here
-    /// (see ROADMAP.md's item #5, not yet designed). Returns whether the
+    /// to `Trusted` after a legitimate fix is deliberately not handled here;
+    /// see `complete_recovery` (ROADMAP.md item #5). Returns whether the
     /// state actually changed.
     fn escalate_trust_state(
         &mut self,
@@ -601,8 +624,9 @@ impl GuardStore {
     /// wasn't already open (see `record_open_mismatch`) becomes a real
     /// `IntegrityFinding`, and the worst severity found this pass can
     /// escalate trust state (see `escalate_trust_state` — this only ever
-    /// makes trust state worse, never better; see ROADMAP.md's item #5 on
-    /// recovery, not yet designed).
+    /// makes trust state worse, never better; see `complete_recovery` for
+    /// the explicit, separately-gated path back to `Trusted`, ROADMAP.md
+    /// item #5).
     ///
     /// If the stored baseline's own signature no longer verifies — the
     /// trust anchor itself may be corrupted or tampered — this is treated
@@ -714,6 +738,111 @@ impl GuardStore {
             mismatches,
         })
     }
+
+    /// Recovery step 1 of 2 (ROADMAP.md item #5, see `README.md`'s
+    /// "Recovery" section for the full design). `escalate_trust_state`
+    /// only ever makes trust worse, by design — restoring it needs its own
+    /// explicit, deliberately harder-to-reach path, gated on proving real
+    /// host access rather than just IPC reachability.
+    ///
+    /// Refuses to start from `Trusted` (nothing to recover from). From any
+    /// other state, generates a random one-time token, writes it in
+    /// plaintext to `recovery_token_path` (inside Guard's own
+    /// privilege-separated `StateDirectory=`, unreadable by `dendrited`'s
+    /// user), stores only its hash, and moves trust state to `Recovering`.
+    /// The token itself is **never** returned here — it travels back
+    /// through `dendrited`'s own IPC relay, which a compromised `dendrited`
+    /// could read; the whole point is that a compromised `dendrited` can
+    /// relay this request (and would learn `token_path`, which isn't
+    /// secret) but still can't read the file itself.
+    pub fn begin_recovery(&mut self, now: u64) -> Result<RecoveryBeginDto, GuardStoreError> {
+        if self.guard.trust_state() == TrustState::Trusted {
+            return Err(GuardStoreError::Recovery(
+                "trust state is already Trusted; nothing to recover from".into(),
+            ));
+        }
+
+        let mut token_bytes = [0u8; 32];
+        getrandom::fill(&mut token_bytes)
+            .map_err(|error| GuardStoreError::Crypto(format!("OS RNG failed: {error}")))?;
+        let token = hex::encode(token_bytes);
+        let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+
+        write_recovery_token(&self.recovery_token_path, &token)?;
+        self.connection.execute(
+            "INSERT INTO guard_recovery(singleton, token_hash, created_at)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(singleton) DO UPDATE SET
+                token_hash = excluded.token_hash,
+                created_at = excluded.created_at",
+            params![token_hash, now],
+        )?;
+        // `Recovering` is the highest-ranked state (see `trust_rank`), so
+        // this always succeeds as an "escalation" from any non-Trusted
+        // state — including re-issuing a fresh token while already
+        // Recovering, which is a deliberate no-op on trust state itself.
+        self.escalate_trust_state(TrustState::Recovering, now)?;
+
+        Ok(RecoveryBeginDto {
+            trust_state: self.guard.trust_state().as_str().into(),
+            token_path: self.recovery_token_path.display().to_string(),
+        })
+    }
+
+    /// Recovery step 2 of 2. Requires trust state to already be
+    /// `Recovering` (i.e. `begin_recovery` was called first) and the
+    /// submitted `token` to match the one written to `recovery_token_path`.
+    /// A mismatch changes nothing and returns an error — the stored token
+    /// remains valid so the correct one can still be submitted. On a match,
+    /// establishes a fresh baseline against `watch_paths` (the same as
+    /// `establish_baseline` — a legitimate recovery accepts current content
+    /// as the new known-good state) and restores trust to `Trusted`. This
+    /// is the one deliberate bypass of `escalate_trust_state`'s
+    /// monotonic rule in the entire crate, and it only runs after the
+    /// caller has proven they could read a file `dendrited`'s own user
+    /// cannot.
+    pub fn complete_recovery(
+        &mut self,
+        token: &str,
+        watch_paths: &[PathBuf],
+        now: u64,
+    ) -> Result<RecoveryCompleteDto, GuardStoreError> {
+        if self.guard.trust_state() != TrustState::Recovering {
+            return Err(GuardStoreError::Recovery(
+                "recovery was not started; call begin_recovery first".into(),
+            ));
+        }
+        let stored_hash: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT token_hash FROM guard_recovery WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored_hash) = stored_hash else {
+            return Err(GuardStoreError::Recovery(
+                "no recovery token has been issued".into(),
+            ));
+        };
+        let candidate_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        if !constant_time_eq(&candidate_hash, &stored_hash) {
+            return Err(GuardStoreError::Recovery(
+                "recovery token does not match".into(),
+            ));
+        }
+
+        let manifest_status = self.establish_baseline(watch_paths, now)?;
+        self.connection
+            .execute("DELETE FROM guard_recovery WHERE singleton = 1", [])?;
+        let _ = fs::remove_file(&self.recovery_token_path);
+        self.set_trust_state(TrustState::Trusted, now)?;
+
+        Ok(RecoveryCompleteDto {
+            trust_state: self.guard.trust_state().as_str().into(),
+            manifest_status,
+        })
+    }
 }
 
 /// Automatic, built-in severity for a watched path's own mismatch (hash
@@ -756,10 +885,11 @@ fn state_for_severity(severity: IntegritySeverity) -> TrustState {
 
 /// Where each `TrustState` sits on the escalation ladder
 /// (`escalate_trust_state` only ever moves up this ranking, never down —
-/// see ROADMAP.md's item #5 on why recovering is deliberately not handled
-/// automatically). Follows the pipeline order in `README.md`'s diagram:
-/// `TRUSTED -> DEGRADED -> SUSPECTED -> QUARANTINED -> COMPROMISED ->
-/// RECOVERING`.
+/// restoring `Trusted` is instead `complete_recovery`'s job, gated on a
+/// token proving real host access rather than reachable automatically; see
+/// `README.md`'s "Recovery" section, ROADMAP.md item #5). Follows the
+/// pipeline order in `README.md`'s diagram: `TRUSTED -> DEGRADED ->
+/// SUSPECTED -> QUARANTINED -> COMPROMISED -> RECOVERING`.
 fn trust_rank(state: TrustState) -> u8 {
     match state {
         TrustState::Trusted => 0,
@@ -862,6 +992,50 @@ fn hash_path(path: &Path) -> String {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".into(),
         Err(_) => "unreadable".into(),
     }
+}
+
+/// Writes the plaintext recovery token to `path`, mode `0600`, inside
+/// Guard's own privilege-separated `StateDirectory=` — see
+/// `GuardStore::recovery_token_path`. Overwrites any previous token
+/// unconditionally (`begin_recovery` re-issuing invalidates the old one).
+fn write_recovery_token(path: &Path, token: &str) -> Result<(), GuardStoreError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(token.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    // `.mode(0o600)` only applies the permission at creation time (per
+    // `open(2)`'s `O_CREAT` semantics) — explicitly reassert it so a
+    // pre-existing file from an earlier run can't leave looser permissions
+    // in place.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Constant-time comparison for the recovery token's hash, so a timing
+/// side-channel can't help an attacker narrow it down byte by byte. Both
+/// inputs are fixed-length SHA-256 hex digests in practice, so the length
+/// check isn't itself a meaningful leak.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[cfg(test)]
@@ -1131,8 +1305,9 @@ mod tests {
         store.establish_baseline(&watched, 3000).unwrap();
         let result = store.verify_integrity(&watched, 4000).unwrap();
         assert!(result.matches);
-        // ...but does not itself restore trust — that's an explicit
-        // recovery action, not yet designed (ROADMAP.md item #5).
+        // ...but does not itself restore trust — that's `complete_recovery`'s
+        // job, gated on a token an operator must read off the host
+        // (ROADMAP.md item #5, see the `recovery_` tests below).
         assert_eq!(store.trust_state(), TrustState::Degraded);
         assert_eq!(store.findings().unwrap().len(), 1);
     }
@@ -1154,5 +1329,108 @@ mod tests {
         let result = store.verify_integrity(&watched, 3000).unwrap();
         assert!(result.matches);
         assert_eq!(store.trust_state(), TrustState::Compromised);
+    }
+
+    /// Reads back whatever `begin_recovery` wrote to disk — standing in for
+    /// an operator with real host access (`sudo cat`), which is the whole
+    /// point: `dendrited`'s own user cannot do this (see `README.md`'s
+    /// "Recovery" section).
+    fn read_recovery_token(result: &RecoveryBeginDto) -> String {
+        fs::read_to_string(&result.token_path).unwrap()
+    }
+
+    #[test]
+    fn begin_recovery_refuses_when_already_trusted() {
+        let dir = TestDir::new("recovery-already-trusted");
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        assert_eq!(store.trust_state(), TrustState::Trusted);
+        assert!(store.begin_recovery(1000).is_err());
+    }
+
+    #[test]
+    fn recovery_round_trip_restores_trust_and_rebaselines() {
+        let dir = TestDir::new("recovery-round-trip");
+        let watched = vec![dir.write_watched("dendrited", b"original")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+        fs::write(&watched[0], b"tampered").unwrap();
+        store.verify_integrity(&watched, 2000).unwrap();
+        assert_eq!(store.trust_state(), TrustState::Compromised);
+
+        let begun = store.begin_recovery(3000).unwrap();
+        assert_eq!(begun.trust_state, "recovering");
+        assert_eq!(store.trust_state(), TrustState::Recovering);
+
+        // Operator applies/accepts the fix, then reads the token directly
+        // off the host (not over the IPC wire) and submits it.
+        let token = read_recovery_token(&begun);
+        let recovered = store.complete_recovery(&token, &watched, 4000).unwrap();
+        assert_eq!(recovered.trust_state, "trusted");
+        assert_eq!(store.trust_state(), TrustState::Trusted);
+        assert!(recovered.manifest_status.established);
+
+        // The fresh baseline was established against current (tampered)
+        // content, so a verification pass right after recovery is clean.
+        let result = store.verify_integrity(&watched, 5000).unwrap();
+        assert!(result.matches);
+        assert_eq!(store.trust_state(), TrustState::Trusted);
+    }
+
+    #[test]
+    fn complete_recovery_rejects_a_wrong_token_and_changes_nothing() {
+        let dir = TestDir::new("recovery-wrong-token");
+        let watched = vec![dir.write_watched("dendrited", b"original")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+        fs::write(&watched[0], b"tampered").unwrap();
+        store.verify_integrity(&watched, 2000).unwrap();
+        store.begin_recovery(3000).unwrap();
+
+        assert!(
+            store
+                .complete_recovery("not-the-real-token", &watched, 4000)
+                .is_err()
+        );
+        assert_eq!(store.trust_state(), TrustState::Recovering);
+    }
+
+    #[test]
+    fn complete_recovery_refuses_without_a_prior_begin_recovery() {
+        let dir = TestDir::new("recovery-no-begin");
+        let watched = vec![dir.write_watched("dendrited", b"original")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+        // Never compromised, never began recovery — trust state is still
+        // Trusted, so there is no issued token to match against.
+        assert!(store.complete_recovery("anything", &watched, 2000).is_err());
+        assert_eq!(store.trust_state(), TrustState::Trusted);
+    }
+
+    #[test]
+    fn re_issuing_recovery_invalidates_the_previous_token() {
+        let dir = TestDir::new("recovery-reissue");
+        let watched = vec![dir.write_watched("dendrited", b"original")];
+
+        let mut store = GuardStore::open(&dir.db_path()).unwrap();
+        store.establish_baseline(&watched, 1000).unwrap();
+        fs::write(&watched[0], b"tampered").unwrap();
+        store.verify_integrity(&watched, 2000).unwrap();
+
+        let first = store.begin_recovery(3000).unwrap();
+        let old_token = read_recovery_token(&first);
+        let second = store.begin_recovery(3500).unwrap();
+        assert_eq!(store.trust_state(), TrustState::Recovering);
+
+        // The old token (from the first begin_recovery call) must no
+        // longer work now that a new one has been issued.
+        assert!(store.complete_recovery(&old_token, &watched, 4000).is_err());
+        assert_eq!(store.trust_state(), TrustState::Recovering);
+
+        let new_token = read_recovery_token(&second);
+        assert!(store.complete_recovery(&new_token, &watched, 4500).is_ok());
+        assert_eq!(store.trust_state(), TrustState::Trusted);
     }
 }
