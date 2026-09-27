@@ -51,7 +51,10 @@ ebpf/dendrite-ebpf        - the actual eBPF program (excluded from the main
 ui/                       - TypeScript/React operator UI
 packaging/                - systemd units, postinst/postrm, env files for the .deb
 scripts/                  - bootstrap.sh (dev setup), build-deb.sh (distribution
-                             packaging), launch_host_*.sh (dev launch scripts)
+                             packaging), launch_host_*.sh (dev launch scripts),
+                             test-dendrite.sh (smoke/activity/graph/incidents/
+                             guard/stress/full local test modes — see
+                             docs/DEVELOPMENT.md)
 ```
 
 ## Toolchain

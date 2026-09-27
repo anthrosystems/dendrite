@@ -110,8 +110,19 @@ A repeatable, by-hand checklist for confirming a build actually works end to
 end — beyond `cargo test`. Useful after a change that touches daemon
 startup, telemetry, the HTTP/WebSocket surface, the UI, or packaging, and
 before cutting a checkpoint. Each section names the commands to run and
-what a pass looks like; none of it is automated yet — see "Open question:
-an automated integration harness" below.
+what a pass looks like. `scripts/test-dendrite.sh` (`smoke`/`activity`/
+`graph`/`incidents`/`guard`/`stress`/`full` modes — see
+`scripts/test-dendrite.sh --help`) scripts a good chunk of step 2 (starting
+a real `dendrited`/`dendrite-guard`/`dendrite-magi` and driving them
+through the CLI/HTTP API) plus recording Guard integrity findings and
+flipping trust state via the debug interface, so it's worth reaching for
+before repeating any of that by hand. It does not cover the UI (step 3,
+needs a real browser), the specific "kill the process, confirm the
+fail-closed reconnect behaviour" exercises in steps 4-5, Antiserum export
+(step 6), the cross-host trust boundary (step 7), or packaging (step 8) —
+those stay by-hand. See "Open question: an automated integration harness"
+below for what a real (assertion-based, CI-runnable) harness would still
+need to add on top of what `test-dendrite.sh` already covers.
 
 ### 1. Build and unit tests
 
@@ -342,25 +353,35 @@ here.
 
 ## Open question: an automated integration harness
 
-There is no `tests/` directory at the repo root — it once held a single
-placeholder script (`tests/test-dendrite.sh`), removed when this file took
-over as the canonical manual validation matrix. Inline `#[cfg(test)]`
-coverage exists across ~20 modules and catches unit-level logic errors, but
-nothing today automates the checklist above: process-boundary behaviour
-(does a real `dendrited` actually 401 an unauthenticated HTTP request, does
-Guard's IPC client actually fail closed when `dendrite-guard` is killed
-mid-request, does a packaged install's `postinst` actually work) is only
-ever exercised by hand, once per checkpoint.
+There is no `tests/` directory at the repo root, and no CI-runnable,
+assertion-based integration test suite — but there is `scripts/test-dendrite.sh`
+(see above), a real, actively-useful shell harness that starts real
+`dendrited`/`dendrite-guard`/`dendrite-magi` processes, drives them through
+the CLI and HTTP API, and generates realistic telemetry/graph/incident/stress
+load. Worth being precise about what that script is and isn't: it's a
+*driver*, not an *assertions* suite — its `guard` mode, for instance,
+records real integrity findings and flips real trust state, but the script
+doesn't itself assert on the resulting behaviour and fail loudly if it's
+wrong (a human still reads the output), and it isn't wired into `cargo
+test` or any CI. Inline `#[cfg(test)]` coverage exists across ~20 modules
+and catches unit-level logic errors, but between the two, some real gaps
+remain untouched by anything automated: does a real `dendrited` actually
+401 an unauthenticated HTTP request, does Guard's IPC client actually fail
+closed when `dendrite-guard` is killed mid-request, does a packaged
+install's `postinst` actually work — these are only ever exercised by
+hand, once per checkpoint.
 
 Building a full harness matching everything in this file is a real project
 in its own right, not something to bolt on incidentally — so rather than
 attempting it wholesale, the better path is to add one real integration
-test the next time work needs exactly the kind of end-to-end check unit
-tests can't give (spin up a real `dendrited` against ephemeral
-sockets/ports, drive it over the real Unix socket or HTTP API, assert on
-the real behaviour), and let `tests/` grow organically from there. Hardening
-`dendrite-guard`'s decision logic is a plausible first candidate: unit
-tests can cover the trust-state machine's logic in isolation, but only a
-real `dendrited` + `dendrite-guard` pair over the real IPC socket exercises
-the process-boundary/fail-closed behaviour the way Checkpoint B's manual
-testing did.
+test (a `#[test]` that spins up a real `dendrited` against ephemeral
+sockets/ports, drives it over the real Unix socket or HTTP API, and
+asserts on the real behaviour rather than printing it for a human to read)
+the next time work needs exactly that kind of end-to-end check, and let
+a real `tests/` suite grow organically from there rather than trying to
+convert `test-dendrite.sh` wholesale. Hardening `dendrite-guard`'s decision
+logic is a plausible first candidate: unit tests can cover the trust-state
+machine's logic in isolation, but only a real `dendrited` + `dendrite-guard`
+pair over the real IPC socket exercises the process-boundary/fail-closed
+behaviour the way Checkpoint B's manual testing (and `test-dendrite.sh`'s
+`guard` mode) did.
