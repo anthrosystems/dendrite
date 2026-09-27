@@ -20,24 +20,18 @@ Only `--help`/`-h` trigger help output — the bare word `help` is not a recogni
 ```text
 status
 health
-http-token
-version
-incidents
-incidents <id>
-memory nodes [--kind <kind>] [limit]
-memory recent [limit]
-memory neighbours <node-id>
-memory path <source-id> <target-id>
-actions
-actions <id>
-actions propose <incident-id> <action> <target>
-actions evaluate <proposal-id>
 guard
 guard findings
 guard baseline
 guard verify
+guard recover begin
+guard recover complete <token>
 telemetry
 telemetry recent [limit]
+memory nodes [--kind <kind>] [limit]
+memory recent [limit]
+memory neighbours <node-id>
+memory path <source-id> <target-id>
 vulnerabilities [--all]
 vulnerability <exposure-id>
 vulnerability status
@@ -47,6 +41,14 @@ vulnerability import <path>
 vulnerability manual <exposure-id>
 vulnerability authorise <exposure-id>
 vulnerability update <exposure-id>
+incidents
+incidents <id>
+actions
+actions <id>
+actions propose <incident-id> <action> <target>
+actions evaluate <proposal-id>
+http-token
+version
 ```
 
 Debug commands (development-only, not a production operator API; disabled entirely in release builds):

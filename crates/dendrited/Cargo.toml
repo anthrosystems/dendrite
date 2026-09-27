@@ -1,6 +1,6 @@
 [package]
 name = "dendrited"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Dendrite endpoint security daemon"
 license = "Apache-2.0"

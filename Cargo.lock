@@ -295,14 +295,14 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dendrite-action"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dendrite-protocol",
 ]
 
 [[package]]
 name = "dendrite-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dendrite-protocol",
  "serde_json",
@@ -310,11 +310,11 @@ dependencies = [
 
 [[package]]
 name = "dendrite-ebpf-common"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "dendrite-guard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dendrite-protocol",
  "ed25519-dalek",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "dendrite-magi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dendrite-protocol",
  "rmcp",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "dendrite-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rmcp",
  "tokio",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "dendrite-memory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dendrite-protocol",
  "rusqlite",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "dendrite-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -364,11 +364,11 @@ dependencies = [
 
 [[package]]
 name = "dendrite-ui-server"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "dendrite-updater"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dendrite-protocol",
  "libc",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "dendrited"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aya",
  "dendrite-action",

@@ -1,6 +1,6 @@
 [package]
 name = "dendrite-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Stub for Dendrite's inbound MCP server (exposing Dendrite's own capabilities to external agents) — see the crate README before building this out"
 license = "Apache-2.0"

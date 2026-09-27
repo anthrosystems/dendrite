@@ -1,6 +1,6 @@
 [package]
 name = "dendrite-magi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Dendrite's MAGI evaluation process (Host/User/Environment quorum voters)"
 license = "Apache-2.0"

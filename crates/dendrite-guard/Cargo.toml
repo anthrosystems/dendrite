@@ -1,6 +1,6 @@
 [package]
 name = "dendrite-guard"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 description = "Dendrite's trust/integrity/recovery boundary (Guard) — its own process, reached by dendrited over a Unix socket"
