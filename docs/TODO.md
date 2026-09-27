@@ -10,5 +10,5 @@ indefinitely without a reason.
 ## Open
 
 Nothing open right now — everything previously tracked here has been fixed,
-folded into `docs/ROADMAP.md` (search it for "Batch 10" and "Known gaps" for
-the still-open items that came from this list), or otherwise resolved.
+folded into `docs/ROADMAP.md` (search it for "Batch 10" for the still-open
+items that came from this list), or otherwise resolved.

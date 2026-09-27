@@ -224,6 +224,6 @@ falling back to `/proc` polling.
 
 For what happens under sustained real-world load rather than a quick smoke
 test (routine-lane throughput ceilings, hub-node relationship blowups, CPU
-contention with another workload on the same core), see `docs/ROADMAP.md`'s
-Batch 10 section — those are live-hardware findings, not something to
-re-derive from scratch here.
+contention with another workload on the same core), see `docs/PERFORMANCE.md`
+— those are live-hardware findings, not something to re-derive from scratch
+here.

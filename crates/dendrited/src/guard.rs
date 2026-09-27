@@ -31,7 +31,7 @@ impl std::fmt::Display for GuardStoreError {
 /// Talks to the separate `dendrite-guard` process over a Unix socket. This
 /// is a real OS-process boundary, not an in-process call, for the same
 /// reason MAGI became one (see `crates/dendrite-guard/README.md` and
-/// `docs/ROADMAP.md`'s process-separation notes): Guard's whole job is
+/// `docs/architecture.md`'s process-separation notes): Guard's whole job is
 /// deciding whether `dendrited` still has authority to act, so that
 /// decision needs to live somewhere a compromise of `dendrited` itself
 /// can't reach directly.
@@ -103,7 +103,7 @@ impl GuardEvaluator for GuardIpcClient {
     /// Guard has exactly one voice on trust, so there's no quorum for
     /// "unreachable" to defer to — collapsing straight to the same denial a
     /// real detected compromise produces is the only fail-closed answer
-    /// available. See `docs/ROADMAP.md`'s Guard process-separation note.
+    /// available. See `docs/architecture.md`'s Guard process-separation note.
     fn trust_state(&self) -> TrustState {
         match self.call(&GuardRequest::TrustState) {
             Ok(GuardResponse::TrustState { trust_state }) => trust_state,

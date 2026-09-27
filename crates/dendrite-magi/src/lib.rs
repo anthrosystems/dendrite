@@ -2,7 +2,7 @@
 //! (`dendrite-magi`) for the same reason `dendrite-guard` became one —
 //! action authority (here, the quorum vote itself) shouldn't be reachable
 //! in-process from wherever a compromise of the main daemon might land.
-//! See `docs/ROADMAP.md`'s MAGI/MCP process-separation notes.
+//! See `docs/architecture.md`'s MAGI/MCP process-separation notes.
 //!
 //! `dendrited` never links this crate in production; it talks to a running
 //! `dendrite-magi` process only over the Unix-socket protocol in
@@ -16,7 +16,7 @@ use rmcp::transport::TokioChildProcess;
 /// Where a single seat's vote comes from: the built-in rule-based engine,
 /// or an external MCP-connected agent that fully replaces this seat's
 /// internal evaluator (not an advisor alongside it — see the confirmed
-/// design decision in `docs/ROADMAP.md`).
+/// design decision in `docs/architecture.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeatSource {
     Internal,

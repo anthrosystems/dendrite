@@ -15,8 +15,8 @@ use std::time::Duration;
 
 /// Talks to the separate `dendrite-magi` process for MAGI evaluation. This
 /// is a real OS-process boundary, not an in-process call, for the same
-/// reason Guard is planned to become one (see `docs/ROADMAP.md`'s Batch 7
-/// process-separation note): action authority should not be reachable
+/// reason Guard is its own process too (see `docs/architecture.md`'s
+/// process-separation notes): action authority should not be reachable
 /// in-process from wherever a compromise might land.
 pub trait MagiEvaluator: Send {
     fn evaluate(&self, action: ActionType, user_authorised: bool) -> Vec<(Evaluation, String)>;
@@ -75,7 +75,7 @@ impl MagiIpcClient {
 /// process happens to be restarting" into a denial-of-service against every
 /// containment/remediation action host-wide, including during a real
 /// incident where Dendrite most needs to still be able to act. See
-/// `docs/ROADMAP.md`'s MAGI/MCP process-separation notes for the full
+/// `docs/architecture.md`'s MAGI/MCP process-separation notes for the full
 /// reasoning.
 fn abstain_all(reason: &str) -> Vec<(Evaluation, String)> {
     [Evaluator::Host, Evaluator::User, Evaluator::Environment]

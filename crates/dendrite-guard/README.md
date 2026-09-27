@@ -10,7 +10,7 @@ Action authority is only granted while Guard considers the system trusted. A deg
 
 > Compromise can remove authority, but cannot create authority.
 
-It exists as its own binary and systemd unit (`dendrite-guard.service`), reached only over a Unix socket, for exactly that reason (see `docs/ROADMAP.md`'s Batch 7 process-separation notes, and the MAGI split this one followed): Guard's whole job *is* deciding whether `dendrited` still has authority, so that decision needs to live somewhere a compromise of `dendrited` itself cannot reach.
+It exists as its own binary and systemd unit (`dendrite-guard.service`), reached only over a Unix socket, for exactly that reason (see `docs/architecture.md`'s "Why `dendrite-magi` keeps its own systemd unit" note, and the MAGI split this one followed): Guard's whole job *is* deciding whether `dendrited` still has authority, so that decision needs to live somewhere a compromise of `dendrited` itself cannot reach.
 
 `dendrited` never links this crate's `Guard`/`GuardStore` logic in production; it talks to a running `dendrite-guard` process only over the socket protocol in `dendrite_protocol::guard_ipc` (newline-delimited JSON, one request per connection — the same convention as `dendrite-magi` and the CLI's own IPC protocol). Unlike MAGI (a stateless per-request vote), Guard owns real persistent state: the trust state and integrity findings live in `dendrite-guard`'s own `guard.sqlite3`, not `dendrited`'s.
 

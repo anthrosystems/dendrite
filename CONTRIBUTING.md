@@ -63,7 +63,7 @@ crates/
 └── dendrite-mcp
 ```
 
-`dendrited`, `dendrite-ui-server`, `dendrite-magi`, and `dendrite-guard` each run as their own process/systemd unit — see `docs/architecture.md` and `docs/ROADMAP.md`'s Batch 7 notes for why, and `crates/*/README.md` for each one's fail-closed behaviour when the others are unreachable. `dendrite-mcp` is a stub (see `crates/dendrite-mcp/README.md`) and has no systemd unit yet — it doesn't need to run continuously, or at all, until there's a real tool worth exposing through it.
+`dendrited`, `dendrite-ui-server`, `dendrite-magi`, and `dendrite-guard` each run as their own process/systemd unit — see `docs/architecture.md` for why, and `crates/*/README.md` for each one's fail-closed behaviour when the others are unreachable. `dendrite-mcp` is a stub (see `crates/dendrite-mcp/README.md`) and has no systemd unit yet — it doesn't need to run continuously, or at all, until there's a real tool worth exposing through it.
 
 The project follows the principle:
 

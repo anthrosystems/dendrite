@@ -6,7 +6,7 @@ The crate provides topology and path primitives, not security authority — a gr
 
 ## Storage
 
-SQLite-backed, split into two physical tiers — short-term (STM) and long-term (LTM) — each with its own writer-actor thread and connection, coordinated so a batch of routine ingestion can read its own earlier writes within one transaction. See `docs/architecture.md` for the full model and `docs/ROADMAP.md`'s batching notes for why this is tiered rather than one connection.
+SQLite-backed, split into two physical tiers — short-term (STM) and long-term (LTM) — each with its own writer-actor thread and connection, coordinated so a batch of routine ingestion can read its own earlier writes within one transaction. See `docs/architecture.md` for the full model and `docs/PERFORMANCE.md`'s batching-redesign notes for why this is tiered rather than one connection.
 
 Stored values are decoded and validated at the storage boundary; corrupt semantic values surface as explicit storage errors rather than being silently accepted.
 
