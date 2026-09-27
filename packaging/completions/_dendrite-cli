@@ -1,0 +1,69 @@
+#compdef dendrite-cli
+#
+# Zsh completion for dendrite-cli.
+#
+# Like the bash script alongside this one (dendrite-cli.bash), this does
+# not hardcode a copy of dendrite-cli's command tree. It asks the binary
+# itself, via `dendrite-cli --list-commands`, for the flat list of every
+# recognised token path (see `Command::command_paths()` in
+# crates/dendrite-cli/src/lib.rs), so it never drifts out of sync with
+# the parser as commands are added or removed.
+#
+# Install by placing this file (named `_dendrite-cli`, per zsh's
+# leading-underscore convention) somewhere on `$fpath`, e.g.
+# /usr/share/zsh/vendor-completions/_dendrite-cli — packaged that way by
+# this project's .deb (see crates/dendrited/Cargo.toml).
+
+_dendrite_cli() {
+    local -a candidates
+    local -a typed_words
+    local paths_output line
+    local -a line_words
+    local i n match_ok next_word
+
+    # $words is the full command line being completed, including the
+    # command name itself at $words[1]; $CURRENT is the index of the word
+    # under the cursor. Words already typed before the current one:
+    typed_words=("${words[@][2,CURRENT-1]}")
+
+    if (( CURRENT == 2 )); then
+        candidates+=(-h --help -V --version)
+    fi
+
+    paths_output="$(dendrite-cli --list-commands 2>/dev/null)" || return 1
+
+    while IFS= read -r line; do
+        [[ -z "${line}" ]] && continue
+        line_words=(${=line})
+        n=${#typed_words[@]}
+
+        if (( n == 0 )); then
+            candidates+=("${line_words[1]}")
+            continue
+        fi
+
+        if (( ${#line_words[@]} <= n )); then
+            continue
+        fi
+
+        match_ok=1
+        for (( i = 1; i <= n; i++ )); do
+            if [[ "${line_words[i]}" != "${typed_words[i]}" ]]; then
+                match_ok=0
+                break
+            fi
+        done
+
+        if (( match_ok )); then
+            next_word="${line_words[n+1]}"
+            candidates+=("${next_word}")
+        fi
+    done <<<"${paths_output}"
+
+    # Deduplicate.
+    typeset -U candidates
+
+    compadd -a candidates
+}
+
+_dendrite_cli "$@"

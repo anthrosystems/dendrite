@@ -63,6 +63,8 @@ assets = [
     ["../../packaging/dendrite-magi.env.example", "etc/dendrite/dendrite-magi.env", "644"],
     ["../../packaging/dendrite-ui.env.example", "etc/dendrite/dendrite-ui.env", "644"],
     ["../../packaging/dendrite.tmpfiles", "usr/lib/tmpfiles.d/dendrite.conf", "644"],
+    ["../../packaging/completions/dendrite-cli.bash", "usr/share/bash-completion/completions/dendrite-cli", "644"],
+    ["../../packaging/completions/_dendrite-cli", "usr/share/zsh/vendor-completions/_dendrite-cli", "644"],
 ]
 
 # Four independent systemd units, one package: dendrited (the security

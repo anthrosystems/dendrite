@@ -68,6 +68,14 @@ pub enum Command {
     HttpToken,
     Version,
     Help(HelpTopic),
+    /// Prints `command_paths()`, one per line, and exits — no daemon socket
+    /// involved. This exists so shell completion (see
+    /// `completions/dendrite-cli.bash`/`.zsh`) can ask the binary itself for
+    /// its command tree instead of hardcoding a copy that silently drifts
+    /// from `parse()` as commands are added. Not listed in `--help`'s
+    /// output: it's a machine-facing introspection surface, not a command an
+    /// operator would type on its own.
+    ListCommands,
 }
 
 /// Which family of commands a `--help`/`-h` request applies to.
@@ -286,7 +294,7 @@ impl Command {
             }
             [command, id]
                 if command == "vulnerability"
-                    && !["manual", "authorise", "update", "ignore", "delete"]
+                    && !["manual", "authorise", "update", "ignore", "delete", "import"]
                         .contains(&id.as_str()) =>
             {
                 Self::Vulnerability(id.clone())
@@ -329,11 +337,71 @@ impl Command {
             [command] if command == "version" || command == "--version" || command == "-V" => {
                 Self::Version
             }
+            [command] if command == "--list-commands" => Self::ListCommands,
             _ => match HelpTopic::for_family(family) {
                 Some(topic) => Self::Help(topic),
                 None => Self::Help(HelpTopic::General),
             },
         }
+    }
+
+    /// Every literal (non-positional) token path `parse()` above accepts,
+    /// one per line-to-be, in the same order as the `match arguments` arms.
+    /// A positional argument (an id, a label, a search token — anything
+    /// `parse()` reads with `.clone()` rather than comparing against a
+    /// literal `&str`) is never enumerable, so it's simply absent from a
+    /// path here: `memory neighbours` appears, `memory neighbours <node>`
+    /// does not, and that's the whole path a shell can usefully complete.
+    ///
+    /// This has to be kept in step with `parse()` by hand — there is no way
+    /// to generate it from the match arms themselves — but
+    /// `command_paths_parse_to_real_commands` below is a real regression
+    /// test: every path listed here is asserted to round-trip through
+    /// `parse()` into something other than a fallback `Help`, so a stale
+    /// entry (one `parse()` no longer accepts) fails the test suite rather
+    /// than silently offering a dead completion.
+    pub fn command_paths() -> &'static [&'static str] {
+        &[
+            "status",
+            "incidents",
+            "incident",
+            "memory nodes",
+            "memory nodes --kind",
+            "memory recent",
+            "memory neighbours",
+            "memory path",
+            "actions",
+            "actions propose",
+            "actions evaluate",
+            "action",
+            "guard",
+            "guard findings",
+            "guard baseline",
+            "guard verify",
+            "guard recover begin",
+            "guard recover complete",
+            "telemetry",
+            "telemetry recent",
+            "vulnerabilities",
+            "vulnerabilities --all",
+            "vulnerability status",
+            "vulnerability inventory",
+            "vulnerability refresh",
+            "vulnerability import",
+            "vulnerability manual",
+            "vulnerability authorise",
+            "vulnerability update",
+            "vulnerability ignore",
+            "vulnerability delete",
+            "vulnerability",
+            "debug seed-incident",
+            "debug inject-priority",
+            "debug guard-state",
+            "debug guard-finding",
+            "health",
+            "http-token",
+            "version",
+        ]
     }
 
     fn request(&self) -> Option<IpcRequest> {
@@ -417,7 +485,7 @@ impl Command {
             }
             Self::Health => Some(IpcRequest::Health),
             Self::HttpToken => Some(IpcRequest::HttpToken),
-            Self::Version | Self::Help(_) => None,
+            Self::Version | Self::Help(_) | Self::ListCommands => None,
         }
     }
 }
@@ -444,6 +512,7 @@ pub fn execute(command: &Command, socket_path: &Path) -> Result<String, ClientEr
     match command {
         Command::Version => Ok(format!("dendrite {}", env!("CARGO_PKG_VERSION"))),
         Command::Help(topic) => Ok(help(*topic)),
+        Command::ListCommands => Ok(Command::command_paths().join("\n")),
         Command::MemoryNodes { limit, .. } => {
             let response = send(
                 socket_path,
@@ -1286,10 +1355,10 @@ mod tests {
     #[test]
     fn incomplete_vulnerability_subcommands_do_not_misparse_as_an_id_lookup() {
         // Same class of bug as the actions propose/evaluate one above, for the
-        // same reason: "manual"/"authorise"/"update"/"ignore"/"delete" typed
-        // without their required ID argument used to silently match the
+        // same reason: "manual"/"authorise"/"update"/"ignore"/"delete"/"import"
+        // typed without their required argument used to silently match the
         // generic `vulnerability <ID>` pattern instead of showing help.
-        for subcommand in ["manual", "authorise", "update", "ignore", "delete"] {
+        for subcommand in ["manual", "authorise", "update", "ignore", "delete", "import"] {
             assert_eq!(
                 Command::parse(&args(&["vulnerability", subcommand])),
                 Command::Help(HelpTopic::Vulnerability),
@@ -1301,5 +1370,33 @@ mod tests {
             Command::parse(&args(&["vulnerability", "vuln:cve-2099-00001:curl:amd64"])),
             Command::Vulnerability("vuln:cve-2099-00001:curl:amd64".into())
         );
+    }
+
+    #[test]
+    fn list_commands_flag_is_recognised() {
+        assert_eq!(
+            Command::parse(&args(&["--list-commands"])),
+            Command::ListCommands
+        );
+    }
+
+    #[test]
+    fn every_listed_command_path_is_recognised_by_parse() {
+        // This is the drift guard `command_paths()`'s doc comment promises:
+        // every path it lists must round-trip through the real parser into
+        // something other than the catch-all "I don't understand any of
+        // this" result. It can't catch a `parse()` arm that was added and
+        // never listed here, but it does catch a listed path going stale
+        // when `parse()` changes underneath it — the shell completion
+        // scripts trust this list unconditionally, so a stale entry here is
+        // a stale entry in every operator's shell.
+        for path in Command::command_paths() {
+            let tokens = args(&path.split(' ').collect::<Vec<_>>());
+            assert_ne!(
+                Command::parse(&tokens),
+                Command::Help(HelpTopic::General),
+                "command_paths() entry {path:?} no longer parses to a recognised command"
+            );
+        }
     }
 }
