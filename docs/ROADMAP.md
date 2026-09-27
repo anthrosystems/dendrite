@@ -16,17 +16,7 @@ Nothing outstanding. Checkpoint A (CLI/docs/validation-matrix pass) and `dendrit
 
 **IF CURRENT PRE-ML VERSION IS IN A WORKING STATE, TEST ON A LIVE, LOW-RISK SYSTEM.**
 
-Test the packaged/installable Dendrite build rather than the development `target/debug` workflow:
-
-```bash
-sudo apt install dendrite
-sudo systemctl enable --now dendrited
-```
-
-Verify:
-
-- a full machine reboot (individual-service restart resilience is already verified — see `docs/CONFIGURATION.md`'s "IPC and network" section for the shared-`RuntimeDirectory=` teardown bug found and fixed along the way — but a full reboot hasn't specifically been exercised yet);
-- an actual version-bump upgrade path (remove-then-reinstall-same-version already verified to preserve `/var/lib/dendrite`/`/etc/dendrite` and resume the same instance, but there's only one released version so far, so a real version bump hasn't been exercised).
+Packaged-build testing on a real host is done: `apt install`, all four systemd units (enable/disable/fail-closed independence between `dendrited`/`dendrite-ui`/`dendrite-magi`/`dendrite-guard`), a full reboot, and a real version-bump upgrade (instance identity, signing key, Memory Graph, and Guard's own trust state/findings all correctly survived; both system accounts came back with the same ownership; the reordered CLI help and packaged UI fix both held) have all been verified — see `docs/DEVELOPMENT.md`'s "Manual validation matrix" step 8. Two real bugs turned up and were fixed along the way: `packaging/postrm` wasn't purging the `dendrite-guard` account/state on `apt purge` (only the original `dendrite` account), and the packaged UI shipped with `DENDRITE_UI_API_ORIGIN` unset, which on the stock two-fixed-port install meant the UI could never actually reach `dendrited` at all (see `packaging/dendrite-ui.env.example`'s comment for the mechanism).
 
 Complete the packaged Dendrite self-update path:
 
