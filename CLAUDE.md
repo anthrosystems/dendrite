@@ -23,19 +23,28 @@ is intentionally ahead of the current implementation in places.
 
 ```
 crates/dendrited          - the daemon: HTTP/WS API, Memory Graph, telemetry,
-                             guard/action gating, vulnerability tracking
+                             action proposals; talks to MAGI/Guard as a client
+                             over their own Unix sockets, never in-process
 crates/dendrite-cli       - CLI client (talks to dendrited over its Unix socket)
 crates/dendrite-memory    - Memory Graph storage (SQLite-backed STM/LTM)
-crates/dendrite-protocol  - shared DTOs/IPC types between daemon and CLI/UI
-crates/dendrite-guard     - authority/trust-state gating (currently a stub,
-                             see ROADMAP.md's Batch 7 findings)
+crates/dendrite-protocol  - shared DTOs/IPC types between daemon/CLI/UI/MAGI/Guard
+crates/dendrite-magi      - MAGI quorum evaluation, its own process/systemd unit
+                             (internal rule-based evaluators, or an MCP client
+                             per seat — see its own README)
+crates/dendrite-guard     - trust/integrity boundary, its own process/systemd
+                             unit; the decision logic itself (integrity
+                             manifests, anti-tamper, attestation) is still a
+                             stub, see ROADMAP.md's Batch 7 findings
 crates/dendrite-action    - response action execution
 crates/dendrite-updater   - self-update foundations
 crates/dendrite-ebpf-common - shared types for the eBPF collector
+crates/dendrite-ui-server - serves the built UI, its own process/systemd unit
+crates/dendrite-mcp       - inbound MCP server, deliberately a stub for now
+                             (see its own README)
 ebpf/dendrite-ebpf        - the actual eBPF program (excluded from the main
                              workspace; needs bpf-linker + a nightly toolchain)
 ui/                       - TypeScript/React operator UI
-packaging/                - systemd unit, postinst/postrm, env file for the .deb
+packaging/                - systemd units, postinst/postrm, env files for the .deb
 scripts/                  - bootstrap.sh (dev setup), build-deb.sh (distribution
                              packaging), launch_host_*.sh (dev launch scripts)
 ```
