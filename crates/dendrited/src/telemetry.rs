@@ -442,6 +442,13 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
             }
         });
 
+    // Independent of `process`/`source` above - this is the *executable*
+    // captured straight off the `sched_process_exec` tracepoint's own
+    // `filename` argument (`EbpfEvent::exe_path`), not off any
+    // `task_struct` chain, so it can succeed or fail independently of
+    // process-identity resolution. See the confidence-tier table below.
+    let kernel_exe_path = ebpf_exe_path(&event.exe_path);
+
     match event.kind {
         EVENT_PROCESS_EXEC => {
             let (observation, related_observations) = match process {
@@ -465,23 +472,28 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                         });
                     }
 
-                    // The `None` arm still gets a `target` - deliberately
-                    // *not* `None` - so this observation's `confidence: 90`
-                    // survives into something queryable. `persist_relationship`
-                    // (core.rs) drops any observation whose `target` is
-                    // `None` entirely: no relationship is ever created for
-                    // it, and `MemoryNode` has no `confidence` field of its
-                    // own for the node-only path to fall back on either. A
-                    // self-loop (`instance` as both source and target) is
-                    // the cheapest way to give this a durable home without
-                    // a schema change; `ObservationKind::Associated` (->
-                    // `MemoryRelationshipKind::AssociatedWith`) is used
-                    // instead of `ProcessStarted`/`FileExecuted` so this
-                    // doesn't read as "process spawned/executed itself" -
-                    // it's a resolution-confidence marker, not a real
-                    // spawn or exec edge.
-                    let (kind, target, confidence) = match process.executable_descriptor() {
-                        Some(executable) => (ObservationKind::FileExecuted, Some(executable), 100),
+                    // `process` (identity) is already fully `/proc`-resolved
+                    // here, so the only remaining question is *which*
+                    // source (if any) confirms the executable: `/proc`'s
+                    // own `executable_descriptor()` (100, unchanged), the
+                    // kernel-captured `exe_path` (95 - a real file target,
+                    // just not the one `/proc` itself vouched for), or
+                    // neither (90 - the `target: Some(instance.clone())`
+                    // self-loop; see its own comment below for why that's a
+                    // self-loop rather than a dropped `target: None`, and
+                    // why `Associated` rather than `ProcessStarted`/
+                    // `FileExecuted`).
+                    let (kind, target, confidence) = match process
+                        .executable_descriptor()
+                        .map(|executable| (executable, 100))
+                        .or_else(|| {
+                            kernel_exe_path
+                                .as_deref()
+                                .map(|path| (kernel_executable_descriptor(path), 95))
+                        }) {
+                        Some((executable, confidence)) => {
+                            (ObservationKind::FileExecuted, Some(executable), confidence)
+                        }
                         None => (ObservationKind::Associated, Some(instance.clone()), 90),
                     };
                     (
@@ -502,33 +514,61 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                         related,
                     )
                 }
-                None => (
-                    Observation {
-                        id: ObservationId(format!("ebpf-exec:{process_id}:{}", event.timestamp_ns)),
-                        // `Associated`, not `ProcessStarted` - see the comment
-                        // on the other `target: Some(instance.clone())` self-loop
-                        // above. Without a real target to confirm, this is a
-                        // resolution-confidence marker on `source` itself,
-                        // not a real spawn edge, and a `ProcessStarted` self-loop
-                        // would misleadingly read as "process spawned by itself".
-                        kind: ObservationKind::Associated,
-                        // 90 when `source` is the resolved (`process:{pid}:{start_ticks}`)
-                        // identity the kernel-side capture beat the exit race
-                        // for - still short of the 100 the `Some(process)`
-                        // arm gets, since no executable path is available
-                        // here to also confirm what actually ran. 80 when
-                        // even that capture came back empty and `source`
-                        // fell all the way back to the comm-only identity.
-                        confidence: Confidence::new(if event.start_ticks > 0 { 90 } else { 80 })
-                            .expect("70..=100 is valid confidence"),
-                        target: Some(source.clone()),
-                        source,
-                        observed_at: now,
-                        expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
-                        severity: Severity::Low,
-                    },
-                    Vec::new(),
-                ),
+                None => {
+                    // `process` (identity) never resolved via `/proc` here,
+                    // so unlike the `Some(process)` arm above, process
+                    // identity quality itself is also in play, not just
+                    // executable confirmation - two independent kernel
+                    // captures (`event.start_ticks` for identity,
+                    // `kernel_exe_path` for the executable), each
+                    // succeeding or failing on their own:
+                    //
+                    //   start_ticks | exe_path | confidence | kind    | target
+                    //   ------------|----------|------------|---------|----------------
+                    //   resolved    | resolved | 95         | FileExecuted | real file
+                    //   resolved    | none     | 90         | Associated   | self-loop
+                    //   comm-only   | resolved | 85         | FileExecuted | real file
+                    //   comm-only   | none     | 80         | Associated   | self-loop
+                    //
+                    // A self-loop (rather than `target: None`) in the
+                    // bottom two rows exists purely so `confidence` survives
+                    // into something queryable - see `persist_relationship`
+                    // in `core.rs`, which drops any observation whose
+                    // `target` is `None` entirely, and `MemoryNode`, which
+                    // has no `confidence` field of its own to fall back on.
+                    // `Associated` (not `ProcessStarted`) is used for that
+                    // self-loop so it doesn't misleadingly read as "process
+                    // spawned by itself".
+                    let (kind, target, confidence) = match kernel_exe_path.as_deref() {
+                        Some(path) => (
+                            ObservationKind::FileExecuted,
+                            Some(kernel_executable_descriptor(path)),
+                            if event.start_ticks > 0 { 95 } else { 85 },
+                        ),
+                        None => (
+                            ObservationKind::Associated,
+                            Some(source.clone()),
+                            if event.start_ticks > 0 { 90 } else { 80 },
+                        ),
+                    };
+                    (
+                        Observation {
+                            id: ObservationId(format!(
+                                "ebpf-exec:{process_id}:{}",
+                                event.timestamp_ns
+                            )),
+                            kind,
+                            confidence: Confidence::new(confidence)
+                                .expect("60..=100 is valid confidence"),
+                            target,
+                            source,
+                            observed_at: now,
+                            expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
+                            severity: Severity::Low,
+                        },
+                        Vec::new(),
+                    )
+                }
             };
 
             Some(CollectedObservation {
@@ -612,6 +652,41 @@ fn ebpf_comm(bytes: &[u8; 16]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
+/// Same NUL-trimming idiom as `ebpf_comm`, over `EbpfEvent::exe_path`. No
+/// NUL found at all (`end == bytes.len()`) is the "possibly truncated" case
+/// `exe_path`'s own doc comment describes - still returned rather than
+/// discarded, since a truncated-but-long path is still far more identifying
+/// than no path at all, and `MAX_EXE_PATH_LEN` (256) comfortably covers the
+/// overwhelming majority of real executable paths anyway.
+fn ebpf_exe_path(bytes: &[u8]) -> Option<PathBuf> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    Some(PathBuf::from(
+        String::from_utf8_lossy(&bytes[..end]).into_owned(),
+    ))
+}
+
+/// Builds the same shape of `file:<path>` descriptor
+/// `ProcessInfo::executable_descriptor` does for a `/proc`-resolved path,
+/// but for a path captured directly from the `sched_process_exec`
+/// tracepoint (`EbpfEvent::exe_path`) instead - see `ebpf_observation`'s
+/// confidence-tier table in its own doc comment for when each source gets
+/// used.
+fn kernel_executable_descriptor(path: &Path) -> ObjectDescriptor {
+    let label = path.to_string_lossy().into_owned();
+    ObjectDescriptor {
+        id: ObjectId(format!("file:{label}")),
+        kind: EntityKind::File,
+        label,
+        content_hash: None,
+    }
 }
 
 fn format_endpoint(address: IpAddr, port: u16) -> String {
@@ -1897,13 +1972,95 @@ mod tests {
     }
 
     #[test]
+    fn ebpf_observation_connects_to_kernel_captured_exe_path_at_confidence_95() {
+        // Identity unresolved via /proc, but both independent kernel
+        // captures (start_ticks for identity, exe_path for the executable)
+        // succeeded - top row of the confidence-tier table in
+        // ebpf_observation's doc comment.
+        let bogus_pid = u32::MAX - 21;
+        let mut comm = [0u8; 16];
+        comm[..2].copy_from_slice(b"sh");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.pid = bogus_pid;
+        event.tgid = bogus_pid;
+        event.comm = comm;
+        event.start_ticks = 999;
+        let path = b"/bin/true";
+        event.exe_path[..path.len()].copy_from_slice(path);
+
+        let collected =
+            ebpf_observation(event, 0).expect("EVENT_PROCESS_EXEC always yields an observation");
+
+        assert_eq!(collected.observation.kind, ObservationKind::FileExecuted);
+        let target = collected
+            .observation
+            .target
+            .as_ref()
+            .expect("kernel-captured exe path yields a real file target");
+        assert_eq!(target.id.0, "file:/bin/true");
+        assert_eq!(collected.observation.confidence.value(), 95);
+    }
+
+    #[test]
+    fn ebpf_observation_connects_to_kernel_captured_exe_path_at_confidence_85_when_identity_comm_only()
+     {
+        // Identity fell all the way back to comm-only (start_ticks == 0),
+        // but the exe_path capture still succeeded - third row of the
+        // confidence-tier table: a real file target is still worth more
+        // than the comm-only self-loop, just at lower confidence than when
+        // identity also resolved.
+        let bogus_pid = u32::MAX - 22;
+        let mut comm = [0u8; 16];
+        comm[..2].copy_from_slice(b"sh");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.pid = bogus_pid;
+        event.tgid = bogus_pid;
+        event.comm = comm;
+        // start_ticks left at 0 deliberately.
+        let path = b"/bin/true";
+        event.exe_path[..path.len()].copy_from_slice(path);
+
+        let collected =
+            ebpf_observation(event, 0).expect("EVENT_PROCESS_EXEC always yields an observation");
+
+        assert_eq!(collected.observation.kind, ObservationKind::FileExecuted);
+        let target = collected
+            .observation
+            .target
+            .as_ref()
+            .expect("kernel-captured exe path yields a real file target");
+        assert_eq!(target.id.0, "file:/bin/true");
+        assert_eq!(collected.observation.confidence.value(), 85);
+    }
+
+    #[test]
+    fn ebpf_exe_path_trims_nul_padding() {
+        let mut bytes = [0u8; 256];
+        let path = b"/usr/bin/bash";
+        bytes[..path.len()].copy_from_slice(path);
+
+        assert_eq!(
+            ebpf_exe_path(&bytes).expect("non-empty path"),
+            PathBuf::from("/usr/bin/bash")
+        );
+    }
+
+    #[test]
+    fn ebpf_exe_path_is_none_when_all_zero() {
+        let bytes = [0u8; 256];
+        assert_eq!(ebpf_exe_path(&bytes), None);
+    }
+
+    #[test]
     fn ebpf_event_layout_is_stable() {
         // Grew from 64 to 96 bytes when parent_pid/start_ticks/uid/exe_dev/
-        // exe_ino were added (sched_process_exec capture extension) - this
-        // pin exists so a future field addition/reordering is a deliberate,
+        // exe_ino were added (sched_process_exec capture extension), then
+        // from 96 to 352 bytes when exe_path (MAX_EXE_PATH_LEN = 256) was
+        // added for kernel-captured executable-path resolution - this pin
+        // exists so a future field addition/reordering is a deliberate,
         // reviewed change to this test, not a silent layout shift between
         // what the kernel side emits and what this parser expects.
-        assert_eq!(std::mem::size_of::<EbpfEvent>(), 96);
+        assert_eq!(std::mem::size_of::<EbpfEvent>(), 352);
         assert_eq!(std::mem::align_of::<EbpfEvent>(), 8);
     }
 

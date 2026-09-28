@@ -5,6 +5,14 @@ pub const EVENT_NETWORK_CONNECT: u8 = 2;
 pub const ADDRESS_FAMILY_INET: u8 = 2;
 pub const ADDRESS_FAMILY_INET6: u8 = 10;
 pub const COMM_LEN: usize = 16;
+/// Practical cap on the executable path captured from the
+/// `sched_process_exec` tracepoint's own `filename` argument - real paths
+/// are almost always far shorter, and this keeps `EbpfEvent` (and so
+/// `RingBuf` capacity per event) bounded rather than sized for a
+/// pathological `PATH_MAX` (4096) case. A path at or past this length is
+/// truncated: see `EbpfEvent::exe_path`'s doc comment for how callers tell
+/// a truncated path apart from a short one.
+pub const MAX_EXE_PATH_LEN: usize = 256;
 
 /// Fields below `comm` (`parent_pid` through `exe_ino`) are only populated
 /// on `EVENT_PROCESS_EXEC` and only when the corresponding kernel read at
@@ -54,6 +62,29 @@ pub struct EbpfEvent {
     pub exe_dev: u32,
     pub _reserved4: [u8; 4],
     pub exe_ino: u64,
+    /// Absolute path of the executable at exec time, read directly out of
+    /// the `sched:sched_process_exec` tracepoint's own `filename` argument
+    /// (a `__data_loc` field in the tracepoint's record) - see
+    /// `capture_exec_path()` in the eBPF program. This is a different
+    /// mechanism from `exe_dev`/`exe_ino` above (no `task_struct`/`mm`/
+    /// `file` pointer chasing, no null-pointer failure mode along the way),
+    /// but the same race-free property: captured synchronously at exec
+    /// time, so it doesn't depend on `/proc/<pid>/exe` still resolving
+    /// later. This is what lets a process too short-lived for `/proc` to
+    /// ever catch still connect to its real executable's file node instead
+    /// of falling back to an unconnected identity - see `ebpf_observation()`
+    /// in `dendrited`'s `telemetry.rs`.
+    ///
+    /// NUL-padded when the real path is shorter than `MAX_EXE_PATH_LEN`.
+    /// When the real path is `>= MAX_EXE_PATH_LEN` bytes, this holds the
+    /// first `MAX_EXE_PATH_LEN` bytes with **no** NUL terminator anywhere
+    /// in the buffer - callers should treat "no NUL byte found" as
+    /// "possibly truncated," not trust it as a complete, exact path in
+    /// that case. All-zero when the tracepoint's own `filename` field
+    /// couldn't be read (see `capture_exec_path()`'s doc comment for when
+    /// that can happen - expected to be rare, unlike the `task_struct`
+    /// chain above).
+    pub exe_path: [u8; MAX_EXE_PATH_LEN],
 }
 
 impl EbpfEvent {
@@ -76,6 +107,7 @@ impl EbpfEvent {
             exe_dev: 0,
             _reserved4: [0; 4],
             exe_ino: 0,
+            exe_path: [0; MAX_EXE_PATH_LEN],
         }
     }
 }
