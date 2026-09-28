@@ -9,6 +9,12 @@ indefinitely without a reason.
 
 ## Open
 
-Nothing open right now — everything previously tracked here has been fixed,
-folded into `docs/ROADMAP.md` (search it for "Batch 10" for the still-open
-items that came from this list), or otherwise resolved.
+- Rename the `dendrite-cli` binary to `dendrite`. Current name is verbose for
+  an interactive tool typed constantly at the terminal (`dendrite-cli guard
+  recover complete <TOKEN>`, etc.). Touches the crate's `[[bin]]` name in
+  `Cargo.toml`, `packaging/postinst`/`dendrited.service` if either shells out
+  to it, `docs/CONFIGURATION.md`, `crates/dendrite-guard/README.md`,
+  `crates/dendrite-cli/CLI.md`, and any user-facing strings in
+  `crates/dendrite-cli/src/lib.rs` that hardcode the binary name (e.g. the
+  `GuardRecoverBegin` response message). Not started — do not push until
+  explicitly asked.

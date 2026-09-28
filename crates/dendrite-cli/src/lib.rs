@@ -737,7 +737,7 @@ fn render_response(response: &IpcResponse) -> String {
             lines.join("\n")
         }
         IpcResponse::GuardRecoverBegin(result) => format!(
-            "recovery started: trust state is now {}\ntoken written to {} — read it directly on the host (not through this CLI) and pass it to `dendrite guard recover complete <TOKEN>`",
+            "recovery started: trust state is now {}\ntoken written to {} — read it directly on the host (not through this CLI) and pass it to `dendrite-cli guard recover complete <TOKEN>`",
             result.trust_state, result.token_path
         ),
         IpcResponse::GuardRecoverComplete(result) => format!(
