@@ -424,7 +424,23 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
     let source = process
         .as_ref()
         .map(ProcessInfo::descriptor)
-        .unwrap_or_else(|| unresolved_process_descriptor(process_id, &event.comm));
+        .unwrap_or_else(|| {
+            // `read_process()` races the process's own exit and produces
+            // nothing when it loses (see its doc comment). `event.start_ticks`
+            // being nonzero means the tracepoint's own in-kernel read (see
+            // `capture_process_identity` in the eBPF program) beat that race,
+            // so a resolved, name+start_ticks-stable identity is still
+            // available even though the `/proc` read failed - only when even
+            // the kernel-side capture came back empty (an older eBPF build
+            // that predates this field, or a kernel-side read failure of its
+            // own) does this fall all the way back to the comm-only identity
+            // that can't distinguish two same-named processes.
+            if event.start_ticks > 0 {
+                resolved_process_descriptor_from_event(process_id, &event)
+            } else {
+                unresolved_process_descriptor(process_id, &event.comm)
+            }
+        });
 
     match event.kind {
         EVENT_PROCESS_EXEC => {
@@ -475,12 +491,20 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                     Observation {
                         id: ObservationId(format!("ebpf-exec:{process_id}:{}", event.timestamp_ns)),
                         kind: ObservationKind::ProcessStarted,
+                        // 90 when `source` is the resolved (`process:{pid}:{start_ticks}`)
+                        // identity the kernel-side capture beat the exit race
+                        // for - still short of the 100 the `Some(process)`
+                        // arm gets, since no executable path is available
+                        // here to also confirm what actually ran. 80 when
+                        // even that capture came back empty and `source`
+                        // fell all the way back to the comm-only identity.
+                        confidence: Confidence::new(if event.start_ticks > 0 { 90 } else { 80 })
+                            .expect("70..=100 is valid confidence"),
                         source,
                         target: None,
                         observed_at: now,
                         expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
                         severity: Severity::Low,
-                        confidence: Confidence::new(80).expect("80 is valid confidence"),
                     },
                     Vec::new(),
                 ),
@@ -533,6 +557,25 @@ fn unresolved_process_descriptor(process_id: u32, comm: &[u8; 16]) -> ObjectDesc
     let label = ebpf_comm(comm).unwrap_or_else(|| format!("pid {process_id}"));
     ObjectDescriptor {
         id: ObjectId(format!("process_identity:comm:{}", stable_hash(&label))),
+        kind: EntityKind::Process,
+        label,
+        content_hash: None,
+    }
+}
+
+/// Same `process:{pid}:{start_ticks}` identity scheme `ProcessInfo::descriptor()`
+/// (`/proc`-derived) uses, built instead from the eBPF event's own
+/// `start_ticks` (`capture_process_identity` in the eBPF program) - only
+/// called when `read_process()` already lost the race against this
+/// process's exit, as the one case where the kernel-side capture still has
+/// data the userspace `/proc` read no longer does. Producing the identical
+/// id format here (rather than inventing a separate scheme) is what lets
+/// this resolve to the *same* memory node id as a `/proc`-reconciliation
+/// poll would have produced for this exact process, had it won the race.
+fn resolved_process_descriptor_from_event(process_id: u32, event: &EbpfEvent) -> ObjectDescriptor {
+    let label = ebpf_comm(&event.comm).unwrap_or_else(|| format!("pid {process_id}"));
+    ObjectDescriptor {
+        id: ObjectId(format!("process:{process_id}:{}", event.start_ticks)),
         kind: EntityKind::Process,
         label,
         content_hash: None,
@@ -1687,8 +1730,103 @@ mod tests {
     }
 
     #[test]
+    fn resolved_process_descriptor_from_event_distinguishes_same_name_different_processes() {
+        let mut comm = [0u8; 16];
+        comm[..3].copy_from_slice(b"cat");
+        let mut real = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        real.comm = comm;
+        real.start_ticks = 12_345;
+        let mut malicious = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        malicious.comm = comm;
+        malicious.start_ticks = 67_890;
+
+        let first = resolved_process_descriptor_from_event(101, &real);
+        let second = resolved_process_descriptor_from_event(202, &malicious);
+
+        // Unlike unresolved_process_descriptor (same comm always collapses
+        // to the same id), two different real processes never collide here
+        // - this is the actual fix for the masquerade gap: a same-named
+        // process on a different pid/start_ticks is a different identity.
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.id.0, "process:101:12345");
+        assert_eq!(first.label, "cat");
+    }
+
+    #[test]
+    fn resolved_process_descriptor_from_event_matches_proc_derived_id_scheme() {
+        let mut comm = [0u8; 16];
+        comm[..4].copy_from_slice(b"bash");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.comm = comm;
+        event.start_ticks = 555;
+
+        let descriptor = resolved_process_descriptor_from_event(42, &event);
+
+        // Must be the identical scheme ProcessInfo::descriptor() (the
+        // /proc-derived path) produces, so an eBPF-resolved node and a
+        // later /proc-reconciliation poll of the same real process land on
+        // the same MemoryNodeId rather than two separate nodes for one
+        // process.
+        assert_eq!(descriptor.id.0, "process:42:555");
+    }
+
+    #[test]
+    fn ebpf_observation_falls_back_to_unresolved_identity_when_kernel_capture_is_absent() {
+        // A pid picked to (overwhelmingly likely) not exist, so
+        // read_process() inside ebpf_observation() returns None - this
+        // isolates the fallback-selection logic itself rather than
+        // depending on the state of any real running process.
+        let bogus_pid = u32::MAX - 17;
+        let mut comm = [0u8; 16];
+        comm[..2].copy_from_slice(b"sh");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.pid = bogus_pid;
+        event.tgid = bogus_pid;
+        event.comm = comm;
+        // start_ticks left at 0: simulates an older eBPF build, or a
+        // kernel-side capture failure, that predates/lacks this field.
+
+        let collected =
+            ebpf_observation(event, 0).expect("EVENT_PROCESS_EXEC always yields an observation");
+
+        assert!(
+            collected
+                .observation
+                .source
+                .id
+                .0
+                .starts_with("process_identity:comm:")
+        );
+    }
+
+    #[test]
+    fn ebpf_observation_uses_resolved_identity_when_kernel_capture_beat_the_proc_race() {
+        let bogus_pid = u32::MAX - 18;
+        let mut comm = [0u8; 16];
+        comm[..2].copy_from_slice(b"sh");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.pid = bogus_pid;
+        event.tgid = bogus_pid;
+        event.comm = comm;
+        event.start_ticks = 999;
+
+        let collected =
+            ebpf_observation(event, 0).expect("EVENT_PROCESS_EXEC always yields an observation");
+
+        assert_eq!(
+            collected.observation.source.id.0,
+            format!("process:{bogus_pid}:999")
+        );
+    }
+
+    #[test]
     fn ebpf_event_layout_is_stable() {
-        assert_eq!(std::mem::size_of::<EbpfEvent>(), 64);
+        // Grew from 64 to 96 bytes when parent_pid/start_ticks/uid/exe_dev/
+        // exe_ino were added (sched_process_exec capture extension) - this
+        // pin exists so a future field addition/reordering is a deliberate,
+        // reviewed change to this test, not a silent layout shift between
+        // what the kernel side emits and what this parser expects.
+        assert_eq!(std::mem::size_of::<EbpfEvent>(), 96);
         assert_eq!(std::mem::align_of::<EbpfEvent>(), 8);
     }
 
