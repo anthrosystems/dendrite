@@ -129,50 +129,11 @@ if [[ "$SKIP_EBPF" == 1 ]]; then
 elif [[ -f "$EBPF_OBJECT" && "$FORCE" != 1 ]]; then
     echo "Already built: $EBPF_OBJECT (use --force to rebuild)"
 else
-    if ! cargo +nightly --version >/dev/null 2>&1; then
-        echo "Installing nightly toolchain (needed for eBPF)..."
-        rustup toolchain install nightly
-    fi
-    if ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -q '^rust-src'; then
-        # bpfel-unknown-none is Tier 3 with no prebuilt std/core component at
-        # all — `rustup target add` for it always fails ("no prebuilt
-        # artifacts available"), which isn't a real error, it's just the
-        # wrong fix. build-ebpf.sh's `-Z build-std=core` compiles core from
-        # source for this target instead, which needs rust-src, not a
-        # prebuilt target.
-        rustup component add rust-src --toolchain nightly
-    fi
-    # bpf-linker links against libelf/zlib at build and/or link time; not
-    # detectable via a simple `command -v` check the way a binary is, so
-    # these are just always ensured present before it's needed rather than
-    # probed for.
-    ensure_apt_packages libelf-dev zlib1g-dev || true
-    if ! command -v bpf-linker >/dev/null 2>&1; then
-        echo "Installing bpf-linker (needed for eBPF)..."
-        # bpf-linker itself just needs a normal (non-nightly) Rust to run —
-        # no +toolchain override needed, since running from inside the repo
-        # already resolves to the pinned 1.98.0 via rust-toolchain.toml.
-        # But it must come from a PREBUILT release, not `cargo install`:
-        # building it from source needs a matching local LLVM/llvm-config,
-        # which bpf-linker's own docs explicitly warn against relying on
-        # (https://github.com/aya-rs/bpf-linker#installation) — this script
-        # has no reliable way to know or install the right LLVM version for
-        # this bpf-linker release across distros, so cargo-binstall (which
-        # fetches a prebuilt binary) is the real fix, not a fallback.
-        if ! command -v cargo-binstall >/dev/null 2>&1; then
-            echo "Installing cargo-binstall first (so bpf-linker comes from a prebuilt release, not a from-source build needing a matching local LLVM)..."
-            curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-            # shellcheck source=/dev/null
-            source "$HOME/.cargo/env" 2>/dev/null || true
-        fi
-        if command -v cargo-binstall >/dev/null 2>&1; then
-            cargo binstall --no-confirm bpf-linker
-        else
-            echo "Warning: cargo-binstall install itself failed — falling back to 'cargo install bpf-linker'," >&2
-            echo "  which needs a matching local LLVM/llvm-config and may fail the same way this just did." >&2
-            cargo install bpf-linker
-        fi
-    fi
+    # build-ebpf.sh is self-sufficient as of the vmlinux.rs/sched_process_exec
+    # patch: it installs its own toolchain (nightly, rust-src, bpf-linker,
+    # libelf-dev/zlib1g-dev) and, if ebpf/dendrite-ebpf/src/vmlinux.rs is
+    # missing, the kernel-struct-bindings toolchain (bpftool, bindgen-cli,
+    # aya-tool) needed to generate it too — nothing left to pre-install here.
     if bash "$SCRIPT_DIR/build-ebpf.sh"; then
         :
     else
