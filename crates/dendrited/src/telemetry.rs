@@ -104,7 +104,7 @@ const RECONCILIATION_POLL_STRIDE: u64 = 10;
 /// without standing up a real `TelemetryManager` (which needs a working
 /// fanotify/eBPF environment to construct meaningfully).
 fn should_run_reconciliation_poll(tick: u64, event_driven_active: bool) -> bool {
-    !event_driven_active || tick % RECONCILIATION_POLL_STRIDE == 0
+    !event_driven_active || tick.is_multiple_of(RECONCILIATION_POLL_STRIDE)
 }
 
 pub struct TelemetryManager {
