@@ -86,6 +86,27 @@ pub struct CollectedObservation {
     pub related_observations: Vec<Observation>,
 }
 
+/// How often (in `collect()` calls) the periodic-reconciliation collectors
+/// (`/proc` polling, filesystem polling) run while their event-driven
+/// counterpart (eBPF, fanotify) is also active. Their job in that mode isn't
+/// "same data, worse" — it's cold-start inventory of anything that predates
+/// `dendrited` attaching, plus a backstop for anything the event-driven side
+/// drops (a full ring buffer, a missed fanotify event) — so it doesn't need
+/// to run at the same cadence as the event-driven collector to do that job,
+/// and running a full `/proc` or filesystem walk on every single collection
+/// tick would be a real, needless cost. When the event-driven counterpart is
+/// *not* active, the periodic collector is the only source and runs every
+/// tick regardless of this stride (see `should_run_reconciliation_poll`).
+const RECONCILIATION_POLL_STRIDE: u64 = 10;
+
+/// Whether a periodic-reconciliation collector should run on this tick.
+/// Pulled out as its own pure function so the cadence decision is testable
+/// without standing up a real `TelemetryManager` (which needs a working
+/// fanotify/eBPF environment to construct meaningfully).
+fn should_run_reconciliation_poll(tick: u64, event_driven_active: bool) -> bool {
+    !event_driven_active || tick % RECONCILIATION_POLL_STRIDE == 0
+}
+
 pub struct TelemetryManager {
     processes: ProcessCollector,
     filesystem: FilesystemCollector,
@@ -94,6 +115,7 @@ pub struct TelemetryManager {
     fanotify_status: TelemetrySourceDto,
     ebpf_status: TelemetrySourceDto,
     control_plane_addr: SocketAddr,
+    poll_tick: u64,
 }
 
 impl TelemetryManager {
@@ -195,6 +217,7 @@ impl TelemetryManager {
             fanotify_status,
             ebpf_status,
             control_plane_addr,
+            poll_tick: 0,
         }
     }
 
@@ -230,16 +253,33 @@ impl TelemetryManager {
         TelemetryScope::Host
     }
 
+    /// Event-driven collectors (eBPF, fanotify) run every tick, same as
+    /// always. Their periodic-reconciliation counterparts (`/proc`,
+    /// filesystem polling) now *also* always run — never fully switched off
+    /// just because the event-driven side is available — but at a reduced
+    /// cadence in that case (`should_run_reconciliation_poll`), since their
+    /// job there is cold-start inventory and a dropped-event backstop, not
+    /// a duplicate of the event-driven stream. Each collector's own
+    /// `seen`/`known` diffing (`ProcessCollector`, `FilesystemCollector`)
+    /// is what keeps this from re-reporting an object the event-driven
+    /// collector already reported: a periodic poll only emits for what
+    /// wasn't already in its own last-seen set, exec captured by eBPF or
+    /// not.
     pub fn collect(&mut self) -> Vec<CollectedObservation> {
-        let mut observations = if let Some(ebpf) = &mut self.ebpf {
-            ebpf.collect()
-        } else {
-            self.processes.collect()
-        };
+        self.poll_tick = self.poll_tick.wrapping_add(1);
+        let mut observations = Vec::new();
+
+        if let Some(ebpf) = &mut self.ebpf {
+            observations.extend(ebpf.collect());
+        }
+        if should_run_reconciliation_poll(self.poll_tick, self.ebpf.is_some()) {
+            observations.extend(self.processes.collect());
+        }
 
         if let Some(fanotify) = &mut self.fanotify {
             observations.extend(fanotify.collect());
-        } else {
+        }
+        if should_run_reconciliation_poll(self.poll_tick, self.fanotify.is_some()) {
             observations.extend(self.filesystem.collect());
         }
 
@@ -253,9 +293,10 @@ impl TelemetryManager {
             if self.ebpf.is_some() {
                 TelemetrySourceDto {
                     source: TelemetrySource::ProcPolling.as_str().into(),
-                    status: "standby".into(),
-                    detail: "/proc process discovery fallback is not used while eBPF is active"
-                        .into(),
+                    status: "reconciliation".into(),
+                    detail: format!(
+                        "/proc process discovery runs as a periodic cold-start/backstop reconciliation (every {RECONCILIATION_POLL_STRIDE} collection cycles) while eBPF is active"
+                    ),
                 }
             } else {
                 TelemetrySourceDto {
@@ -267,8 +308,10 @@ impl TelemetryManager {
             if self.fanotify.is_some() {
                 TelemetrySourceDto {
                     source: TelemetrySource::FilesystemPolling.as_str().into(),
-                    status: "standby".into(),
-                    detail: "Polling fallback is not used while fanotify is active".into(),
+                    status: "reconciliation".into(),
+                    detail: format!(
+                        "Filesystem metadata polling runs as a periodic cold-start/backstop reconciliation (every {RECONCILIATION_POLL_STRIDE} collection cycles) while fanotify is active"
+                    ),
                 }
             } else {
                 TelemetrySourceDto {
@@ -458,6 +501,7 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                 id: ObjectId(format!("network:{endpoint_label}")),
                 kind: EntityKind::NetworkEndpoint,
                 label: endpoint_label,
+                content_hash: None,
             };
             Some(CollectedObservation {
                 source: TelemetrySource::Ebpf,
@@ -491,6 +535,7 @@ fn unresolved_process_descriptor(process_id: u32, comm: &[u8; 16]) -> ObjectDesc
         id: ObjectId(format!("process_identity:comm:{}", stable_hash(&label))),
         kind: EntityKind::Process,
         label,
+        content_hash: None,
     }
 }
 
@@ -616,16 +661,24 @@ impl ProcessInfo {
             id: ObjectId(self.id.clone()),
             kind: EntityKind::Process,
             label: self.label.clone(),
+            content_hash: None,
         }
     }
 
     fn executable_descriptor(&self) -> Option<ObjectDescriptor> {
         let executable = self.executable.as_ref()?;
         let label = executable.to_string_lossy().into_owned();
+        // `content_hash` stays `None` here deliberately: hashing the backing
+        // file synchronously on every `/proc` poll would race the same
+        // "process may have already exited" problem `read_process()` has
+        // for `dev`/`inode` (see ROADMAP.md item 3), just for a much larger
+        // read. The eBPF `(dev, inode)` capture is what's meant to feed a
+        // decoupled, cached-by-`(dev, inode)` async hasher instead.
         Some(ObjectDescriptor {
             id: ObjectId(format!("file:{label}")),
             kind: EntityKind::File,
             label,
+            content_hash: None,
         })
     }
 
@@ -635,6 +688,7 @@ impl ProcessInfo {
             id: ObjectId(format!("user:uid:{user_id}")),
             kind: EntityKind::User,
             label: format!("uid {user_id}"),
+            content_hash: None,
         })
     }
 }
@@ -1195,9 +1249,17 @@ impl FanotifyCollector {
             let bytes = bytes as usize;
             let mut offset = 0usize;
 
-            while offset + std::mem::size_of::<FanotifyEventMetadata>() <= bytes
-                && observations.len() < MAX_EVENTS_PER_COLLECTION
-            {
+            // Deliberately NOT gated on `observations.len() < MAX_EVENTS_PER_COLLECTION`:
+            // every record parsed out of this buffer owns a kernel-allocated fd (fanotify
+            // hands one out per event at read() time, not at close() time), and it MUST be
+            // closed here regardless of whether the observation cap has already been hit.
+            // Exiting this loop early while records with un-closed fds still remain in the
+            // buffer leaks every one of them permanently — this is the exact cause of the
+            // "too many open files" crash under heavy activity bursts: a 64KB read() can
+            // return 2,700+ raw records, the observation cap (4096) can be reached mid-way
+            // through a later buffer once several reads have accumulated, and every record
+            // after that point used to be abandoned here with its fd never closed.
+            while offset + std::mem::size_of::<FanotifyEventMetadata>() <= bytes {
                 // SAFETY: bounds above guarantee enough bytes; read_unaligned handles buffer alignment.
                 let metadata = unsafe {
                     std::ptr::read_unaligned(
@@ -1216,13 +1278,20 @@ impl FanotifyCollector {
 
                 if metadata.fd >= 0 {
                     let event_fd = metadata.fd;
-                    if let Some(event) = fanotify_event(
-                        metadata,
-                        event_fd,
-                        &self.exclude_paths,
-                        self.self_pid,
-                        &mut self.file_touch_cache,
-                    ) {
+
+                    // Skip building an observation once the cap is hit — there's no point
+                    // doing the work just to discard it — but `fanotify_event()` never
+                    // closes `event_fd` itself on any path (see its own doc comment), so
+                    // closing below is unconditional and independent of this check.
+                    if observations.len() < MAX_EVENTS_PER_COLLECTION
+                        && let Some(event) = fanotify_event(
+                            metadata,
+                            event_fd,
+                            &self.exclude_paths,
+                            self.self_pid,
+                            &mut self.file_touch_cache,
+                        )
+                    {
                         let key = (
                             event.process_id,
                             event.event.clone(),
@@ -1238,7 +1307,8 @@ impl FanotifyCollector {
                         }
                     }
 
-                    // SAFETY: event_fd is transferred by fanotify metadata and must be closed.
+                    // SAFETY: event_fd is transferred by fanotify metadata and must be
+                    // closed, whether or not an observation was built from it above.
                     unsafe { libc::close(event_fd) };
                 }
 
@@ -1246,6 +1316,9 @@ impl FanotifyCollector {
             }
 
             if observations.len() >= MAX_EVENTS_PER_COLLECTION {
+                // Every fd in this buffer has already been closed by the loop above —
+                // this only stops re-reading for more, it never abandons unclosed fds
+                // the way the old cap-in-the-while-condition version did.
                 break;
             }
         }
@@ -1395,6 +1468,7 @@ fn file_observation(
             id: ObjectId(format!("file:{path}")),
             kind: EntityKind::File,
             label: path.into(),
+            content_hash: None,
         }),
         observed_at: now,
         expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
@@ -1455,6 +1529,7 @@ fn local_host() -> ObjectDescriptor {
         id: ObjectId("host:local".into()),
         kind: EntityKind::Host,
         label: "local host".into(),
+        content_hash: None,
     }
 }
 
@@ -1476,6 +1551,29 @@ fn stable_hash(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconciliation_poll_always_runs_when_its_event_driven_counterpart_is_absent() {
+        for tick in 0..(RECONCILIATION_POLL_STRIDE * 3) {
+            assert!(should_run_reconciliation_poll(tick, false));
+        }
+    }
+
+    #[test]
+    fn reconciliation_poll_runs_on_a_bounded_stride_when_its_counterpart_is_active() {
+        let mut runs = 0u64;
+        let ticks = RECONCILIATION_POLL_STRIDE * 5;
+        for tick in 0..ticks {
+            if should_run_reconciliation_poll(tick, true) {
+                runs += 1;
+            }
+        }
+        // Exactly one run per stride, never zero and never every tick - it's
+        // a backstop, not a duplicate of the event-driven stream.
+        assert_eq!(runs, ticks / RECONCILIATION_POLL_STRIDE);
+        assert!(runs > 0);
+        assert!(runs < ticks);
+    }
 
     #[test]
     fn process_stat_parser_can_read_current_process() {

@@ -71,6 +71,28 @@ pub struct ObjectDescriptor {
     pub id: ObjectId,
     pub kind: EntityKind,
     pub label: String,
+    /// `sha256:<hex>` (or bare `<hex>`) of the object's content, when a
+    /// collector was actually able to hash it. Purely additive: `id` and
+    /// `label` keep meaning exactly what they mean today, this just gives
+    /// `derive_correlation_keys()` a direct, unambiguous signal to key a
+    /// dedicated `sha256` correlation key off, instead of relying on `id`/
+    /// `label` happening to already look like a hash. `None` until a
+    /// collector populates it (see `ROADMAP.md`'s eBPF `(dev, inode)`
+    /// capture plan) - every existing construction site is unaffected.
+    pub content_hash: Option<String>,
+}
+
+impl ObjectDescriptor {
+    /// Convenience for the overwhelmingly common case: no known content
+    /// hash. Equivalent to filling `content_hash: None` at every call site.
+    pub fn new(id: ObjectId, kind: EntityKind, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            kind,
+            label: label.into(),
+            content_hash: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

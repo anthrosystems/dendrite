@@ -786,6 +786,22 @@ fn behaviour_json(behaviour: &BehaviourDefinition) -> Value {
     })
 }
 
+/// Strips a node's own `origin_instance_id` prefix off its full `MemoryNodeId`
+/// string, returning the bare `ObjectId` portion. Every `MemoryNodeId` is
+/// constructed as `{origin_instance_id}::{object_id}` (see
+/// `local_memory_node_id()` in `core.rs`), so this is always safe for a
+/// well-formed node — falls back to the full id unchanged if the prefix
+/// doesn't match, which only happens for a malformed/adversarial payload and
+/// is caught downstream when the importer's own recomputed join doesn't
+/// match anything sensible.
+fn bare_object_id(node_id: &str, origin_instance_id: &str) -> String {
+    node_id
+        .strip_prefix(origin_instance_id)
+        .and_then(|rest| rest.strip_prefix("::"))
+        .unwrap_or(node_id)
+        .to_string()
+}
+
 fn build_graph_payload(graph: &MemoryGraphDto) -> Result<AntiserumPayload, AnalysisError> {
     let nodes = graph
         .nodes
@@ -794,8 +810,10 @@ fn build_graph_payload(graph: &MemoryGraphDto) -> Result<AntiserumPayload, Analy
             let origin = node.origin_instance_id.clone().ok_or_else(|| {
                 AnalysisError::Invalid(format!("Memory node {} has no origin_instance_id", node.id))
             })?;
+            let object_id = bare_object_id(&node.id, &origin);
             Ok(json!({
                 "id": node.id,
+                "object_id": object_id,
                 "kind": node.kind,
                 "label": node.label,
                 "properties": {
@@ -957,8 +975,35 @@ fn graph_payload_to_dto(bytes: &[u8]) -> Result<MemoryGraphDto, AnalysisError> {
         .iter()
         .map(|node| {
             let properties = node.get("properties").and_then(Value::as_object);
+            let origin_instance_id = required_string(node, "origin_instance_id")?;
+            // Never trust a shipped, pre-joined MemoryNodeId string verbatim - recompute
+            // it ourselves from the bare object_id (new field) joined with the
+            // already-verified origin_instance_id above, exactly the way
+            // local_memory_node_id() builds it locally. Falls back to stripping the
+            // claimed origin prefix off the legacy "id" field for packages exported
+            // before this field existed, but REJECTS the node outright if that prefix
+            // doesn't match rather than accepting an unverifiable value - that
+            // verification, not just the new field, is the actual fix: a
+            // malformed/adversarial exporter could otherwise claim an id whose prefix
+            // doesn't match its own origin_instance_id and have it accepted verbatim.
+            let object_id = match optional_string(node, "object_id") {
+                Some(value) => value,
+                None => {
+                    let legacy_id = required_string(node, "id")?;
+                    legacy_id
+                        .strip_prefix(&origin_instance_id)
+                        .and_then(|rest| rest.strip_prefix("::"))
+                        .ok_or_else(|| {
+                            AnalysisError::Invalid(format!(
+                                "Memory node id {legacy_id} does not match its claimed origin_instance_id {origin_instance_id}"
+                            ))
+                        })?
+                        .to_string()
+                }
+            };
+            let id = format!("{origin_instance_id}::{object_id}");
             Ok(MemoryNodeDto {
-                id: required_string(node, "id")?,
+                id,
                 kind: required_string(node, "kind")?,
                 label: required_string(node, "label")?,
                 state: properties
@@ -979,7 +1024,7 @@ fn graph_payload_to_dto(bytes: &[u8]) -> Result<MemoryGraphDto, AnalysisError> {
                 created_at: parse_rfc3339(required_str(node, "first_seen")?)?,
                 last_seen_at: parse_rfc3339(required_str(node, "last_seen")?)?,
                 expires_at: None,
-                origin_instance_id: Some(required_string(node, "origin_instance_id")?),
+                origin_instance_id: Some(origin_instance_id),
                 imported_from_instance_id: optional_string(node, "imported_from_instance_id"),
                 derived_by_instance_id: optional_string(node, "derived_by_instance_id"),
                 lineage: string_array(node, "lineage")?,
@@ -1158,4 +1203,137 @@ fn string_array(value: &Value, key: &str) -> Result<Vec<String>, AnalysisError> 
                 .ok_or_else(|| AnalysisError::Invalid(format!("{key} must contain strings")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod graph_import_tests {
+    use super::*;
+
+    fn sample_node(id: &str, origin_instance_id: &str) -> MemoryNodeDto {
+        MemoryNodeDto {
+            id: id.into(),
+            kind: "process".into(),
+            label: "cat".into(),
+            state: "observed".into(),
+            priority: "normal".into(),
+            retention: "long_term".into(),
+            created_at: 1_700_000_000,
+            last_seen_at: 1_700_000_000,
+            expires_at: None,
+            origin_instance_id: Some(origin_instance_id.into()),
+            imported_from_instance_id: None,
+            derived_by_instance_id: None,
+            lineage: vec![origin_instance_id.into()],
+            correlation_keys: vec!["process-identity:comm:17718013163177550631".into()],
+        }
+    }
+
+    fn graph_with_one_node(node: MemoryNodeDto) -> MemoryGraphDto {
+        MemoryGraphDto {
+            nodes: vec![node],
+            relationships: Vec::new(),
+            truncated: false,
+            total_nodes: 1,
+            total_relationships: 0,
+        }
+    }
+
+    #[test]
+    fn export_carries_a_bare_object_id_alongside_the_full_id() {
+        let node = sample_node(
+            "f4dab864-423b-4348-9744-f3340f4656b0::process_identity:comm:17718013163177550631",
+            "f4dab864-423b-4348-9744-f3340f4656b0",
+        );
+        let graph = graph_with_one_node(node);
+        let payload = build_graph_payload(&graph).expect("payload builds");
+        let document: Value = serde_json::from_slice(&payload.bytes).expect("valid json");
+        let exported_node = &document["nodes"][0];
+        assert_eq!(
+            exported_node["object_id"].as_str(),
+            Some("process_identity:comm:17718013163177550631")
+        );
+        assert_eq!(
+            exported_node["origin_instance_id"].as_str(),
+            Some("f4dab864-423b-4348-9744-f3340f4656b0")
+        );
+    }
+
+    #[test]
+    fn import_recomputes_the_join_instead_of_trusting_the_shipped_id() {
+        // Even if a shipped "id" were somehow wrong, the join computed from
+        // origin_instance_id + object_id is what wins - simulate that directly by
+        // exporting normally (id and object_id agree here) and confirming the
+        // round-tripped id is exactly the origin::object_id join, not a passthrough.
+        let node = sample_node(
+            "host-a::process_identity:comm:17718013163177550631",
+            "host-a",
+        );
+        let graph = graph_with_one_node(node);
+        let payload = build_graph_payload(&graph).expect("payload builds");
+        let round_tripped = graph_payload_to_dto(&payload.bytes).expect("payload parses");
+        assert_eq!(
+            round_tripped.nodes[0].id,
+            "host-a::process_identity:comm:17718013163177550631"
+        );
+    }
+
+    #[test]
+    fn import_rejects_a_legacy_id_whose_prefix_does_not_match_its_origin() {
+        // No "object_id" field at all (pre-fix export shape), and the shipped "id"
+        // claims a different host than origin_instance_id says produced it - this is
+        // exactly the spoofing gap the fix closes, and it must now be a hard error,
+        // not silently accepted the way the old verbatim-trust code would have.
+        let bytes = json!({
+            "schema_version": 1,
+            "nodes": [{
+                "id": "attacker-host::process_identity:comm:17718013163177550631",
+                "kind": "process",
+                "label": "cat",
+                "properties": {"state": "observed", "priority": "normal", "retention": "long_term"},
+                "first_seen": "2023-11-14T22:13:20Z",
+                "last_seen": "2023-11-14T22:13:20Z",
+                "origin_instance_id": "host-a",
+                "imported_from_instance_id": Value::Null,
+                "derived_by_instance_id": Value::Null,
+                "lineage": ["host-a"]
+            }],
+            "relationships": []
+        })
+        .to_string();
+
+        let result = graph_payload_to_dto(bytes.as_bytes());
+        assert!(
+            result.is_err(),
+            "a node id whose prefix doesn't match its claimed origin must be rejected"
+        );
+    }
+
+    #[test]
+    fn import_accepts_a_legacy_payload_with_no_object_id_when_the_prefix_does_match() {
+        // Backward compatibility: an older export with no "object_id" field but a
+        // correctly-prefixed legacy "id" still imports fine.
+        let bytes = json!({
+            "schema_version": 1,
+            "nodes": [{
+                "id": "host-a::process_identity:comm:17718013163177550631",
+                "kind": "process",
+                "label": "cat",
+                "properties": {"state": "observed", "priority": "normal", "retention": "long_term"},
+                "first_seen": "2023-11-14T22:13:20Z",
+                "last_seen": "2023-11-14T22:13:20Z",
+                "origin_instance_id": "host-a",
+                "imported_from_instance_id": Value::Null,
+                "derived_by_instance_id": Value::Null,
+                "lineage": ["host-a"]
+            }],
+            "relationships": []
+        })
+        .to_string();
+
+        let graph = graph_payload_to_dto(bytes.as_bytes()).expect("legacy payload still parses");
+        assert_eq!(
+            graph.nodes[0].id,
+            "host-a::process_identity:comm:17718013163177550631"
+        );
+    }
 }

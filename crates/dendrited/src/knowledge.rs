@@ -627,6 +627,20 @@ fn derive_correlation_keys(object: &ObjectDescriptor) -> Vec<(String, String, u8
         }
     }
 
+    // Dedicated signal from `object.content_hash`, populated once a
+    // collector can actually hash a file (see `ObjectDescriptor::content_hash`
+    // and ROADMAP.md item 3) - independent of the id/label shape-sniffing
+    // above, which only ever notices a hash if one happened to already be
+    // sitting in `id`/`label` as a bare or `sha256:`-prefixed hex string.
+    // `.dedup()` below means this never double-counts a candidate the
+    // shape-sniffing loop above already caught.
+    if let Some(hash) = object.content_hash.as_deref() {
+        let hash = hash.strip_prefix("sha256:").unwrap_or(hash).trim();
+        if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            keys.push(("sha256".into(), hash.to_ascii_lowercase(), 100));
+        }
+    }
+
     let kind = format!("{:?}", object.kind).to_ascii_lowercase();
     let semantic = format!("{kind}|{}", label.to_ascii_lowercase());
     let mut hasher = Sha256::new();
@@ -840,6 +854,7 @@ mod tests {
             id: ObjectId("network:Example.COM:443".into()),
             kind: EntityKind::NetworkEndpoint,
             label: "Example.COM:443".into(),
+            content_hash: None,
         };
         service
             .record_object_correlations("host-a::network:1", &object, "host-a", 10)
@@ -862,6 +877,51 @@ mod tests {
             b.iter()
                 .any(|value| value == "network-endpoint:example.com:443")
         );
+    }
+
+    #[test]
+    fn content_hash_derives_a_dedicated_sha256_key_independent_of_id_and_label() {
+        let hash = "a".repeat(64);
+        let object = ObjectDescriptor {
+            id: ObjectId("file:/usr/bin/cat".into()),
+            kind: EntityKind::File,
+            label: "/usr/bin/cat".into(),
+            content_hash: Some(format!("sha256:{hash}")),
+        };
+
+        let keys = derive_correlation_keys(&object);
+
+        assert!(keys.contains(&("sha256".into(), hash.clone(), 100)));
+        // Purely additive: the existing file-path key still fires too.
+        assert!(keys.iter().any(|(key_type, _, _)| key_type == "file-path"));
+    }
+
+    #[test]
+    fn content_hash_is_ignored_when_malformed() {
+        let object = ObjectDescriptor {
+            id: ObjectId("file:/usr/bin/cat".into()),
+            kind: EntityKind::File,
+            label: "/usr/bin/cat".into(),
+            content_hash: Some("not-a-hash".into()),
+        };
+
+        let keys = derive_correlation_keys(&object);
+
+        assert!(!keys.iter().any(|(key_type, _, _)| key_type == "sha256"));
+    }
+
+    #[test]
+    fn absent_content_hash_never_produces_a_sha256_key_by_itself() {
+        let object = ObjectDescriptor {
+            id: ObjectId("file:/usr/bin/cat".into()),
+            kind: EntityKind::File,
+            label: "/usr/bin/cat".into(),
+            content_hash: None,
+        };
+
+        let keys = derive_correlation_keys(&object);
+
+        assert!(!keys.iter().any(|(key_type, _, _)| key_type == "sha256"));
     }
 
     #[test]

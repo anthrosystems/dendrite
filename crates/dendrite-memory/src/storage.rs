@@ -1978,6 +1978,20 @@ impl MemoryStore {
         self.reader().load_relationship(id)
     }
 
+    /// Exposed alongside `relationships_for`/`load_relationship` so callers
+    /// outside this module (the daemon's expiry pass, batched ingestion) can
+    /// make the same consolidate-onto-an-existing-edge decision
+    /// `observe_relationship` and `persist_relationship_batched` already
+    /// make, without reaching into a private `GraphReader`.
+    pub fn find_relationship_id(
+        &self,
+        kind: MemoryRelationshipKind,
+        source: &MemoryNodeId,
+        target: &MemoryNodeId,
+    ) -> Result<Option<MemoryRelationshipId>, StorageError> {
+        self.reader().find_relationship_id(kind, source, target)
+    }
+
     pub fn relationships_from(
         &self,
         node_id: &MemoryNodeId,

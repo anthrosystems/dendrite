@@ -1450,6 +1450,7 @@ impl DaemonCore {
 
     pub fn expire_memory(&self, now: u64) -> Result<(), DaemonError> {
         preserve_short_term_connectors(&self.memory, now)?;
+        collapse_expiring_connectors(&self.memory, &self.instance_id, now)?;
         self.memory.mark_expired(now)?;
         Ok(())
     }
@@ -1642,11 +1643,13 @@ impl DaemonCore {
             )),
             kind: EntityKind::Service,
             label: format!("{} {}", exposure.package, exposure.installed_version),
+            content_hash: None,
         };
         let cve = ObjectDescriptor {
             id: ObjectId(format!("cve:{}", exposure.cve_id.to_ascii_lowercase())),
             kind: EntityKind::Threat,
             label: exposure.cve_id.clone(),
+            content_hash: None,
         };
         let observation = Observation {
             id: dendrite_protocol::ObservationId(format!("vulnerability:{}:{}", exposure.id, now)),
@@ -2261,16 +2264,19 @@ impl DaemonCore {
             id: ObjectId(format!("debug:endpoint:{suffix}")),
             kind: EntityKind::NetworkEndpoint,
             label: format!("{label} endpoint"),
+            content_hash: None,
         };
         let threat = ObjectDescriptor {
             id: ObjectId(format!("debug:threat:{suffix}")),
             kind: EntityKind::Threat,
             label: format!("{label} threat"),
+            content_hash: None,
         };
         let process = ObjectDescriptor {
             id: ObjectId(format!("debug:process:{suffix}")),
             kind: EntityKind::Process,
             label: format!("{label} process"),
+            content_hash: None,
         };
 
         let threat_seed = Observation {
@@ -2421,6 +2427,121 @@ fn preserve_short_term_connectors(memory: &MemoryStore, now: u64) -> Result<(), 
             memory.save_node(&node)?;
         }
     }
+    Ok(())
+}
+
+/// When a short-term "connector" node is genuinely about to expire (i.e. it
+/// was not reprieved by `preserve_short_term_connectors`, which must run
+/// before this) and its only path between two other nodes ran through it,
+/// this synthesizes a direct `MemoryRelationshipKind::Inferred` edge between
+/// those two nodes so the association survives the connector's own expiry -
+/// e.g. A(LTM) --Spawned--> B(STM) --Wrote--> C(LTM): once B expires, A and C
+/// otherwise lose their only path to each other.
+///
+/// Deliberately narrow, to keep the produced graph legible and avoid
+/// synthesizing speculative associations:
+/// - Only STM nodes - the connector-node case this exists to solve.
+/// - Only when the connector has *exactly* two distinct active-relationship
+///   neighbours. A node with a fan-out of >2 (a shared library touched by
+///   many processes, say) is not collapsed - that would manufacture a
+///   choose-2 edge set out of a hub, which is not "this bridge disappeared,"
+///   it is "everything here touched everything else," a much noisier and
+///   less trustworthy claim than the two-neighbour case actually supports.
+/// - Only when neither neighbour is itself expiring in the same tick - never
+///   bridge through a second node that will not be there either.
+/// - Only when no relationship already connects the pair directly (in either
+///   direction, `Inferred` or otherwise) - this never overwrites or
+///   duplicates a real observed edge, and re-running this on an
+///   already-collapsed pair is a no-op.
+fn collapse_expiring_connectors(
+    memory: &MemoryStore,
+    instance_id: &str,
+    now: u64,
+) -> Result<(), StorageError> {
+    let expiring = memory.expired_nodes(now)?;
+    let expiring_ids: std::collections::HashSet<&MemoryNodeId> =
+        expiring.iter().map(|node| &node.id).collect();
+
+    for node in &expiring {
+        if node.retention != RetentionClass::ShortTerm {
+            continue;
+        }
+
+        let active: Vec<MemoryRelationship> = memory
+            .relationships_for(&node.id)?
+            .into_iter()
+            .filter(|relationship| relationship.state.is_active_for_reasoning())
+            .collect();
+
+        let mut neighbours: Vec<MemoryNodeId> = Vec::new();
+        for relationship in &active {
+            let other = if relationship.source == node.id {
+                relationship.target.clone()
+            } else if relationship.target == node.id {
+                relationship.source.clone()
+            } else {
+                continue;
+            };
+            if !neighbours.contains(&other) {
+                neighbours.push(other);
+            }
+        }
+
+        let (a, b) = match neighbours.as_slice() {
+            [a, b] => (a.clone(), b.clone()),
+            _ => continue,
+        };
+
+        if expiring_ids.contains(&a) || expiring_ids.contains(&b) {
+            continue;
+        }
+
+        let already_connected = memory
+            .relationships_for(&a)?
+            .into_iter()
+            .any(|relationship| relationship.source == b || relationship.target == b);
+        if already_connected {
+            continue;
+        }
+
+        // A conservative confidence: the weaker of the two bridged edges,
+        // discounted, since this is a synthesized claim rather than
+        // something anyone actually observed.
+        let bridged_confidence = active
+            .iter()
+            .map(|relationship| relationship.confidence.value())
+            .min()
+            .unwrap_or(0);
+        let synthesized = bridged_confidence.saturating_mul(80) / 100;
+
+        let mut provenance = MemoryProvenance::local(instance_id.to_owned());
+        provenance.derived_by_instance_id = Some(instance_id.to_owned());
+
+        let relationship = MemoryRelationship {
+            id: MemoryRelationshipId(format!("{instance_id}::inferred:{}->{}", a.0, b.0)),
+            kind: MemoryRelationshipKind::Inferred,
+            source: a,
+            target: b,
+            created_at: now,
+            last_seen_at: now,
+            observation_count: 1,
+            expires_at: None,
+            state: MemoryState::Observed,
+            priority: MemoryPriority::Low,
+            retention: RetentionClass::LongTerm,
+            decay_policy: DecayPolicy::None,
+            strength: MemoryStrength::new(synthesized)
+                .expect("synthesized is derived from a 0..=100 confidence value"),
+            confidence: MemoryConfidence::new(synthesized)
+                .expect("synthesized is derived from a 0..=100 confidence value"),
+            reinforcement: None,
+            provenance,
+        };
+        memory
+            .save_relationship(&relationship)
+            .map_err(StorageError::Database)?;
+    }
+
     Ok(())
 }
 
@@ -2939,6 +3060,7 @@ mod tests {
             id: ObjectId(id.into()),
             kind,
             label: id.into(),
+            content_hash: None,
         }
     }
 
@@ -3418,11 +3540,13 @@ mod tests {
             id: ObjectId("process:123:1".into()),
             kind: EntityKind::Process,
             label: "git".into(),
+            content_hash: None,
         };
         let target = ObjectDescriptor {
             id: ObjectId("file:/usr/bin/git".into()),
             kind: EntityKind::File,
             label: "/usr/bin/git".into(),
+            content_hash: None,
         };
         let observation = Observation {
             id: ObservationId("exec-1".into()),
@@ -3452,6 +3576,7 @@ mod tests {
             id: ObjectId("process_identity:comm:123".into()),
             kind: EntityKind::Process,
             label: "git".into(),
+            content_hash: None,
         };
         assert_eq!(
             map_retention(&unresolved_identity, &observation, false),
@@ -3519,5 +3644,254 @@ mod tests {
         assert_eq!(instance.state, MemoryState::Supported);
         assert_eq!(identity.retention, RetentionClass::LongTerm);
         assert_ne!(identity.state, MemoryState::Supported);
+    }
+
+    fn connector_test_node(
+        id: &str,
+        retention: RetentionClass,
+        expires_at: Option<u64>,
+    ) -> MemoryNode {
+        MemoryNode {
+            id: MemoryNodeId(id.into()),
+            kind: MemoryNodeKind::Process,
+            label: id.into(),
+            created_at: 0,
+            last_seen_at: 0,
+            expires_at,
+            state: MemoryState::Observed,
+            priority: MemoryPriority::Normal,
+            retention,
+            decay_policy: DecayPolicy::None,
+            provenance: MemoryProvenance::local("test-instance"),
+        }
+    }
+
+    fn connector_test_relationship(
+        id: &str,
+        kind: MemoryRelationshipKind,
+        source: &str,
+        target: &str,
+    ) -> MemoryRelationship {
+        MemoryRelationship {
+            id: MemoryRelationshipId(id.into()),
+            kind,
+            source: MemoryNodeId(source.into()),
+            target: MemoryNodeId(target.into()),
+            created_at: 0,
+            last_seen_at: 0,
+            observation_count: 1,
+            expires_at: None,
+            state: MemoryState::Observed,
+            priority: MemoryPriority::Normal,
+            retention: RetentionClass::LongTerm,
+            decay_policy: DecayPolicy::None,
+            strength: MemoryStrength::new(80).unwrap(),
+            confidence: MemoryConfidence::new(80).unwrap(),
+            reinforcement: None,
+            provenance: MemoryProvenance::local("test-instance"),
+        }
+    }
+
+    /// Any relationship directly connecting `a` and `b`, in either
+    /// direction, regardless of kind - the same check
+    /// `collapse_expiring_connectors` itself uses to avoid duplicating or
+    /// shadowing a real edge.
+    fn direct_relationship(store: &MemoryStore, a: &str, b: &str) -> Option<MemoryRelationship> {
+        store
+            .relationships_for(&MemoryNodeId(a.into()))
+            .unwrap()
+            .into_iter()
+            .find(|relationship| relationship.source.0 == b || relationship.target.0 == b)
+    }
+
+    #[test]
+    fn collapse_expiring_connectors_bridges_a_two_neighbour_connector() {
+        let store = MemoryStore::open(":memory:").unwrap();
+        store.initialise().unwrap();
+
+        store
+            .save_node(&connector_test_node("a", RetentionClass::LongTerm, None))
+            .unwrap();
+        store
+            .save_node(&connector_test_node(
+                "b",
+                RetentionClass::ShortTerm,
+                Some(100),
+            ))
+            .unwrap();
+        store
+            .save_node(&connector_test_node("c", RetentionClass::LongTerm, None))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r1",
+                MemoryRelationshipKind::Spawned,
+                "a",
+                "b",
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r2",
+                MemoryRelationshipKind::Wrote,
+                "b",
+                "c",
+            ))
+            .unwrap();
+
+        collapse_expiring_connectors(&store, "test-instance", 200).unwrap();
+
+        let bridged = direct_relationship(&store, "a", "c")
+            .expect("a and c should be bridged once b expires");
+        assert_eq!(bridged.kind, MemoryRelationshipKind::Inferred);
+        assert_eq!(
+            bridged.provenance.derived_by_instance_id.as_deref(),
+            Some("test-instance")
+        );
+    }
+
+    #[test]
+    fn collapse_expiring_connectors_skips_a_connector_with_more_than_two_neighbours() {
+        let store = MemoryStore::open(":memory:").unwrap();
+        store.initialise().unwrap();
+
+        for id in ["a", "c", "d"] {
+            store
+                .save_node(&connector_test_node(id, RetentionClass::LongTerm, None))
+                .unwrap();
+        }
+        store
+            .save_node(&connector_test_node(
+                "b",
+                RetentionClass::ShortTerm,
+                Some(100),
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r1",
+                MemoryRelationshipKind::Spawned,
+                "a",
+                "b",
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r2",
+                MemoryRelationshipKind::Wrote,
+                "b",
+                "c",
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r3",
+                MemoryRelationshipKind::ConnectedTo,
+                "b",
+                "d",
+            ))
+            .unwrap();
+
+        collapse_expiring_connectors(&store, "test-instance", 200).unwrap();
+
+        assert!(direct_relationship(&store, "a", "c").is_none());
+        assert!(direct_relationship(&store, "a", "d").is_none());
+        assert!(direct_relationship(&store, "c", "d").is_none());
+    }
+
+    #[test]
+    fn collapse_expiring_connectors_skips_when_a_neighbour_is_also_expiring() {
+        let store = MemoryStore::open(":memory:").unwrap();
+        store.initialise().unwrap();
+
+        store
+            .save_node(&connector_test_node("a", RetentionClass::LongTerm, None))
+            .unwrap();
+        store
+            .save_node(&connector_test_node(
+                "b",
+                RetentionClass::ShortTerm,
+                Some(100),
+            ))
+            .unwrap();
+        // c is also a short-term connector expiring in this same tick.
+        store
+            .save_node(&connector_test_node(
+                "c",
+                RetentionClass::ShortTerm,
+                Some(100),
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r1",
+                MemoryRelationshipKind::Spawned,
+                "a",
+                "b",
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r2",
+                MemoryRelationshipKind::Wrote,
+                "b",
+                "c",
+            ))
+            .unwrap();
+
+        collapse_expiring_connectors(&store, "test-instance", 200).unwrap();
+
+        assert!(direct_relationship(&store, "a", "c").is_none());
+    }
+
+    #[test]
+    fn collapse_expiring_connectors_does_not_duplicate_an_existing_direct_relationship() {
+        let store = MemoryStore::open(":memory:").unwrap();
+        store.initialise().unwrap();
+
+        store
+            .save_node(&connector_test_node("a", RetentionClass::LongTerm, None))
+            .unwrap();
+        store
+            .save_node(&connector_test_node(
+                "b",
+                RetentionClass::ShortTerm,
+                Some(100),
+            ))
+            .unwrap();
+        store
+            .save_node(&connector_test_node("c", RetentionClass::LongTerm, None))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r1",
+                MemoryRelationshipKind::Spawned,
+                "a",
+                "b",
+            ))
+            .unwrap();
+        store
+            .save_relationship(&connector_test_relationship(
+                "r2",
+                MemoryRelationshipKind::Wrote,
+                "b",
+                "c",
+            ))
+            .unwrap();
+        // a and c are already directly (and genuinely) related.
+        store
+            .save_relationship(&connector_test_relationship(
+                "r3-real",
+                MemoryRelationshipKind::AssociatedWith,
+                "a",
+                "c",
+            ))
+            .unwrap();
+
+        collapse_expiring_connectors(&store, "test-instance", 200).unwrap();
+
+        let direct = direct_relationship(&store, "a", "c").unwrap();
+        assert_eq!(direct.kind, MemoryRelationshipKind::AssociatedWith);
+        assert_eq!(direct.id.0, "r3-real");
     }
 }

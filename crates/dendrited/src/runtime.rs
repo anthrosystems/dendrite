@@ -1002,11 +1002,13 @@ impl DaemonRuntime {
                         id: ObjectId(format!("debug:process:{suffix}")),
                         kind: EntityKind::Process,
                         label: format!("{label} process"),
+                        content_hash: None,
                     };
                     let target = ObjectDescriptor {
                         id: ObjectId(format!("debug:threat:{suffix}")),
                         kind: EntityKind::Threat,
                         label: format!("{label} threat"),
+                        content_hash: None,
                     };
                     let observation = Observation {
                         id: ObservationId(format!("debug:priority-inject:{suffix}")),

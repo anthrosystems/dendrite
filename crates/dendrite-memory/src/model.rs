@@ -115,6 +115,13 @@ pub enum MemoryRelationshipKind {
     ConnectedTo,
     BelongsTo,
     AssociatedWith,
+    /// Not directly observed. Synthesized by the daemon itself to bridge two
+    /// nodes whose only path to each other was a short-term "connector" node
+    /// that has since expired (see `core.rs::collapse_expiring_connectors`).
+    /// Every other variant maps 1:1 from an `ObservationKind` via
+    /// `map_relationship_kind` - this is the one exception, and is never
+    /// produced by that mapping.
+    Inferred,
 }
 
 impl MemoryRelationshipKind {
@@ -127,6 +134,7 @@ impl MemoryRelationshipKind {
             Self::ConnectedTo => "connected_to",
             Self::BelongsTo => "belongs_to",
             Self::AssociatedWith => "associated_with",
+            Self::Inferred => "inferred",
         }
     }
 }
@@ -143,6 +151,7 @@ impl FromStr for MemoryRelationshipKind {
             "connected_to" => Ok(Self::ConnectedTo),
             "belongs_to" => Ok(Self::BelongsTo),
             "associated_with" => Ok(Self::AssociatedWith),
+            "inferred" => Ok(Self::Inferred),
             _ => Err(()),
         }
     }
