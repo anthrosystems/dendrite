@@ -465,9 +465,24 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                         });
                     }
 
+                    // The `None` arm still gets a `target` - deliberately
+                    // *not* `None` - so this observation's `confidence: 90`
+                    // survives into something queryable. `persist_relationship`
+                    // (core.rs) drops any observation whose `target` is
+                    // `None` entirely: no relationship is ever created for
+                    // it, and `MemoryNode` has no `confidence` field of its
+                    // own for the node-only path to fall back on either. A
+                    // self-loop (`instance` as both source and target) is
+                    // the cheapest way to give this a durable home without
+                    // a schema change; `ObservationKind::Associated` (->
+                    // `MemoryRelationshipKind::AssociatedWith`) is used
+                    // instead of `ProcessStarted`/`FileExecuted` so this
+                    // doesn't read as "process spawned/executed itself" -
+                    // it's a resolution-confidence marker, not a real
+                    // spawn or exec edge.
                     let (kind, target, confidence) = match process.executable_descriptor() {
                         Some(executable) => (ObservationKind::FileExecuted, Some(executable), 100),
-                        None => (ObservationKind::ProcessStarted, None, 90),
+                        None => (ObservationKind::Associated, Some(instance.clone()), 90),
                     };
                     (
                         Observation {
@@ -490,7 +505,13 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                 None => (
                     Observation {
                         id: ObservationId(format!("ebpf-exec:{process_id}:{}", event.timestamp_ns)),
-                        kind: ObservationKind::ProcessStarted,
+                        // `Associated`, not `ProcessStarted` - see the comment
+                        // on the other `target: Some(instance.clone())` self-loop
+                        // above. Without a real target to confirm, this is a
+                        // resolution-confidence marker on `source` itself,
+                        // not a real spawn edge, and a `ProcessStarted` self-loop
+                        // would misleadingly read as "process spawned by itself".
+                        kind: ObservationKind::Associated,
                         // 90 when `source` is the resolved (`process:{pid}:{start_ticks}`)
                         // identity the kernel-side capture beat the exit race
                         // for - still short of the 100 the `Some(process)`
@@ -500,8 +521,8 @@ fn ebpf_observation(event: EbpfEvent, self_pid: u32) -> Option<CollectedObservat
                         // fell all the way back to the comm-only identity.
                         confidence: Confidence::new(if event.start_ticks > 0 { 90 } else { 80 })
                             .expect("70..=100 is valid confidence"),
+                        target: Some(source.clone()),
                         source,
-                        target: None,
                         observed_at: now,
                         expires_at: Some(now.saturating_add(DEFAULT_OBSERVATION_TTL_SECONDS)),
                         severity: Severity::Low,
@@ -1817,6 +1838,62 @@ mod tests {
             collected.observation.source.id.0,
             format!("process:{bogus_pid}:999")
         );
+    }
+
+    #[test]
+    fn ebpf_observation_self_loops_when_unresolved_so_confidence_is_not_silently_dropped() {
+        // `persist_relationship` (core.rs) drops any observation whose
+        // `target` is `None` entirely - no relationship, and `MemoryNode`
+        // has no `confidence` field either, so a `None` target here would
+        // make this observation's `confidence: 90` unreachable by any
+        // query. `target` must equal `source` (the self-loop) and `kind`
+        // must be `Associated`, not `ProcessStarted` (which would map to
+        // `MemoryRelationshipKind::Spawned` and misleadingly read as
+        // "process spawned by itself").
+        let bogus_pid = u32::MAX - 19;
+        let mut comm = [0u8; 16];
+        comm[..2].copy_from_slice(b"sh");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.pid = bogus_pid;
+        event.tgid = bogus_pid;
+        event.comm = comm;
+        event.start_ticks = 999;
+
+        let collected =
+            ebpf_observation(event, 0).expect("EVENT_PROCESS_EXEC always yields an observation");
+
+        assert_eq!(collected.observation.kind, ObservationKind::Associated);
+        let target =
+            collected.observation.target.as_ref().expect(
+                "target must be Some so persist_relationship doesn't drop this observation",
+            );
+        assert_eq!(target.id.0, collected.observation.source.id.0);
+        assert_eq!(collected.observation.confidence.value(), 90);
+    }
+
+    #[test]
+    fn ebpf_observation_self_loop_confidence_is_80_when_kernel_capture_also_failed() {
+        // Same self-loop, but start_ticks == 0 (no kernel-side capture
+        // either) - the lower-confidence twin of the test above.
+        let bogus_pid = u32::MAX - 20;
+        let mut comm = [0u8; 16];
+        comm[..2].copy_from_slice(b"sh");
+        let mut event = EbpfEvent::zeroed(EVENT_PROCESS_EXEC);
+        event.pid = bogus_pid;
+        event.tgid = bogus_pid;
+        event.comm = comm;
+        // start_ticks left at 0 deliberately.
+
+        let collected =
+            ebpf_observation(event, 0).expect("EVENT_PROCESS_EXEC always yields an observation");
+
+        assert_eq!(collected.observation.kind, ObservationKind::Associated);
+        let target =
+            collected.observation.target.as_ref().expect(
+                "target must be Some so persist_relationship doesn't drop this observation",
+            );
+        assert_eq!(target.id.0, collected.observation.source.id.0);
+        assert_eq!(collected.observation.confidence.value(), 80);
     }
 
     #[test]
